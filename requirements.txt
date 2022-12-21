@@ -1,6 +1,7 @@
+#Testing on  nvcr.io_nvidia_pytorch_21.04-py3 as base -	Python 3.8.8, Torch 1.9.0a0+2ecb2c7, CUDAToolkit 11.3  
 numpy
-llvmlite
-numba
+llvmlite>=0.36.0rc1,<0.37
+numba==0.53.0
 torch>=1.1
 tensorboardX
 easydict
@@ -8,4 +9,5 @@ pyyaml
 scikit-image
 tqdm
 torchvision
-SharedArray
+SharedArray==3.1.0
+#spconv-cu113

@@ -210,7 +210,19 @@ def main():
 
     logger.info('**********************Start evaluation %s/%s(%s)**********************' %
                 (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
-    test_set, test_loader, sampler = build_dataloader(
+    
+    if args.eval_fov_only:   ## Jihan -> commit 302588ea25d9b12a4cb291e97d7e3f05d26a6eba : 'try to add st3d++'
+        cfg.DATA_CONFIG_TAR.FOV_POINTS_ONLY = True            
+    
+    if cfg.get('DATA_CONFIG_TAR', None) and not args.eval_src:
+        test_set, test_loader, sampler = build_dataloader(
+            dataset_cfg=cfg.DATA_CONFIG_TAR,
+            class_names=cfg.DATA_CONFIG_TAR.CLASS_NAMES,
+            batch_size=args.batch_size,
+            dist=dist_train, workers=args.workers, logger=logger, training=False
+        )
+    else:
+        test_set, test_loader, sampler = build_dataloader(
         dataset_cfg=cfg.DATA_CONFIG,
         class_names=cfg.CLASS_NAMES,
         batch_size=args.batch_size,
