@@ -332,8 +332,9 @@ class Detector3DTemplate(nn.Module):
         state_dict = self.state_dict()  # local cache of state_dict
 
         spconv_keys = find_all_spconv_keys(self)
-
+        
         update_model_state = {}
+        spconv_matched_state = {}
         for key, val in model_state_disk.items():
             if key in spconv_keys and key in state_dict and state_dict[key].shape != val.shape:
                 # with different spconv versions, we need to adapt weight shapes for spconv blocks
@@ -347,12 +348,13 @@ class Detector3DTemplate(nn.Module):
                     val_implicit = val.permute(4, 0, 1, 2, 3)  # (k1, k2, k3, c_in, c_out) to (c_out, k1, k2, k3, c_in)
                     if val_implicit.shape == state_dict[key].shape:
                         val = val_implicit.contiguous()
-
+            spconv_matched_state[key] = val # Jihan :  9c63a6a268a6e05db09b01722deacda4ce3af8d4 :'compatible for different spconv versions'
             if key in state_dict and state_dict[key].shape == val.shape:
                 update_model_state[key] = val
                 # logger.info('Update weight %s: %s' % (key, str(val.shape)))
-
-        if strict:
+        if cfg.get('SELF_TRAIN', None) and cfg.SELF_TRAIN.get('DSNORM', None):
+            self.load_state_dict(spconv_matched_state) # Jihan :  9c63a6a268a6e05db09b01722deacda4ce3af8d4 :'compatible for different spconv versions'
+        elif strict:
             self.load_state_dict(update_model_state)
         else:
             state_dict.update(update_model_state)
@@ -373,11 +375,10 @@ class Detector3DTemplate(nn.Module):
             logger.info('==> Checkpoint trained from version: %s' % version)
 
         # TODO(farzad) make sure that this is the right merging solution from openpcdet master to st3d branch
-        strict = False
         if cfg.get('SELF_TRAIN', None) and cfg.SELF_TRAIN.get('DSNORM', None):
-            strict = True
-
-        state_dict, update_model_state = self._load_state_dict(model_state_disk, strict=strict)
+            state_dict, update_model_state = self._load_state_dict(model_state_disk, strict=True)
+        else:
+            state_dict, update_model_state = self._load_state_dict(model_state_disk, strict=False)
 
 
         for key in state_dict:
