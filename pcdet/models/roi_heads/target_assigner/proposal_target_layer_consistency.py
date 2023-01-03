@@ -6,6 +6,7 @@ from ....ops.iou3d_nms import iou3d_nms_utils
 
 
 class ProposalTargetLayerConsistency(nn.Module):
+    ''' Consistency takes all proposals from Teacher and passes to Student, no need to map proposals here unlike Soft Teacher'''
     def __init__(self, roi_sampler_cfg):
         super().__init__()
         self.roi_sampler_cfg = roi_sampler_cfg
@@ -55,7 +56,7 @@ class ProposalTargetLayerConsistency(nn.Module):
         batch_size = batch_dict['batch_size']
         rois = batch_dict['rois']
         code_size = rois.shape[-1]
-        batch_rois = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE, code_size)
+        batch_rois = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE, code_size) # [2, 128, 7]
         batch_roi_scores = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE)
         batch_roi_labels = rois.new_zeros((batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE), dtype=torch.long)
         batch_gt_of_rois = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE, code_size + 1)
