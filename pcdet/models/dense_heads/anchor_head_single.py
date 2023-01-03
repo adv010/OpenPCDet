@@ -59,7 +59,7 @@ class AnchorHeadSingle(AnchorHeadTemplate):
         else:
             dir_cls_preds = None
 
-        if (self.training or self.print_loss_when_eval) and not disable_gt_roi_when_pseudo_labeling:
+        if (self.training or self.print_loss_when_eval) and not disable_gt_roi_when_pseudo_labeling: # disable_gt_roi_when_pseudo_labeling - True when soft_teacher
             targets_dict = self.assign_targets(
                 gt_boxes=data_dict['gt_boxes']
             )

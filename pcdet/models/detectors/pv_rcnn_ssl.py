@@ -184,7 +184,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                         # Do not use RPN to produce rois for WA image, instead augment (eg. flip)
                         # the proposal coord. of P horizontally to obtain P^
                         try:
-                            batch_dict_ema = cur_module(batch_dict_ema, disable_gt_roi_when_pseudo_labeling=True)
+                            batch_dict_ema = cur_module(batch_dict_ema, disable_gt_roi_when_pseudo_labeling=True) #disable_gt_roi.. flag is used while in training stage, unlabeled images do not have a GT. We have to use PLs from trained model as Test
                             if cur_module.model_cfg['NAME'] == 'AnchorHeadSingle':
                                 # Use proposals generated from original (non-augmented) input
                                 # to pool features generated from weakly-augmented input
@@ -223,9 +223,9 @@ class PVRCNN_SSL(Detector3DTemplate):
                             batch_dict_ema = cur_module(batch_dict_ema)
                 pred_dicts_ens, recall_dicts_ema = self.pv_rcnn_ema.post_processing(batch_dict_ema, no_recall_dict=True,
                                                                                     override_thresh=0.0,
-                                                                                    no_nms_for_unlabeled=self.no_nms)
+                                                                                    no_nms_for_unlabeled=self.no_nms) # pred_dicts_ens.keys() -> ['pred_boxes', 'pred_scores', 'pred_labels', 'pred_sem_scores'])
 
-            # Used for calc stats before and after filtering
+            # Used for calc stats before and after filtering 
             ori_unlabeled_boxes = batch_dict['gt_boxes'][unlabeled_inds, ...]
 
             ''' 
@@ -259,7 +259,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             self._fill_with_pseudo_labels(batch_dict, pseudo_boxes, unlabeled_inds, labeled_inds)
 
             # apply student's augs on teacher's pseudo-labels (filtered) only (not points)
-            batch_dict = self.apply_augmentation(batch_dict, batch_dict, unlabeled_inds, key='gt_boxes')
+            batch_dict = self.apply_augmentation(batch_dict, batch_dict, unlabeled_inds, key='gt_boxes') #Augmenting only on unlabeled samples
 
             # if self.model_cfg.ROI_HEAD.get('ENABLE_VIS', False):
             #     for i, uind in enumerate(unlabeled_inds):
@@ -284,13 +284,13 @@ class PVRCNN_SSL(Detector3DTemplate):
             batch_dict['ori_unlabeled_boxes'] = ori_unlabeled_boxes
             for cur_module in self.pv_rcnn.module_list:
                 if cur_module.model_cfg['NAME'] == 'PVRCNNHead' and self.model_cfg['ROI_HEAD'].get('ENABLE_RCNN_CONSISTENCY', False):
-                    # Pass teacher's proposal to the student.
+                    # Pass teacher's proposal to the student i.e. copying rois_ema from batch_dict_ema( -> Teacher) to batch_dict( ->Student)
                     # To let proposal_layer continues for labeled data we pass rois with _ema postfix
                     batch_dict['rois_ema'] = batch_dict_ema['rois'].detach().clone()
                     # TODO(farzad) the normalization is done lazily, to be consistent with the other unnormalized roi_scores.
                     batch_dict['roi_scores_ema'] = batch_dict_ema['roi_scores'].detach().clone()
-                    batch_dict['roi_labels_ema'] = batch_dict_ema['roi_labels'].detach().clone()
-                    batch_dict = self.apply_augmentation(batch_dict, batch_dict, unlabeled_inds, key='rois_ema')
+                    batch_dict['roi_labels_ema'] = batch_dict_ema['roi_labels'].detach().clone() 
+                    batch_dict = self.apply_augmentation(batch_dict, batch_dict, unlabeled_inds, key='rois_ema')  #Create new copy of batch_dict for student. Augment proposals from teacher before passing to student
                     if self.model_cfg['ROI_HEAD'].get('ENABLE_RELIABILITY', False):
                         # pseudo-labels used for training roi head
                         pred_dicts = self.ensemble_post_processing(batch_dict_ema, batch_dict_ema_wa, unlabeled_inds,
@@ -324,10 +324,10 @@ class PVRCNN_SSL(Detector3DTemplate):
                     #         V.vis(point, gt_boxes=ori_unlabeled_boxes[i][:, :-1], pred_boxes=pred_boxes,
                     #             pred_scores=pred_scores, pred_labels=pred_labels)
 
-                batch_dict = cur_module(batch_dict)
+                batch_dict = cur_module(batch_dict) #Student
 
             # For metrics calculation
-            self.pv_rcnn.roi_head.forward_ret_dict['unlabeled_inds'] = unlabeled_inds
+            self.pv_rcnn.roi_head.forward_ret_dict['unlabeled_inds'] = unlabeled_inds # self.pv_rcnn.roi_head.forward_ret_dict.keys() : dict_keys(['rois', 'gt_of_rois', 'gt_iou_of_rois', 'roi_scores', 'roi_labels', 'reg_valid_mask', 'rcnn_cls_labels', 'interval_mask', 'points', 'gt_of_rois_src', 'unlabeled_inds', 'ori_unlabeled_boxes', 'metric_registry', 'batch_box_preds', 'rcnn_cls', 'rcnn_reg', 'pl_boxes'])
             self.pv_rcnn.roi_head.forward_ret_dict['pl_boxes'] = batch_dict['gt_boxes']
             self.pv_rcnn.roi_head.forward_ret_dict['pl_scores'] = pseudo_scores
 
@@ -345,13 +345,12 @@ class PVRCNN_SSL(Detector3DTemplate):
                     batch_dict_std['point_coords'] = batch_dict_ema['point_coords'].data.clone()
                     batch_dict_std['point_cls_scores'] = batch_dict_ema['point_cls_scores'].data.clone()
 
-                    batch_dict_std = self.reverse_augmentation(batch_dict_std, batch_dict, unlabeled_inds)
-
+                    batch_dict_std = self.reverse_augmentation(batch_dict_std, batch_dict, unlabeled_inds) # Take student's proposals, unaugment them before passing to teacher's rcnn. 
                     self.pv_rcnn_ema.roi_head.forward(batch_dict_std,
-                                                      disable_gt_roi_when_pseudo_labeling=True)
-                    batch_dict_std = self.apply_augmentation(batch_dict_std, batch_dict, unlabeled_inds, key='batch_box_preds')
+                                                      disable_gt_roi_when_pseudo_labeling=True) # Obtain Teacher's RCNN scores for Student's proposals. 
+                    batch_dict_std = self.apply_augmentation(batch_dict_std, batch_dict, unlabeled_inds, key='batch_box_preds') # To take teacher's proposals to supervise student, first make them student-compatible by augmenting them. Then send this to student.
 
-                    pred_dicts_std, recall_dicts_std = self.pv_rcnn_ema.post_processing(batch_dict_std,
+                    pred_dicts_std, recall_dicts_std = self.pv_rcnn_ema.post_processing(batch_dict_std,              #Softmax + NMS to obtain final student's preds
                                                                                         no_recall_dict=True,
                                                                                         no_nms_for_unlabeled=True)
                     rcnn_cls_score_teacher = -torch.ones_like(self.pv_rcnn.roi_head.forward_ret_dict['rcnn_cls_labels'])
@@ -364,9 +363,9 @@ class PVRCNN_SSL(Detector3DTemplate):
                     self.pv_rcnn.roi_head.forward_ret_dict['batch_box_preds_teacher'] = batch_box_preds_teacher
 
             disp_dict = {}
-            loss_rpn_cls, loss_rpn_box, tb_dict = self.pv_rcnn.dense_head.get_loss(scalar=False)
+            loss_rpn_cls, loss_rpn_box, tb_dict = self.pv_rcnn.dense_head.get_loss(scalar=False) # dense_head = RPN
             loss_point, tb_dict = self.pv_rcnn.point_head.get_loss(tb_dict, scalar=False)
-            loss_rcnn_cls, loss_rcnn_box, tb_dict = self.pv_rcnn.roi_head.get_loss(tb_dict, scalar=False)
+            loss_rcnn_cls, loss_rcnn_box, tb_dict = self.pv_rcnn.roi_head.get_loss(tb_dict, scalar=False) #Roi_head = RCNN , calls pre_loss_filtering from ROIHeadTemplate
 
             if not self.unlabeled_supervise_cls:
                 loss_rpn_cls = loss_rpn_cls[labeled_inds, ...].mean()
@@ -493,7 +492,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         return ens_pred_dicts
 
     # TODO(farzad) refactor and remove this!
-    def _unpack_predictions(self, pred_dicts, unlabeled_inds):
+    def _unpack_predictions(self, pred_dicts, unlabeled_inds): #Generate lists of pseudo_labeled objects 
         pseudo_boxes = []
         pseudo_scores = []
         pseudo_sem_scores = []
@@ -553,7 +552,7 @@ class PVRCNN_SSL(Detector3DTemplate):
 
             valid_inds = pseudo_score > conf_thresh.squeeze()
 
-            valid_inds = valid_inds * (pseudo_sem_score > self.sem_thresh[0])
+            valid_inds = valid_inds * (pseudo_sem_score > self.sem_thresh[0]) #The indices above desired threshold
 
             # TODO(farzad) can this be similarly determined by tag-based stats before and after filtering?
             # rej_labels = pseudo_label[~valid_inds]
@@ -600,7 +599,7 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         return pseudo_boxes, pseudo_scores, pseudo_sem_scores, pseudo_boxes_var, pseudo_scores_var
 
-    def _fill_with_pseudo_labels(self, batch_dict, pseudo_boxes, unlabeled_inds, labeled_inds, key=None):
+    def _fill_with_pseudo_labels(self, batch_dict, pseudo_boxes, unlabeled_inds, labeled_inds, key=None): #  Store PLs from teacher as GT_boxes for student
         key = 'gt_boxes' if key is None else key
         max_box_num = batch_dict['gt_boxes'].shape[1]
 
@@ -671,7 +670,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         loss = loss_rpn + loss_point + loss_rcnn
         return loss, tb_dict, disp_dict
 
-    def update_global_step(self):
+    def update_global_step(self): #Contains the EMA update of Teacher
         self.global_step += 1
         alpha = 0.999
         # Use the true average until the exponential average is more correct

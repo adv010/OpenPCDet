@@ -248,13 +248,13 @@ class AnchorHeadTemplate(nn.Module):
         """
         Args:
             batch_size:
-            cls_preds: (N, H, W, C1)
-            box_preds: (N, H, W, C2)
-            dir_cls_preds: (N, H, W, C3)
+            cls_preds: (N, H, W, C1) # C1 =  num_anchors * num_classes
+            box_preds: (N, H, W, C2) # C2 =  num_anchors * box_params
+            dir_cls_preds: (N, H, W, C3) # C3 =  num_anchors * dir_angles
 
         Returns:
-            batch_cls_preds: (B, num_boxes, num_classes)
-            batch_box_preds: (B, num_boxes, 7+C)
+            batch_cls_preds: (B, num_anchors, num_classes)
+            batch_box_preds: (B, num_anchors, 7+C)
 
         """
         if isinstance(self.anchors, list):
@@ -268,7 +268,7 @@ class AnchorHeadTemplate(nn.Module):
         num_anchors = anchors.view(-1, anchors.shape[-1]).shape[0]
         batch_anchors = anchors.view(1, -1, anchors.shape[-1]).repeat(batch_size, 1, 1)
         batch_cls_preds = cls_preds.view(batch_size, num_anchors, -1).float() \
-            if not isinstance(cls_preds, list) else cls_preds
+            if not isinstance(cls_preds, list) else cls_preds 
         batch_box_preds = box_preds.view(batch_size, num_anchors, -1) if not isinstance(box_preds, list) \
             else torch.cat(box_preds, dim=1).view(batch_size, num_anchors, -1)
         batch_box_preds = self.box_coder.decode_torch(batch_box_preds, batch_anchors)
