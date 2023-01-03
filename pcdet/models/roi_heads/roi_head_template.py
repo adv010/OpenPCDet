@@ -70,7 +70,7 @@ class RoIHeadTemplate(nn.Module):
 
         Returns:
             batch_dict:
-                rois: (B, num_rois, 7+C)
+                rois: (B, num_rois, 7+C) ; num_rois = NMS_POST_MAXSIZE
                 roi_scores: (B, num_rois)
                 roi_labels: (B, num_rois)
 
@@ -80,14 +80,14 @@ class RoIHeadTemplate(nn.Module):
 
         batch_size = batch_dict['batch_size']
 
-        batch_box_preds = batch_dict['batch_box_preds']
-        batch_cls_preds = batch_dict['batch_cls_preds']
+        batch_box_preds = batch_dict['batch_box_preds']  #2,211200,7
+        batch_cls_preds = batch_dict['batch_cls_preds'] #2,211200,3
 
-        rois = batch_box_preds.new_zeros((batch_size, nms_config.NMS_POST_MAXSIZE, batch_box_preds.shape[-1]))
+        rois = batch_box_preds.new_zeros((batch_size, nms_config.NMS_POST_MAXSIZE, batch_box_preds.shape[-1])) #torch.Size([2, 100, 7])
         roi_scores = batch_box_preds.new_zeros((batch_size, nms_config.NMS_POST_MAXSIZE))
         roi_labels = batch_box_preds.new_zeros((batch_size, nms_config.NMS_POST_MAXSIZE), dtype=torch.long)
 
-        for index in range(batch_size):
+        for index in range(batch_size): #Once labeled, once unlabeled
             if batch_dict.get('batch_index', None) is not None:
                 assert batch_cls_preds.shape.__len__() == 2
                 batch_mask = (batch_dict['batch_index'] == index)
@@ -97,7 +97,7 @@ class RoIHeadTemplate(nn.Module):
             box_preds = batch_box_preds[batch_mask]
             cls_preds = batch_cls_preds[batch_mask]
 
-            cur_roi_scores, cur_roi_labels = torch.max(cls_preds, dim=1)
+            cur_roi_scores, cur_roi_labels = torch.max(cls_preds, dim=1)  #scores and the positions the max scores for each anchor
 
             if nms_config.MULTI_CLASSES_NMS:
                 raise NotImplementedError
@@ -106,7 +106,7 @@ class RoIHeadTemplate(nn.Module):
                     box_scores=cur_roi_scores, box_preds=box_preds, nms_config=nms_config
                 )
 
-            rois[index, :len(selected), :] = box_preds[selected]
+            rois[index, :len(selected), :] = box_preds[selected] #Select best proposals from 211200 possible boxes
             roi_scores[index, :len(selected)] = cur_roi_scores[selected]
             roi_labels[index, :len(selected)] = cur_roi_labels[selected]
 

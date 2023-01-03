@@ -76,6 +76,7 @@ class PVRCNNHead(RoIHeadTemplate):
                 point_cls_scores: (N1 + N2 + N3 + ..., 1)
                 point_part_offset: (N1 + N2 + N3 + ..., 3)
         Returns:
+            Roi-grid-pooled feature. 
 
         """
         batch_size = batch_dict['batch_size']
@@ -136,7 +137,7 @@ class PVRCNNHead(RoIHeadTemplate):
                           - (local_roi_size.unsqueeze(dim=1) / 2)  # (B, 6x6x6, 3)
         return roi_grid_points
 
-    def forward(self, batch_dict, disable_gt_roi_when_pseudo_labeling=False):
+    def forward(self, batch_dict, disable_gt_roi_when_pseudo_labeling=False): #RCNN
         """
         :param input_data: input dict
         :return:
@@ -150,7 +151,7 @@ class PVRCNNHead(RoIHeadTemplate):
         targets_dict = self.proposal_layer(batch_dict, nms_config=nms_mode)
         # should not use gt_roi for pseudo label generation
         if (self.training or self.print_loss_when_eval) and not disable_gt_roi_when_pseudo_labeling:
-            targets_dict = self.assign_targets(batch_dict)
+            targets_dict = self.assign_targets(batch_dict) # Calls Proposal_target_layer_consistency if consistency = True
             batch_dict['rois'] = targets_dict['rois']
             batch_dict['roi_scores'] = targets_dict['roi_scores']
             batch_dict['roi_labels'] = targets_dict['roi_labels']
@@ -170,7 +171,7 @@ class PVRCNNHead(RoIHeadTemplate):
             contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
 
         shared_features = self.shared_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1))
-        rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
+        rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2) # Confidence scores
         rcnn_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
 
         if not self.training or self.predict_boxes_when_training:
