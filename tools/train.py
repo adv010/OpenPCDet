@@ -117,7 +117,7 @@ def main():
         total_epochs=args.epochs
     )
     if cfg.get('SELF_TRAIN', None):
-        target_set, target_loader, target_sampler = build_dataloader(
+        target_set, target_loader, target_sampler = build_dataloader(# Build dataloader for target_domain
             cfg.DATA_CONFIG_TAR, cfg.DATA_CONFIG_TAR.CLASS_NAMES, args.batch_size,
             dist_train, workers=args.workers, logger=logger, training=True
         )
@@ -211,8 +211,8 @@ def main():
     logger.info('**********************Start evaluation %s/%s(%s)**********************' %
                 (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
     
-    if args.eval_fov_only:   ## Jihan -> commit 302588ea25d9b12a4cb291e97d7e3f05d26a6eba : 'try to add st3d++'
-        cfg.DATA_CONFIG_TAR.FOV_POINTS_ONLY = True            
+#    if args.eval_fov_only is not None:   ## Jihan -> commit 302588ea25d9b12a4cb291e97d7e3f05d26a6eba : 'try to add st3d++'
+#        cfg.DATA_CONFIG_TAR.FOV_POINTS_ONLY = True            
     
     if cfg.get('DATA_CONFIG_TAR', None) and not args.eval_src:
         test_set, test_loader, sampler = build_dataloader(
