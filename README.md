@@ -1,3 +1,11 @@
+# ST3D / ST3D ++
+(Advait)
+Built pcdet on pcdetv5. Used spconv-cu113 from pip to set up the Spconv library.
+
+
+
+XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+
 # ST3D
 
 Code release for the paper **ST3D: Self-training for Unsupervised Domain Adaptation on 3D Object Detection**, CVPR 2021

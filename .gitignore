@@ -16,3 +16,5 @@ venv/
 *.bin
 output
 version.py
+.vscode/
+CVMI_ST3D_Pretrained

@@ -1,0 +1,29 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+
+
+        {
+            "name": "train",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/tools",
+            "env": {"CUDA_VISIBLE_DEVICES" : "1"},
+            "args":[
+                "--cfg_file",
+                "./cfgs/da-nuscenes-kitti_models/pvrcnn_st3d/pvrcnn_st3d.yaml",
+                "--extra_tag",
+                "da_nuscenes_kitti_pvrcnn_st3d_debug",
+                "--batch_size",
+                "2",
+                "--pretrained_model",
+                "../CVMI_st3d++_pretrained/da-nus-kitti-st3d/pvrcnn/ckpt.pth",
+                "--max_ckpt_save_num",
+                "50"
+            ]
+        }
+    ]
+}
+

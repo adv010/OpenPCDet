@@ -44,6 +44,8 @@ def parse_config():
     parser.add_argument('--start_epoch', type=int, default=0, help='')
     parser.add_argument('--num_epochs_to_eval', type=int, default=0, help='number of checkpoints to be evaluated')
     parser.add_argument('--save_to_file', action='store_true', default=False, help='')
+    parser.add_argument('--eval_src', action='store_true', default=False, help='eval on source')
+    parser.add_argument('--eval_fov_only', action='store_true', default=False, help='EVAL FOV Only')
 
     args = parser.parse_args()
 
@@ -211,8 +213,8 @@ def main():
     logger.info('**********************Start evaluation %s/%s(%s)**********************' %
                 (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
     
-#    if args.eval_fov_only is not None:   ## Jihan -> commit 302588ea25d9b12a4cb291e97d7e3f05d26a6eba : 'try to add st3d++'
-#        cfg.DATA_CONFIG_TAR.FOV_POINTS_ONLY = True            
+    if args.eval_fov_only is not None:   ## Jihan -> commit 302588ea25d9b12a4cb291e97d7e3f05d26a6eba : 'try to add st3d++'
+        cfg.DATA_CONFIG_TAR.FOV_POINTS_ONLY = True            
     
     if cfg.get('DATA_CONFIG_TAR', None) and not args.eval_src:
         test_set, test_loader, sampler = build_dataloader(
