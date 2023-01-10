@@ -172,10 +172,12 @@ class ProposalTargetLayer(nn.Module):
 
             # sampling hard bg
             rand_idx = torch.randint(low=0, high=hard_bg_inds.numel(), size=(hard_bg_rois_num,)).long()
+             # rand_idx = torch.randperm(hard_bg_inds.numel())[:hard_bg_rois_num]
             hard_bg_inds = hard_bg_inds[rand_idx]
 
             # sampling easy bg
             rand_idx = torch.randint(low=0, high=easy_bg_inds.numel(), size=(easy_bg_rois_num,)).long()
+            # rand_idx = torch.randperm(easy_bg_inds.numel())[:easy_bg_rois_num]
             easy_bg_inds = easy_bg_inds[rand_idx]
 
             bg_inds = torch.cat([hard_bg_inds, easy_bg_inds], dim=0)
@@ -183,11 +185,13 @@ class ProposalTargetLayer(nn.Module):
             hard_bg_rois_num = bg_rois_per_this_image
             # sampling hard bg
             rand_idx = torch.randint(low=0, high=hard_bg_inds.numel(), size=(hard_bg_rois_num,)).long()
+            # rand_idx = torch.randperm(hard_bg_inds.numel())[:hard_bg_rois_num]
             bg_inds = hard_bg_inds[rand_idx]
         elif hard_bg_inds.numel() == 0 and easy_bg_inds.numel() > 0:
             easy_bg_rois_num = bg_rois_per_this_image
             # sampling easy bg
             rand_idx = torch.randint(low=0, high=easy_bg_inds.numel(), size=(easy_bg_rois_num,)).long()
+            # rand_idx = torch.randperm(easy_bg_inds.numel())[:easy_bg_rois_num]
             bg_inds = easy_bg_inds[rand_idx]
         else:
             raise NotImplementedError
