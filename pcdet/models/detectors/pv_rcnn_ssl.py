@@ -4,7 +4,7 @@ import os
 import numpy as np
 import torch
 import torch.nn.functional as F
-from pcdet.datasets.augmentor.augmentor_utils import *
+from pcdet.datasets.augmentor import augmentor_utils
 from pcdet.ops.iou3d_nms import iou3d_nms_utils
 
 from ...utils import common_utils
@@ -103,15 +103,15 @@ class MetricRegistry(object):
         self._tag_metrics = {}
         self.dataset = kwargs.get('dataset', None)
         self.cls_bg_thresh = kwargs.get('cls_bg_thresh', None)
-
+        self.model_cfg = kwargs.get('model_cfg', None)
     def get(self, tag=None):
         if tag is None:
             tag = 'default'
         if tag in self._tag_metrics.keys():
             metric = self._tag_metrics[tag]
         else:
-            kitti_eval_metric = KITTIEvalMetrics(tag=tag, dataset=self.dataset)
-            pred_qual_metric = PredQualityMetrics(tag=tag, dataset=self.dataset, cls_bg_thresh=self.cls_bg_thresh)
+            kitti_eval_metric = KITTIEvalMetrics(tag=tag, dataset=self.dataset, config=self.model_cfg)
+            pred_qual_metric = PredQualityMetrics(tag=tag, dataset=self.dataset, cls_bg_thresh=self.cls_bg_thresh, config=self.model_cfg)
             metric = MetricCollection({"kitti_eval_metric": kitti_eval_metric,
                                        "pred_quality_metric": pred_qual_metric})
             self._tag_metrics[tag] = metric
@@ -135,6 +135,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             param.detach_()
         self.add_module('pv_rcnn', self.pv_rcnn)
         self.add_module('pv_rcnn_ema', self.pv_rcnn_ema)
+        self.accumulated_itr = 0
 
         # self.module_list = self.build_networks()
         # self.module_list_ema = self.build_networks()
@@ -146,7 +147,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         self.no_nms = model_cfg.NO_NMS
         self.supervise_mode = model_cfg.SUPERVISE_MODE
         cls_bg_thresh = model_cfg.ROI_HEAD.TARGET_CONFIG.CLS_BG_THRESH
-        self.metric_registry = MetricRegistry(dataset=self.dataset, cls_bg_thresh=cls_bg_thresh)
+        self.metric_registry = MetricRegistry(dataset=self.dataset, model_cfg=model_cfg)
 
     def forward(self, batch_dict):
         if self.training:
@@ -196,7 +197,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                                 batch_dict_ema_wa['cls_preds_normalized'] = batch_dict_ema['cls_preds_normalized']
 
                                 enable = [1] * len(unlabeled_inds)
-                                batch_dict_ema_wa['batch_box_preds'][unlabeled_inds] = random_flip_along_x_bbox(
+                                batch_dict_ema_wa['batch_box_preds'][unlabeled_inds] = augmentor_utils.random_flip_along_x_bbox(
                                     batch_dict_ema_wa['batch_box_preds'][unlabeled_inds],
                                     enables=enable)
                             else:
@@ -207,7 +208,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                             batch_dict_ema = cur_module(batch_dict_ema)
                             batch_dict_ema_wa = cur_module(batch_dict_ema_wa)
                     # Reverse preds of wa input to match their original (no-aug) preds
-                    batch_dict_ema_wa['batch_box_preds'][unlabeled_inds] = random_flip_along_x_bbox(
+                    batch_dict_ema_wa['batch_box_preds'][unlabeled_inds] = augmentor_utils.random_flip_along_x_bbox(
                         batch_dict_ema_wa['batch_box_preds'][unlabeled_inds], [1] * len(unlabeled_inds))
 
                     # pseudo-labels used for training rpn head
@@ -227,32 +228,10 @@ class PVRCNN_SSL(Detector3DTemplate):
 
             # Used for calc stats before and after filtering 
             ori_unlabeled_boxes = batch_dict['gt_boxes'][unlabeled_inds, ...]
+            if self.model_cfg.ROI_HEAD.get("ENABLE_EVAL", False):
+                # PL metrics before filtering
+                self.update_metrics(batch_dict, pred_dicts_ens, unlabeled_inds, labeled_inds)
 
-            ''' 
-            Recording PL vs GT statistics BEFORE filtering 
-            TODO (shashank) : Needs to be refactored (can also be made into a single function call)
-            '''
-            ################################
-            # pseudo_boxes, pseudo_labels, pseudo_scores, pseudo_sem_scores, _, _ = self._unpack_predictions(pred_dicts_ens, unlabeled_inds)
-            # pseudo_boxes = [torch.cat([pseudo_box, pseudo_label.view(-1, 1).float()], dim=1) \
-            #     for (pseudo_box, pseudo_label) in zip(pseudo_boxes, pseudo_labels)]
-            #
-            # # Making consistent # of pseudo boxes in each batch
-            # # NOTE: Need to store them in batch_dict in a new key, which can be removed later
-            # batch_dict['pseudo_boxes_prefilter'] = torch.zeros_like(batch_dict['gt_boxes'])
-            # self._fill_with_pseudo_labels(batch_dict, pseudo_boxes, unlabeled_inds, labeled_inds, key='pseudo_boxes_prefilter')
-            #
-            # # apply student's augs on teacher's pseudo-boxes (w/o filtered)
-            # batch_dict = self.apply_augmentation(batch_dict, batch_dict, unlabeled_inds, key='pseudo_boxes_prefilter')
-            #
-            # metric_inputs = {'preds': batch_dict['pseudo_boxes_prefilter'][unlabeled_inds],
-            #                  'targets': ori_unlabeled_boxes,
-            #                  'pred_scores': pseudo_scores,
-            #                  'pred_sem_scores': pseudo_sem_scores}
-            #
-            # self.metrics['before_filtering'].update(**metric_inputs)
-            # batch_dict.pop('pseudo_boxes_prefilter')
-            ################################
             pseudo_boxes, pseudo_scores, pseudo_sem_scores, pseudo_boxes_var, pseudo_scores_var = \
                 self._filter_pseudo_labels(pred_dicts_ens, unlabeled_inds)
 
@@ -346,6 +325,14 @@ class PVRCNN_SSL(Detector3DTemplate):
                     batch_dict_std['point_cls_scores'] = batch_dict_ema['point_cls_scores'].data.clone()
 
                     batch_dict_std = self.reverse_augmentation(batch_dict_std, batch_dict, unlabeled_inds) # Take student's proposals, unaugment them before passing to teacher's rcnn. 
+                    # Perturb Student's ROIs before using them for Teacher's ROI head
+                    if self.model_cfg.ROI_HEAD.ROI_AUG.get('ENABLE', False):
+                        augment_rois = getattr(augmentor_utils, self.model_cfg.ROI_HEAD.ROI_AUG.AUG_TYPE, augmentor_utils.roi_aug_ros)
+                        # rois_before_aug is used only for debugging, can be removed later
+                        batch_dict_std['rois_before_aug'] = batch_dict_std['rois'].clone().detach()
+                        batch_dict_std['rois'][unlabeled_inds] = \
+                            augment_rois(batch_dict_std['rois'][unlabeled_inds], self.model_cfg.ROI_HEAD)
+
                     self.pv_rcnn_ema.roi_head.forward(batch_dict_std,
                                                       disable_gt_roi_when_pseudo_labeling=True) # Obtain Teacher's RCNN scores for Student's proposals. 
                     batch_dict_std = self.apply_augmentation(batch_dict_std, batch_dict, unlabeled_inds, key='batch_box_preds') # To take teacher's proposals to supervise student, first make them student-compatible by augmenting them. Then send this to student.
@@ -430,6 +417,35 @@ class PVRCNN_SSL(Detector3DTemplate):
             self.metric_registry.get('test').update(**metric_inputs)
 
             return pred_dicts, recall_dicts, {}
+
+    def update_metrics(self, input_dict, pred_dict, unlabeled_inds, labeled_inds):
+        """
+        Recording PL vs GT statistics BEFORE filtering
+        """
+        if 'pl_gt_metrics_before_filtering' in self.model_cfg.ROI_HEAD.METRICS_PRED_TYPES:
+            pseudo_boxes, pseudo_labels, pseudo_scores, pseudo_sem_scores, _, _ = self._unpack_predictions(
+                pred_dict, unlabeled_inds)
+            pseudo_boxes = [torch.cat([pseudo_box, pseudo_label.view(-1, 1).float()], dim=1) \
+                            for (pseudo_box, pseudo_label) in zip(pseudo_boxes, pseudo_labels)]
+
+            # Making consistent # of pseudo boxes in each batch
+            # NOTE: Need to store them in batch_dict in a new key, which can be removed later
+            input_dict['pseudo_boxes_prefilter'] = torch.zeros_like(input_dict['gt_boxes'])
+            self._fill_with_pseudo_labels(input_dict, pseudo_boxes, unlabeled_inds, labeled_inds,
+                                          key='pseudo_boxes_prefilter')
+
+            # apply student's augs on teacher's pseudo-boxes (w/o filtered)
+            batch_dict = self.apply_augmentation(input_dict, input_dict, unlabeled_inds, key='pseudo_boxes_prefilter')
+
+            tag = f'pl_gt_metrics_before_filtering'
+            metrics = self.metric_registry.get(tag)
+
+            preds_prefilter = [batch_dict['pseudo_boxes_prefilter'][uind] for uind in unlabeled_inds]
+            gts_prefilter = [batch_dict['gt_boxes'][uind] for uind in unlabeled_inds]
+            metric_inputs = {'preds': preds_prefilter, 'pred_scores': pseudo_scores, 'roi_scores': pseudo_sem_scores,
+                             'ground_truths': gts_prefilter}
+            metrics.update(**metric_inputs)
+            batch_dict.pop('pseudo_boxes_prefilter')
 
     def compute_metrics(self, tag):
         results = self.metric_registry.get(tag).compute()
@@ -550,9 +566,12 @@ class PVRCNN_SSL(Detector3DTemplate):
             conf_thresh = torch.tensor(self.thresh, device=pseudo_label.device).unsqueeze(
                 0).repeat(len(pseudo_label), 1).gather(dim=1, index=(pseudo_label - 1).unsqueeze(-1))
 
+            sem_conf_thresh = torch.tensor(self.sem_thresh, device=pseudo_label.device).unsqueeze(
+                0).repeat(len(pseudo_label), 1).gather(dim=1, index=(pseudo_label - 1).unsqueeze(-1))
+
             valid_inds = pseudo_score > conf_thresh.squeeze()
 
-            valid_inds = valid_inds * (pseudo_sem_score > self.sem_thresh[0]) #The indices above desired threshold
+            valid_inds = valid_inds & (pseudo_sem_score > sem_conf_thresh.squeeze())
 
             # TODO(farzad) can this be similarly determined by tag-based stats before and after filtering?
             # rej_labels = pseudo_label[~valid_inds]
@@ -630,13 +649,13 @@ class PVRCNN_SSL(Detector3DTemplate):
             batch_dict[key] = new_boxes
 
     def apply_augmentation(self, batch_dict, batch_dict_org, unlabeled_inds, key='rois'):
-        batch_dict[key][unlabeled_inds] = random_flip_along_x_bbox(
+        batch_dict[key][unlabeled_inds] = augmentor_utils.random_flip_along_x_bbox(
             batch_dict[key][unlabeled_inds], batch_dict_org['flip_x'][unlabeled_inds])
-        batch_dict[key][unlabeled_inds] = random_flip_along_y_bbox(
+        batch_dict[key][unlabeled_inds] = augmentor_utils.random_flip_along_y_bbox(
             batch_dict[key][unlabeled_inds], batch_dict_org['flip_y'][unlabeled_inds])
-        batch_dict[key][unlabeled_inds] = global_rotation_bbox(
+        batch_dict[key][unlabeled_inds] = augmentor_utils.global_rotation_bbox(
             batch_dict[key][unlabeled_inds], batch_dict_org['rot_angle'][unlabeled_inds])
-        batch_dict[key][unlabeled_inds] = global_scaling_bbox(
+        batch_dict[key][unlabeled_inds] = augmentor_utils.global_scaling_bbox(
             batch_dict[key][unlabeled_inds], batch_dict_org['scale'][unlabeled_inds])
 
         batch_dict[key][unlabeled_inds, :, 6] = common_utils.limit_period(
@@ -646,13 +665,13 @@ class PVRCNN_SSL(Detector3DTemplate):
         return batch_dict
 
     def reverse_augmentation(self, batch_dict, batch_dict_org, unlabeled_inds, key='rois'):
-        batch_dict[key][unlabeled_inds] = global_scaling_bbox(
+        batch_dict[key][unlabeled_inds] = augmentor_utils.global_scaling_bbox(
             batch_dict[key][unlabeled_inds], 1.0 / batch_dict_org['scale'][unlabeled_inds])
-        batch_dict[key][unlabeled_inds] = global_rotation_bbox(
+        batch_dict[key][unlabeled_inds] = augmentor_utils.global_rotation_bbox(
             batch_dict[key][unlabeled_inds], - batch_dict_org['rot_angle'][unlabeled_inds])
-        batch_dict[key][unlabeled_inds] = random_flip_along_y_bbox(
+        batch_dict[key][unlabeled_inds] = augmentor_utils.random_flip_along_y_bbox(
             batch_dict[key][unlabeled_inds], batch_dict_org['flip_y'][unlabeled_inds])
-        batch_dict[key][unlabeled_inds] = random_flip_along_x_bbox(
+        batch_dict[key][unlabeled_inds] = augmentor_utils.random_flip_along_x_bbox(
             batch_dict[key][unlabeled_inds], batch_dict_org['flip_x'][unlabeled_inds])
 
         batch_dict[key][unlabeled_inds, :, 6] = common_utils.limit_period(
@@ -672,12 +691,16 @@ class PVRCNN_SSL(Detector3DTemplate):
 
     def update_global_step(self): #Contains the EMA update of Teacher
         self.global_step += 1
-        alpha = 0.999
+        self.accumulated_itr += 1
+        if self.accumulated_itr % self.model_cfg.EMA_UPDATE_INTERVAL != 0:
+            return
+        alpha = self.model_cfg.EMA_ALPHA
         # Use the true average until the exponential average is more correct
         alpha = min(1 - 1 / (self.global_step + 1), alpha)
         for ema_param, param in zip(self.pv_rcnn_ema.parameters(), self.pv_rcnn.parameters()):
             # TODO(farzad) check this
             ema_param.data.mul_(alpha).add_((1 - alpha) * param.data)
+        self.accumulated_itr = 0
 
     def load_params_from_file(self, filename, logger, to_cpu=False):
         if not os.path.isfile(filename):

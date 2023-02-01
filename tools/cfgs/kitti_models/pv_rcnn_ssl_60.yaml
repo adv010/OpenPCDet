@@ -164,6 +164,7 @@ MODEL:
         ENABLE_RCNN_CONSISTENCY: False
         ENABLE_SOFT_TEACHER: True
         ENABLE_EVAL: True
+        METRICS_PRED_TYPES: [roi_pl_gt, pl_gt_metrics_before_filtering]
         SHARED_FC: [256, 256]
         CLS_FC: [256, 256]
         REG_FC: [256, 256]
@@ -200,14 +201,19 @@ MODEL:
             CLS_WEIGHT: 0.35
             CLS_FG_THRESH: 0.75
             CLS_BG_THRESH: 0.25
-            UNLABELED_CLS_FG_THRESH: 0.75
+            UNLABELED_CLS_FG_THRESH: [0.7, 0.3, 0.4]
             UNLABELED_CLS_BG_THRESH: 0.25
             CLS_BG_THRESH_LO: 0.1
             HARD_BG_RATIO: 0.8
 
             REG_FG_THRESH: 0.55
-            UNLABELED_REG_FG_THRESH: 0.9
-            UNLABELED_SAMPLER_TYPE: None
+            UNLABELED_REG_FG_THRESH: [0.65, 0.45, 0.4]
+            UNLABELED_SAMPLER_TYPE: subsample_labeled_rois
+            UNLABELED_SAMPLE_EASY_BG: True
+            UNLABELED_SHARP_RCNN_CLS_LABELS: True
+            UNLABELED_USE_CALIBRATED_IOUS: True
+            UNLABELED_TEACHER_SCORES_FOR_RVM: False
+            USE_ULB_CLS_FG_THRESH_FOR_LB: False
 
         LOSS_CONFIG:
             UL_RCNN_CLS_WEIGHT_TYPE: 'interval-only' # two options: `all` or `interval-only`
@@ -221,6 +227,17 @@ MODEL:
                 'rcnn_corner_weight': 1.0,
                 'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
             }
+        
+        ROI_AUG:
+            ENABLE: False
+            AUG_TYPE: roi_aug_ros
+            ROS:
+                SCALE_RANGE: [0.9, 1.1]
+                ROTATE_RANGE: [0, 0] 
+                SAME_SCALE_XYZ: True
+            TRANSLATE:
+                SCALE: [0.25, 0.25, 0.25]
+
 
     POST_PROCESSING:
         RECALL_THRESH_LIST: [0.3, 0.5, 0.7]
@@ -245,6 +262,8 @@ MODEL:
     SEM_THRESH: [0.2, 0.0, 0.0]
     SUPERVISE_MODE: 0
     NO_NMS: False
+    EMA_ALPHA: 0.999
+    EMA_UPDATE_INTERVAL: 1 
 
 
 OPTIMIZATION:
