@@ -248,7 +248,8 @@ class Detector3DTemplate(nn.Module):
                 final_labels = torch.cat(pred_labels, dim=0)
                 final_boxes = torch.cat(pred_boxes, dim=0)
             else:
-                cls_preds, label_preds = torch.max(cls_preds, dim=-1)
+                cls_preds, label_preds = torch.max(cls_preds, dim=-1)  # Get rid of [128 , 1] -> [128] 
+                # Compared above sentence with batch_dict['batch_cls_preds'][0].squeeze() . They are the same value!
                 if batch_dict.get('has_class_labels', False):
                     label_key = 'roi_labels' if 'roi_labels' in batch_dict else 'batch_pred_labels'
                     label_preds = batch_dict[label_key][index]

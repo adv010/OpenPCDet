@@ -93,8 +93,8 @@ class RoIHeadTemplate(nn.Module):
             else:
                 assert batch_dict['batch_cls_preds'].shape.__len__() == 3
                 batch_mask = index
-            box_preds = batch_box_preds[batch_mask]
-            cls_preds = batch_cls_preds[batch_mask]
+            box_preds = batch_box_preds[batch_mask] #torch.Size([211200, 7])
+            cls_preds = batch_cls_preds[batch_mask]  #torch.Size([211200, 3])
 
             cur_roi_scores, cur_roi_labels = torch.max(cls_preds, dim=1)  #scores and the positions the max scores for each anchor
 
@@ -102,7 +102,7 @@ class RoIHeadTemplate(nn.Module):
                 raise NotImplementedError
             else:
                 selected, selected_scores = class_agnostic_nms(
-                    box_scores=cur_roi_scores, box_preds=box_preds, nms_config=nms_config
+                    box_scores=cur_roi_scores, box_preds=box_preds, nms_config=nms_config   #box_scores
                 )
 
             rois[index, :len(selected), :] = box_preds[selected] #Select best proposals from 211200 possible boxes

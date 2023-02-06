@@ -149,6 +149,10 @@ class PVRCNNHead(RoIHeadTemplate):
         # proposal_layer doesn't continue if the rois are already in the batch_dict.
         # However, for labeled data proposal layer should continue!
         targets_dict = self.proposal_layer(batch_dict, nms_config=nms_mode)
+        # In RPN , we had to get targets for anchors. Similarly, for ROIs (proposals), we currently don't have ROI-level GTs
+        # So we will take the Pseudo_labels from teacher as GTs, and call a different assign_targets
+        # The proposal_target_layer's assign_targets function will subsample rois for labeled and unlabeled samples
+        # 
         # should not use gt_roi for pseudo label generation
         if (self.training or self.print_loss_when_eval) and not disable_gt_roi_when_pseudo_labeling:
             targets_dict = self.assign_targets(batch_dict) # Calls Proposal_target_layer_consistency if consistency = True
@@ -171,8 +175,8 @@ class PVRCNNHead(RoIHeadTemplate):
             contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
 
         shared_features = self.shared_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1))
-        rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2) # Confidence scores
-        rcnn_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
+        rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2) # Confidence scores #256,1
+        rcnn_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C) #256,7
 
         if not self.training or self.predict_boxes_when_training:
             batch_cls_preds, batch_box_preds = self.generate_predicted_boxes(

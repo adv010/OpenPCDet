@@ -26,7 +26,7 @@ class PredQualityMetrics(Metric):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.reset_state_interval = kwargs.get('reset_state_interval', 64)
+        self.reset_state_interval = kwargs.get('reset_state_interval', 1)
         self.tag = kwargs.get('tag', None)
         self.dataset = kwargs.get('dataset', None)
         self.config = kwargs.get('config', None)
@@ -55,7 +55,7 @@ class PredQualityMetrics(Metric):
         if roi_scores is not None:
             assert len(pred_scores) == len(roi_scores)
 
-        roi_scores = [score.clone().detach() for score in roi_scores] if roi_scores is not None else None
+        roi_scores = [score.clone().detach() for score in roi_scores] if roi_scores is not None else None  #roi_scores None when starting.. Why?
         preds = [pred_box.clone().detach() for pred_box in preds]
         pred_scores = [ps_score.clone().detach() for ps_score in pred_scores]
         pred_iou_wrt_pl = [iou.clone().detach() for iou in pred_iou_wrt_pl] if pred_iou_wrt_pl is not None else None
@@ -75,19 +75,23 @@ class PredQualityMetrics(Metric):
             valid_target_scores = target_scores[i][valid_preds_mask.nonzero().view(-1)] if target_scores else None
             valid_pred_weights = pred_weights[i][valid_preds_mask.nonzero().view(-1)] if pred_weights else None
             valid_pred_iou_wrt_pl = pred_iou_wrt_pl[i][valid_preds_mask.nonzero().view(-1)].squeeze() if pred_iou_wrt_pl else None
-            valid_gts_mask = torch.logical_not(torch.all(ground_truths[i] == 0, dim=-1))
-            valid_gt_boxes = ground_truths[i][valid_gts_mask]
+            valid_gts_mask = torch.logical_not(torch.all(ground_truths[i] == 0, dim=-1)) #torch.size[33]
+            valid_gt_boxes = ground_truths[i][valid_gts_mask] # get only nonzero gts
             if pseudo_labels is not None:
-                valid_pl_mask = torch.logical_not(torch.all(pseudo_labels[i] == 0, dim=-1))
-                valid_pl_boxes = pseudo_labels[i][valid_pl_mask] if pseudo_labels else None
+                valid_pl_mask = torch.logical_not(torch.all(pseudo_labels[i] == 0, dim=-1)) #torch.size[33]
+                valid_pl_boxes = pseudo_labels[i][valid_pl_mask] if pseudo_labels else None #get only nonzero pl boxes 
                 valid_pl_boxes[:, -1] -= 1
-
-            # Starting class indices from zero
+            '''
+            For the batch I entered - 
+                valid_gt_boxes.shape : torch.Size([1, 8])
+                valid_pl_boxes.shape :torch.Size([27, 8])
+            '''
+            # Starting class indices from zero(conf
             valid_pred_boxes[:, -1] -= 1
             valid_gt_boxes[:, -1] -= 1
 
             # Adding predicted scores as the last column
-            valid_pred_boxes = torch.cat([valid_pred_boxes, valid_pred_scores.unsqueeze(dim=-1)], dim=-1)
+            valid_pred_boxes = torch.cat([valid_pred_boxes, valid_pred_scores.unsqueeze(dim=-1)], dim=-1) #7 dim + pred_label -> 7 dim + pred_label + rcnn_cls (conf scores sigmoided)
 
             pred_labels = valid_pred_boxes[:, -2]
 
@@ -106,12 +110,12 @@ class PredQualityMetrics(Metric):
 
                 if num_gts > 0 and num_preds > 0:
                     overlap = iou3d_nms_utils.boxes_iou3d_gpu(valid_pred_boxes[:, 0:7], valid_gt_boxes[:, 0:7])
-                    preds_iou_max, assigned_gt_inds = overlap.max(dim=1)
+                    preds_iou_max, assigned_gt_inds = overlap.max(dim=1) #per class max gt-pl box overlap, assigned gt index values
 
                     assigned_gt_cls_mask = valid_gt_boxes[assigned_gt_inds, -1] == cind
-
-                    cc_mask = (pred_cls_mask & assigned_gt_cls_mask)  # correctly classified mask
-                    mc_mask = (pred_cls_mask & (~assigned_gt_cls_mask)) | ((~pred_cls_mask) & assigned_gt_cls_mask)  # misclassified mask
+                    ''' If predicted class's label is of (say) car, and the assigned (actual) gt by roi_iou overlap also crosses threshold to classify as car. Then cc_mask is True '''
+                    cc_mask = (pred_cls_mask & assigned_gt_cls_mask)  # correctly classified mask i.e. mask for TPs (only covered by this one case?)
+                    mc_mask = (pred_cls_mask & (~assigned_gt_cls_mask)) | ((~pred_cls_mask) & assigned_gt_cls_mask)  # misclassified mask #look for FPs/FNs
 
                     # Using kitti test class-wise fg threshold instead of thresholds used during train.
                     classwise_fg_thresh = self.min_overlaps[cind]
@@ -119,13 +123,13 @@ class PredQualityMetrics(Metric):
                     bg_mask = preds_iou_max <= self.config.ROI_HEAD.TARGET_CONFIG.UNLABELED_CLS_BG_THRESH
                     uc_mask = ~(bg_mask | fg_mask)  # uncertain mask
 
-                    cc_fg_mask = fg_mask & cc_mask
-                    classwise_metrics['pred_fgs'][cind] = (cc_fg_mask).sum() / cc_mask.sum()
+                    cc_fg_mask = fg_mask & cc_mask 
+                    classwise_metrics['pred_fgs'][cind] = (cc_fg_mask).sum() / cc_mask.sum() #pred_fgs are the TPs, NANs if cc_mask ==  0. handled by nanmean()
                     classwise_metrics['pred_ious'][cind] = (preds_iou_max * cc_fg_mask.float()).sum() / cc_fg_mask.sum()
                     cls_score_fg = (valid_pred_scores * cc_fg_mask.float()).sum() / (cc_fg_mask).sum()
                     classwise_metrics['score_fgs'][cind] = cls_score_fg
 
-                    cc_uc_mask = uc_mask & cc_mask
+                    cc_uc_mask = uc_mask & cc_mask # soft scored preds that are correctly assigned
                     classwise_metrics['pred_ucs'][cind] = (cc_uc_mask).sum() / cc_mask.sum()
                     classwise_metrics['pred_ious_ucs'][cind] = (preds_iou_max * cc_uc_mask.float()).sum() / cc_uc_mask.sum()
                     cls_score_uc = (valid_pred_scores * cc_uc_mask.float()).sum() / (cc_uc_mask).sum()

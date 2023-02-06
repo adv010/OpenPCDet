@@ -152,8 +152,8 @@ class PVRCNN_SSL(Detector3DTemplate):
     def forward(self, batch_dict):
         if self.training:
             labeled_mask = batch_dict['labeled_mask'].view(-1)
-            labeled_inds = torch.nonzero(labeled_mask).squeeze(1).long()
-            unlabeled_inds = torch.nonzero(1-labeled_mask).squeeze(1).long()
+            labeled_inds = torch.nonzero(labeled_mask).squeeze(1).long() # torch operations run on gpu - faster and elegant
+            unlabeled_inds = torch.nonzero(1-labeled_mask).squeeze(1).long() # Also, Pythonic!!
             batch_dict['unlabeled_inds'] = unlabeled_inds
             batch_dict_ema = {}
             keys = list(batch_dict.keys())
@@ -227,10 +227,11 @@ class PVRCNN_SSL(Detector3DTemplate):
                                                                                     no_nms_for_unlabeled=self.no_nms) # pred_dicts_ens.keys() -> ['pred_boxes', 'pred_scores', 'pred_labels', 'pred_sem_scores'])
 
             # Used for calc stats before and after filtering 
-            ori_unlabeled_boxes = batch_dict['gt_boxes'][unlabeled_inds, ...]
+            ori_unlabeled_boxes = batch_dict['gt_boxes'][unlabeled_inds, ...] # These are the original gt-boxes for unlabeled samples
+            # We are having the gt boxes for unlabeled samples, only that we never use them for satisfying unsupervised learning.
             if self.model_cfg.ROI_HEAD.get("ENABLE_EVAL", False):
                 # PL metrics before filtering
-                self.update_metrics(batch_dict, pred_dicts_ens, unlabeled_inds, labeled_inds)
+                self.update_metrics(batch_dict, pred_dicts_ens, unlabeled_inds, labeled_inds) 
 
             pseudo_boxes, pseudo_scores, pseudo_sem_scores, pseudo_boxes_var, pseudo_scores_var = \
                 self._filter_pseudo_labels(pred_dicts_ens, unlabeled_inds)
@@ -571,7 +572,9 @@ class PVRCNN_SSL(Detector3DTemplate):
 
             valid_inds = pseudo_score > conf_thresh.squeeze()
 
-            valid_inds = valid_inds & (pseudo_sem_score > sem_conf_thresh.squeeze())
+            valid_inds = valid_inds & (pseudo_sem_score > sem_conf_thresh.squeeze()) 
+            # If teacher's confidence score (pseudo_score) > conf_thresh and teacher's semantic score > pseudo_sem_thresh, then its a valid index
+            # Filter only those pseudo boxes, sem scores, labels, scores and return filtered values
 
             # TODO(farzad) can this be similarly determined by tag-based stats before and after filtering?
             # rej_labels = pseudo_label[~valid_inds]
@@ -618,11 +621,11 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         return pseudo_boxes, pseudo_scores, pseudo_sem_scores, pseudo_boxes_var, pseudo_scores_var
 
-    def _fill_with_pseudo_labels(self, batch_dict, pseudo_boxes, unlabeled_inds, labeled_inds, key=None): #  Store PLs from teacher as GT_boxes for student
+    def _fill_with_pseudo_labels(self, batch_dict, pseudo_boxes, unlabeled_inds, labeled_inds, key=None): #  Store PLs from teacher as batch_dict/data_dict['gt_boxes']
         key = 'gt_boxes' if key is None else key
         max_box_num = batch_dict['gt_boxes'].shape[1]
 
-        # Ignore the count of pseudo boxes if filled with default values(zeros) when no preds are made
+        # Ignore the count of pseudo boxes if filled with default values(zeros) when no preds are <
         max_pseudo_box_num = max(
             [torch.logical_not(torch.all(ps_box == 0, dim=-1)).sum().item() for ps_box in pseudo_boxes])
 

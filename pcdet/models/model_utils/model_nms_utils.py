@@ -19,7 +19,7 @@ def class_agnostic_nms(box_scores, box_preds, nms_config, score_thresh=None):
         )
         selected = indices[keep_idx[:nms_config.NMS_POST_MAXSIZE]]
 
-    if score_thresh is not None:
+    if score_thresh is not None: #Called when ROI NMSed and stored as pred_scores, pred_labels in batch_dict
         original_idxs = scores_mask.nonzero().view(-1)
         selected = original_idxs[selected]
     return selected, src_box_scores[selected]

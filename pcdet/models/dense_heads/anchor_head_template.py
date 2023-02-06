@@ -93,7 +93,7 @@ class AnchorHeadTemplate(nn.Module):
         Returns:
 
         """
-        targets_dict = self.target_assigner.assign_targets(
+        targets_dict = self.target_assigner.assign_targets( #Post RPN predictions from Student, assigning Teacher PLs to 
             self.anchors, gt_boxes
         )
         return targets_dict
@@ -117,13 +117,13 @@ class AnchorHeadTemplate(nn.Module):
         reg_weights /= torch.clamp(pos_normalizer, min=1.0)
         cls_weights /= torch.clamp(pos_normalizer, min=1.0)
         cls_targets = box_cls_labels * cared.type_as(box_cls_labels)
-        cls_targets = cls_targets.unsqueeze(dim=-1)
+        cls_targets = cls_targets.unsqueeze(dim=-1) #2,211200,1
 
         cls_targets = cls_targets.squeeze(dim=-1)
         one_hot_targets = torch.zeros(
-            *list(cls_targets.shape), self.num_class + 1, dtype=cls_preds.dtype, device=cls_targets.device
+            *list(cls_targets.shape), self.num_class + 1, dtype=cls_preds.dtype, device=cls_targets.device #torch.Size([2, 211200, 4])
         )
-        one_hot_targets.scatter_(-1, cls_targets.unsqueeze(dim=-1).long(), 1.0)
+        one_hot_targets.scatter_(-1, cls_targets.unsqueeze(dim=-1).long(), 1.0) #??
         cls_preds = cls_preds.view(batch_size, -1, self.num_class)
         one_hot_targets = one_hot_targets[..., 1:]
         cls_loss_src = self.cls_loss_func(cls_preds, one_hot_targets, weights=cls_weights)  # [N, M]
@@ -197,13 +197,13 @@ class AnchorHeadTemplate(nn.Module):
                                    box_preds.shape[-1])
         # sin(a - b) = sinacosb-cosasinb
         box_preds_sin, reg_targets_sin = self.add_sin_difference(box_preds, box_reg_targets)
-        loc_loss_src = self.reg_loss_func(box_preds_sin, reg_targets_sin, weights=reg_weights)  # [N, M]
+        loc_loss_src = self.reg_loss_func(box_preds_sin, reg_targets_sin, weights=reg_weights)  # [N, M] #smoothl1loss
         if scalar:
             loc_loss = loc_loss_src.sum() / batch_size
         else:
             loc_loss = loc_loss_src.reshape(batch_size, -1).sum(-1)
 
-        loc_loss = loc_loss * self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS['loc_weight']
+        loc_loss = loc_loss * self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS['loc_weight'] #[box_loss_lb, box_loss_ulb]
         box_loss = loc_loss
         tb_dict = {
             'rpn_loss_loc': loc_loss.item() if scalar else loc_loss

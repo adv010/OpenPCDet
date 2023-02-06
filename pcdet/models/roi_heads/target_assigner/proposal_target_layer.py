@@ -44,26 +44,27 @@ class ProposalTargetLayer(nn.Module):
                 gt_boxes: (B, N, 7 + C + 1)
                 roi_labels: (B, num_rois)
         Returns:
-
+       ** NEW STUFF!
+       batch_gt_of_rois, batch_roi_ious, batch_reg_valid_mask, interval_mask
         """
         batch_size = batch_dict['batch_size']
         rois = batch_dict['rois']
         code_size = rois.shape[-1]
-        batch_rois = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE, code_size)
-        batch_roi_scores = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE)
-        batch_roi_labels = rois.new_zeros((batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE), dtype=torch.long)
-        batch_gt_of_rois = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE, code_size + 1)
-        batch_roi_ious = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE)
+        batch_rois = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE, code_size) #torch.Size([2, 128, 7])
+        batch_roi_scores = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE) #torch.Size([2, 128])
+        batch_roi_labels = rois.new_zeros((batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE), dtype=torch.long) #torch.Size([2, 128])
+        batch_gt_of_rois = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE, code_size + 1) #torch.Size([2, 128, 8])
+        batch_roi_ious = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE) # torch.Size([2, 128])
         # batch_gt_scores = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE)
-        batch_reg_valid_mask = rois.new_zeros((batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE), dtype=torch.long)
-        batch_cls_labels = -rois.new_ones(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE)
-        interval_mask = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE, dtype=torch.bool)
+        batch_reg_valid_mask = rois.new_zeros((batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE), dtype=torch.long) 
+        batch_cls_labels = -rois.new_ones(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE) # -1s of torch.Size([2, 128])
+        interval_mask = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE, dtype=torch.bool) # Bools of torch.Size([2, 128])
 
         for index in range(batch_size):
             # TODO(farzad) WARNING!!! The index for cur_gt_boxes was missing and caused an error. FIX this in other branches.
-            cur_gt_boxes = batch_dict['gt_boxes'][index]
+            cur_gt_boxes = batch_dict['gt_boxes'][index] 
             k = cur_gt_boxes.__len__() - 1
-            while k >= 0 and cur_gt_boxes[k].sum() == 0:
+            while k >= 0 and cur_gt_boxes[k].sum() == 0: #Remove indices with padded 0s
                 k -= 1
             cur_gt_boxes = cur_gt_boxes[:k + 1]
             cur_gt_boxes = cur_gt_boxes.new_zeros((1, cur_gt_boxes.shape[1])) if len(
@@ -146,8 +147,9 @@ class ProposalTargetLayer(nn.Module):
     # TODO(farzad) Our previous method for unlabeled samples. Test it for the new implementation.
     def subsample_labeled_rois(self, batch_dict, index):
         cur_roi = batch_dict['rois'][index]
-        cur_gt_boxes = batch_dict['gt_boxes'][index]
         cur_roi_labels = batch_dict['roi_labels'][index]
+        cur_gt_boxes = batch_dict['gt_boxes'][index]
+
 
         if self.roi_sampler_cfg.get('SAMPLE_ROI_BY_EACH_CLASS', False):
             max_overlaps, gt_assignment = self.get_max_iou_with_same_class(
