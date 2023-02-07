@@ -44,7 +44,23 @@ def parse_config():
     parser.add_argument('--save_to_file', action='store_true', default=False, help='')
 
     parser.add_argument('--runs_on', type=str, default='server', choices=['server', 'cloud'],help='runs on server or cloud')
+    '''
+    parser.add_argument('--split', type=str, default='train_0.01_1')
+    parser.add_argument('--repeat', type=int, default=1)
+    parser.add_argument('--thresh', type=str, default='0.5, 0.25, 0.25')
+    parser.add_argument('--sem_thresh', type=str, default='0.4, 0.0, 0.0')
+    # parser.add_argument('--score_thresh', type=float, default=0.0)
+    parser.add_argument('--unlabeled_weight', type=float, default=1.0)
+    parser.add_argument('--unlabeled_supervise_cls', action='store_true', default=True)
+    parser.add_argument('--unlabeled_supervise_refine', action='store_true', default=True)
+    parser.add_argument('--lr', type=float, default=0.0)
+    parser.add_argument('--no_nms', action='store_true', default=False)
+    parser.add_argument('--supervise_mode', type=int, default=0)
+    parser.add_argument('--dbinfos', type=str, default='kitti_dbinfos_train.pkl')
 
+
+
+'''
     args = parser.parse_args()
 
     cfg_from_yaml_file(args.cfg_file, cfg)
@@ -53,6 +69,29 @@ def parse_config():
 
     if args.set_cfgs is not None:
         cfg_from_list(args.set_cfgs, cfg)
+
+    '''   
+    cfg.DATA_CONFIG.DATA_SPLIT['train'] = args.split
+    assert cfg.DATA_CONFIG.DATA_AUGMENTOR.AUG_CONFIG_LIST[0].NAME == 'gt_sampling'  # hardcode
+    cfg.DATA_CONFIG.DATA_AUGMENTOR.AUG_CONFIG_LIST[0].DB_INFO_PATH = [args.dbinfos]
+    cfg.DATA_CONFIG.REPEAT = args.repeat
+
+    cfg.MODEL.THRESH = [float(x) for x in args.thresh.split(',')]
+    cfg.MODEL.SEM_THRESH = [float(x) for x in args.sem_thresh.split(',')]
+    cfg.MODEL.UNLABELED_SUPERVISE_CLS = args.unlabeled_supervise_cls
+    cfg.MODEL.UNLABELED_SUPERVISE_REFINE = args.unlabeled_supervise_refine
+    cfg.MODEL.UNLABELED_WEIGHT = args.unlabeled_weight
+    cfg.MODEL.NO_NMS = args.no_nms
+    cfg.MODEL.SUPERVISE_MODE = args.supervise_mode
+
+    rev = get_git_commit_number()
+    args.extra_tag = args.extra_tag + "_" + str(rev)
+
+    if args.lr > 0.0:
+        cfg.OPTIMIZATION.LR = args.lr
+''' 
+
+
 
     return args, cfg
 
@@ -120,7 +159,8 @@ def main():
         logger=logger,
         training=True,
         merge_all_iters_to_one_epoch=args.merge_all_iters_to_one_epoch,
-        total_epochs=args.epochs
+        total_epochs=args.epochs,
+        seed=666 if args.fix_random_seed else None
     )
 
     if args.runs_on == 'cloud':
@@ -185,12 +225,57 @@ def main():
         ckpt_save_interval=args.ckpt_save_interval,
         max_ckpt_save_num=args.max_ckpt_save_num,
         merge_all_iters_to_one_epoch=args.merge_all_iters_to_one_epoch
-    )
-
+    )    
+    
     logger.info('**********************End training %s/%s(%s)**********************\n\n\n'
                 % (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
 
-    """
+
+
+
+
+'''
+
+    test_set, test_loader, sampler = build_dataloader(
+        dataset_cfg=cfg.DATA_CONFIG,
+        class_names=cfg.CLASS_NAMES,
+        batch_size=args.eval_batch_size,
+        dist=dist_train, workers=args.workers,
+        logger=logger,
+        training=False
+    )
+    eval_in_train = cfg.MODEL.POST_PROCESSING.get('TEST_EVAL_DURING_TRAIN', False)
+
+    if eval_in_train:
+        test_loader_during_train = test_loader
+    else:
+        test_loader = None
+
+        train_model(
+        model,
+        optimizer,
+        train_loader,
+        model_func=model_fn_decorator(),
+        lr_scheduler=lr_scheduler,
+        optim_cfg=cfg.OPTIMIZATION,
+        start_epoch=start_epoch,
+        total_epochs=args.epochs,
+        start_iter=it,
+        rank=cfg.LOCAL_RANK,
+        tb_log=tb_log,
+        ckpt_save_dir=ckpt_dir,
+        train_sampler=train_sampler,
+        lr_warmup_scheduler=lr_warmup_scheduler,
+        ckpt_save_interval=args.ckpt_save_interval,
+        max_ckpt_save_num=args.max_ckpt_save_num,
+        merge_all_iters_to_one_epoch=args.merge_all_iters_to_one_epoch
+    )
+
+    if hasattr(train_set, 'use_shared_memory') and train_set.use_shared_memory:
+        train_set.clean_shared_memory()
+'''
+
+'''   
     logger.info('**********************Start evaluation %s/%s(%s)**********************' %
                 (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
     test_set, test_loader, sampler = build_dataloader(
@@ -210,7 +295,6 @@ def main():
     )
     logger.info('**********************End evaluation %s/%s(%s)**********************' %
                 (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
-    """
-
+    '''
 if __name__ == '__main__':
     main()
