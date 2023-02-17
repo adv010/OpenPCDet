@@ -7,6 +7,7 @@ from test import repeat_eval_ckpt
 
 import torch
 import torch.nn as nn
+import torch.nn.utils.prune as prune
 from tensorboardX import SummaryWriter
 
 from pcdet.config import cfg, cfg_from_list, cfg_from_yaml_file, log_config_to_file
@@ -187,6 +188,12 @@ def main():
                 ckpt_list[-1], to_cpu=dist_train, optimizer=optimizer, logger=logger
             )
             last_epoch = start_epoch + 1
+        # #Prune 0.2 of conv2d layers, 0.4 of linear layers 
+        for name,module in model.named_modules():
+            if isinstance(module,torch.nn.Conv2d):
+                prune.l1_unstructured(module, name='weight',amount=0.2)
+            elif isinstance(module,torch.nn.Linear):
+                prune.l1_unstructured(module, name='weight',amount=0.2)
 
     model.train()  # before wrap to DistributedDataParallel to support fixed some parameters
     if dist_train:
