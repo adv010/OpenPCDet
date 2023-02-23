@@ -162,7 +162,8 @@ MODEL:
         ENABLE_VIS: False
         ENABLE_RELIABILITY: False
         ENABLE_RCNN_CONSISTENCY: False
-        ENABLE_SOFT_TEACHER: True
+        ENABLE_SOFT_TEACHER: False
+        ENABLE_ULB_CLS_DIST_LOSS: False
         ENABLE_EVAL: True
         METRICS_PRED_TYPES: [roi_pl_gt, pl_gt_metrics_before_filtering]
         SHARED_FC: [256, 256]
@@ -214,6 +215,7 @@ MODEL:
             UNLABELED_USE_CALIBRATED_IOUS: True
             UNLABELED_TEACHER_SCORES_FOR_RVM: False
             USE_ULB_CLS_FG_THRESH_FOR_LB: False
+            DISABLE_ST_WEIGHTS: False
 
         LOSS_CONFIG:
             UL_RCNN_CLS_WEIGHT_TYPE: 'interval-only' # two options: `all` or `interval-only`
@@ -225,7 +227,8 @@ MODEL:
                 'rcnn_cls_weight': 1.0,
                 'rcnn_reg_weight': 1.0,
                 'rcnn_corner_weight': 1.0,
-                'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+                'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+                ulb_cls_dist_weight: 0.2
             }
         
         ROI_AUG:
@@ -264,6 +267,7 @@ MODEL:
     NO_NMS: False
     EMA_ALPHA: 0.999
     EMA_UPDATE_INTERVAL: 1 
+    STORE_SCORES_IN_PKL: False
 
 
 OPTIMIZATION:
