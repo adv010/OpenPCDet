@@ -117,9 +117,7 @@ class AnchorHeadTemplate(nn.Module):
         reg_weights /= torch.clamp(pos_normalizer, min=1.0)
         cls_weights /= torch.clamp(pos_normalizer, min=1.0)
         cls_targets = box_cls_labels * cared.type_as(box_cls_labels)
-        cls_targets = cls_targets.unsqueeze(dim=-1)
-
-        cls_targets = cls_targets.squeeze(dim=-1)
+        # Successive unsqueeze and squeeze on same dimension, redundant. Removing
         one_hot_targets = torch.zeros(
             *list(cls_targets.shape), self.num_class + 1, dtype=cls_preds.dtype, device=cls_targets.device
         )
@@ -133,14 +131,39 @@ class AnchorHeadTemplate(nn.Module):
                           torch.clamp((cls_targets > 0).sum().float(), min=1.0)
         else:
             cls_loss = cls_loss_src.reshape(batch_size, -1).sum(-1)
+
+            rpn_loss_cls_dict = {}
+            for cls_idx, cls_name in enumerate(['car', 'ped', 'cyc']):
+                cls_mask = cls_loss_src[:, :, cls_idx]  # get mask for current class
+                rpn_loss_cls_dict[f'{cls_name}'] = cls_loss_src[:, :, cls_idx].sum(-1)
+            
+            #assert torch.equal(cls_loss.data, (rpn_loss_cls_dict['car']+rpn_loss_cls_dict['ped']+rpn_loss_cls_dict['cyc'].data)), True
+
             rpn_acc_cls = ((cls_preds.max(-1)[1] + 1) == cls_targets.long()).view(batch_size, -1).sum(-1).float() / \
                           torch.clamp((cls_targets > 0).view(batch_size, -1).sum(-1).float(), min=1.0)
-
+            
+            rpn_acc_car = ((cls_preds.max(-1)[1] + 1) [:70400]== cls_targets[:70400].long()).view(batch_size, -1).sum(-1).float() / \
+                          torch.clamp((cls_targets[:70400] > 0).view(batch_size, -1).sum(-1).float(), min=1.0)
+            rpn_acc_ped = ((cls_preds.max(-1)[1] + 1) [70400:140800]== cls_targets[70400:140800].long()).view(batch_size, -1).sum(-1).float() / \
+                          torch.clamp((cls_targets[70400:140800] > 0).view(batch_size, -1).sum(-1).float(), min=1.0)
+            rpn_acc_cyc =((cls_preds.max(-1)[1] + 1) [140800:211200]== cls_targets[140801:211200].long()).view(batch_size, -1).sum(-1).float() / \
+                          torch.clamp((cls_targets[:] > 0).view(batch_size, -1).sum(-1).float(), min=1.0)
+            
+        
         cls_loss = cls_loss * self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS['cls_weight']
+
+
+        #TODO Advait : Add for scalar = True cases
 
         tb_dict = {
             'rpn_loss_cls': cls_loss.item() if scalar else cls_loss,
-            'rpn_acc_cls': rpn_acc_cls.item() if scalar else rpn_acc_cls
+            'rpn_acc_cls': rpn_acc_cls.item() if scalar else rpn_acc_cls,
+            'rpn_loss_cls_car': 0 if scalar else rpn_loss_cls_dict['car'], 
+            'rpn_loss_cls_ped': 0 if scalar else rpn_loss_cls_dict['ped'],
+            'rpn_loss_cls_cyc': 0 if scalar else rpn_loss_cls_dict['cyc'],
+            'rpn_acc_car' : 0 if scalar else rpn_acc_car,
+            'rpn_acc_ped' : 0 if scalar else rpn_acc_ped,
+            'rpn_acc_cyc' : 0 if scalar else rpn_acc_cyc,
         }
 
         return cls_loss, tb_dict
@@ -202,11 +225,29 @@ class AnchorHeadTemplate(nn.Module):
             loc_loss = loc_loss_src.sum() / batch_size
         else:
             loc_loss = loc_loss_src.reshape(batch_size, -1).sum(-1)
+            rpn_loss_loc_dict = {}
+            rpn_loss_loc_dict['car'] = loc_loss_src[:,0:70400,:].sum(-1)
+            # rpn_loss_loc_dict['lb_car'] = loc_loss_src[:,0:70400,:].sum(-1)[0]
+            # rpn_loss_loc_dict['ulb_car'] = loc_loss_src[:,0:70400,:].sum(-1)[1]
+
+            rpn_loss_loc_dict['ped'] = loc_loss_src[:,70400:140800,:].sum(-1)
+            # rpn_loss_loc_dict['lb_ped'] = loc_loss_src[:,70400:140800,:].sum(-1)[0]
+            # rpn_loss_loc_dict['ulb_ped'] = loc_loss_src[:,70400:140800,:].sum(-1)[1]
+
+            rpn_loss_loc_dict['cyc'] = loc_loss_src[:,140800:211200,:].sum(-1)
+            # rpn_loss_loc_dict['lb_cyc'] = loc_loss_src[:,140800:211200,:].sum(-1)[0]
+            # rpn_loss_loc_dict['ulb_cyc'] = loc_loss_src[:,140800:211200,:].sum(-1)[1]
+
 
         loc_loss = loc_loss * self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS['loc_weight']
+        # lb_loc_loss = loc_loss[0].item()
+        # ulb_loc_loss = loc_loss[1].item()
         box_loss = loc_loss
         tb_dict = {
-            'rpn_loss_loc': loc_loss.item() if scalar else loc_loss
+            'rpn_loss_loc': loc_loss.item() if scalar else loc_loss,
+            'rpn_loss_loc_car': 0 if scalar else rpn_loss_loc_dict['car'],
+            'rpn_loss_loc_ped': 0 if scalar else rpn_loss_loc_dict['ped'],
+            'rpn_loss_loc_cyc': 0 if scalar else rpn_loss_loc_dict['cyc'],
         }
 
         if box_dir_cls_preds is not None:
@@ -220,6 +261,7 @@ class AnchorHeadTemplate(nn.Module):
             weights = positives.type_as(dir_logits)
             weights /= torch.clamp(weights.sum(-1, keepdim=True), min=1.0)
             dir_loss = self.dir_loss_func(dir_logits, dir_targets, weights=weights)
+            # Reimplement dir_loss for car,ped,cyc?
             if scalar:
                 dir_loss = dir_loss.sum() / batch_size
             else:
@@ -236,6 +278,8 @@ class AnchorHeadTemplate(nn.Module):
         box_loss, tb_dict_box = self.get_box_reg_layer_loss(scalar=scalar)
         tb_dict.update(tb_dict_box)
         rpn_loss = cls_loss + box_loss
+        #lb_rpn_loss = rpn_loss[0].item()
+        #ulb_rpn_loss = rpn_loss[1].item()
 
         if scalar:
             tb_dict['rpn_loss'] = rpn_loss.item()
