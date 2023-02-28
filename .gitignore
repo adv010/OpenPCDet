@@ -1,6 +1,6 @@
 **__pycache__**
-**build**
-**egg-info**
+#**build**
+#**egg-info**
 *.pyc
 venv/
 *.idea/
