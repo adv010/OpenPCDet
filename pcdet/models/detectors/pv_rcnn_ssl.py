@@ -330,6 +330,14 @@ class PVRCNN_SSL(Detector3DTemplate):
                     batch_dict_std['point_cls_scores'] = batch_dict_ema['point_cls_scores'].data.clone()
 
                     batch_dict_std = self.reverse_augmentation(batch_dict_std, batch_dict, unlabeled_inds) # Take student's proposals, unaugment them before passing to teacher's rcnn. 
+                    # Perturb Student's ROIs before using them for Teacher's ROI head
+                    if self.model_cfg.ROI_HEAD.ROI_AUG.get('ENABLE', False):
+                        augment_rois = getattr(augmentor_utils, self.model_cfg.ROI_HEAD.ROI_AUG.AUG_TYPE, augmentor_utils.roi_aug_ros)
+                        # rois_before_aug is used only for debugging, can be removed later
+                        batch_dict_std['rois_before_aug'] = batch_dict_std['rois'].clone().detach()
+                        batch_dict_std['rois'][unlabeled_inds] = \
+                            augment_rois(batch_dict_std['rois'][unlabeled_inds], self.model_cfg.ROI_HEAD)
+
                     self.pv_rcnn_ema.roi_head.forward(batch_dict_std,
                                                       disable_gt_roi_when_pseudo_labeling=True) # Obtain Teacher's RCNN scores for Student's proposals. 
                     batch_dict_std = self.apply_augmentation(batch_dict_std, batch_dict, unlabeled_inds, key='batch_box_preds') # To take teacher's proposals to supervise student, first make them student-compatible by augmenting them. Then send this to student.
