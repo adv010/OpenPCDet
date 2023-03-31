@@ -8,6 +8,11 @@ from .target_assigner.atss_target_assigner import ATSSTargetAssigner
 from .target_assigner.axis_aligned_target_assigner import AxisAlignedTargetAssigner
 
 
+def replace_inf_to_zero(val):
+    val[val == float('inf')] = 0.0
+    return val
+
+
 class AnchorHeadTemplate(nn.Module):
     def __init__(self, model_cfg, num_class, class_names, grid_size, point_cloud_range, predict_boxes_when_training):
         super().__init__()
@@ -16,6 +21,11 @@ class AnchorHeadTemplate(nn.Module):
         self.class_names = class_names
         self.predict_boxes_when_training = predict_boxes_when_training
         self.use_multihead = self.model_cfg.get('USE_MULTIHEAD', False)
+
+        self.momentum = 0.9
+        self.p_model = torch.ones(num_class).cuda() / num_class
+        self.label_hist = torch.ones(num_class).cuda() / num_class
+        self.time_p = self.p_model.mean()
 
         anchor_target_cfg = self.model_cfg.TARGET_ASSIGNER_CONFIG
         self.box_coder = getattr(box_coder_utils, anchor_target_cfg.BOX_CODER)(
@@ -230,19 +240,64 @@ class AnchorHeadTemplate(nn.Module):
             tb_dict['rpn_loss_dir'] = dir_loss.item() if scalar else dir_loss
 
         return box_loss, tb_dict
+    
+    def get_global_threshold(self, clip_thresh):
+        '''
+        We set the global threshold τt as average confidence from the model on unlabeled data
+        We estimate the global confidence as the exponential moving average (EMA) of the confidence at each training time step
+        lambda (0,1) is the momentum decay of EMA
+        '''
+        mu = 1 # ulb:lb batch size ratio
+        batch_size = (self.forward_ret_dict['cls_preds']).shape[0]
+        x_ulb_w = self.forward_ret_dict['cls_preds'].view(batch_size, 211200, -1)[1]
+        x_ulb_w = torch.softmax(x_ulb_w,dim =0)
+        max_probs,max_index = torch.max(x_ulb_w, dim=-1, keepdim=True)
+
+        self.time_p = self.time_p * self.momentum + (1-self.momentum) * max_probs.mean()
+
+        if clip_thresh==True:
+            self.time_p = torch.clip(self.time_p,0.0,0.95)
+        
+        self.p_model = self.p_model * self.momentum + (1 - self.momentum) * max_probs.mean(dim = 0) # p~ in Freematch paper
+
+        tau = self.p_model / torch.max(self.p_model)
+        mask = max_probs.ge(self.time_p * tau[max_index]).to(max_probs.dtype) #mask using global threshold tau
+        mask = mask.bool()
+        return mask
+
+
+
+    def get_log_pbar_loss(self,clip_thresh=False, scalar=True):
+        U = torch.tensor([0.8192846565668072, 0.12985533659870144, 0.0508600068344914],
+                                    device=self.forward_ret_dict['cls_preds'].device)
+        batch_size = (self.forward_ret_dict['cls_preds']).shape[0]
+        mask = self.get_global_threshold(clip_thresh)
+        x_ulb_w = self.forward_ret_dict['cls_preds'].view(batch_size, 211200, -1)
+        x_ulb_s = self.forward_ret_dict['teacher_rpn_preds'][1] 
+        x_ulb_s= torch.softmax(x_ulb_s,dim=0)
+
+        p_bar = torch.max(x_ulb_s[mask], dim=-1).mean()
+        log_pbar_loss = torch.dot(U, torch.log(p_bar))
+        tb_dict = {
+            'log_pbar_loss': log_pbar_loss.item() if scalar else log_pbar_loss
+        }
+        return log_pbar_loss, tb_dict
 
     def get_loss(self, scalar=True):
         cls_loss, tb_dict = self.get_cls_layer_loss(scalar=scalar)
         box_loss, tb_dict_box = self.get_box_reg_layer_loss(scalar=scalar)
+        Ulog_pbar_loss, tb_dict_pbar = self.get_log_pbar_loss(scalar=scalar,clip_thresh = False)
         tb_dict.update(tb_dict_box)
-        rpn_loss = cls_loss + box_loss
+        tb_dict.update(tb_dict_pbar)
+
+        rpn_loss = cls_loss + box_loss+ Ulog_pbar_loss
 
         if scalar:
             tb_dict['rpn_loss'] = rpn_loss.item()
             return rpn_loss, tb_dict
         else:
             tb_dict['rpn_loss'] = rpn_loss
-            return cls_loss, box_loss, tb_dict
+            return cls_loss, box_loss, Ulog_pbar_loss, tb_dict
 
     def generate_predicted_boxes(self, batch_size, cls_preds, box_preds, dir_cls_preds=None):
         """
