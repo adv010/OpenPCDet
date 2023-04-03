@@ -23,9 +23,10 @@ class AnchorHeadTemplate(nn.Module):
         self.use_multihead = self.model_cfg.get('USE_MULTIHEAD', False)
 
         self.momentum = 0.9
-        self.p_model = torch.ones(num_class).cuda() / num_class
+        self.p_tilde = torch.ones(num_class).cuda() / num_class #p~
+        self.tau_t = self.p_tilde.mean() #
         self.label_hist = torch.ones(num_class).cuda() / num_class
-        self.time_p = self.p_model.mean()
+        
 
         anchor_target_cfg = self.model_cfg.TARGET_ASSIGNER_CONFIG
         self.box_coder = getattr(box_coder_utils, anchor_target_cfg.BOX_CODER)(
@@ -243,27 +244,29 @@ class AnchorHeadTemplate(nn.Module):
     
     def get_global_threshold(self, clip_thresh):
         '''
-        We set the global threshold τt as average confidence from the model on unlabeled data
+        We set the global threshold τt as EMA of confidence from the model on unlabeled data
         We estimate the global confidence as the exponential moving average (EMA) of the confidence at each training time step
         lambda (0,1) is the momentum decay of EMA
         '''
         mu = 1 # ulb:lb batch size ratio
         batch_size = (self.forward_ret_dict['cls_preds']).shape[0]
-        x_ulb_w = self.forward_ret_dict['cls_preds'].view(batch_size, 211200, -1)[1]
-        x_ulb_w = torch.softmax(x_ulb_w,dim =0)
-        max_probs,max_index = torch.max(x_ulb_w, dim=-1, keepdim=True)
+        x_ulb_w = self.forward_ret_dict['cls_preds'].view(batch_size, 211200, -1)
+        unlabeled_inds = self.forward_ret_dict['unlabeled_inds']
+        x_ulb_w = x_ulb_w[unlabeled_inds, ...]
+        x_ulb_w = torch.softmax(x_ulb_w,dim = 1) #batch_size,211200,3
+        max_probs,max_index = torch.max(x_ulb_w,dim=-1)
 
-        self.time_p = self.time_p * self.momentum + (1-self.momentum) * max_probs.mean()
+        self.tau_t = self.tau_t * self.momentum + (1-self.momentum) * max_probs.mean(dim=-1).mean()
 
         if clip_thresh==True:
-            self.time_p = torch.clip(self.time_p,0.0,0.95)
+            self.tau_t = torch.clip(self.tau_t,0.0,0.95)
         
-        self.p_model = self.p_model * self.momentum + (1 - self.momentum) * max_probs.mean(dim = 0) # p~ in Freematch paper
+        self.p_tilde = self.p_tilde * self.momentum + (1 - self.momentum) * x_ulb_w.mean(dim=1).mean(dim=0)
 
-        tau = self.p_model / torch.max(self.p_model)
-        mask = max_probs.ge(self.time_p * tau[max_index]).to(max_probs.dtype) #mask using global threshold tau
-        mask = mask.bool()
-        return mask
+        self.p_tilde = self.p_tilde / torch.max(self.p_tilde)
+        tau = max_probs.ge(self.tau_t * self.p_tilde[max_index]).to(max_probs.dtype) # (max (qb) ≥ τt(arg max (qb))
+        tau = tau.bool()
+        return tau, max_probs,max_index
 
 
 
@@ -271,13 +274,16 @@ class AnchorHeadTemplate(nn.Module):
         U = torch.tensor([0.8192846565668072, 0.12985533659870144, 0.0508600068344914],
                                     device=self.forward_ret_dict['cls_preds'].device)
         batch_size = (self.forward_ret_dict['cls_preds']).shape[0]
-        mask = self.get_global_threshold(clip_thresh)
-        x_ulb_w = self.forward_ret_dict['cls_preds'].view(batch_size, 211200, -1)
-        x_ulb_s = self.forward_ret_dict['teacher_rpn_preds'][1] 
-        x_ulb_s= torch.softmax(x_ulb_s,dim=0)
+        tau, max_probs,max_index = self.get_global_threshold(clip_thresh)
+        x_ulb_s = self.forward_ret_dict['teacher_rpn_preds'].view(batch_size, 211200, -1)
+        unlabeled = self.forward_ret_dict['unlabeled_inds']
+        x_ulb_s = x_ulb_s[unlabeled][:][:]
+        x_ulb_s= torch.softmax(x_ulb_s,dim=1)
+        indicator = max_probs.ge(tau * self.p_tilde[max_index]).to(max_probs.dtype) #indicator (max (qb) ≥ τt(arg max (qb))
+        indicator = torch.cat((indicator.unsqueeze(-1),indicator.unsqueeze(-1),indicator.unsqueeze(-1)), dim=-1) # extend to [batch_size,211200, 3]
 
-        p_bar = torch.max(x_ulb_s[mask], dim=-1).mean()
-        log_pbar_loss = torch.dot(U, torch.log(p_bar))
+        p_bar = (indicator*x_ulb_s).mean() 
+        log_pbar_loss = torch.sum(U * torch.log(p_bar))
         tb_dict = {
             'log_pbar_loss': log_pbar_loss.item() if scalar else log_pbar_loss
         }

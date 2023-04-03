@@ -179,7 +179,8 @@ class PVRCNN_SSL(Detector3DTemplate):
                     batch_dict['gt_boxes'][unlabeled_inds, ...], batch_dict['scale'][unlabeled_inds, ...]
                 )
 
-                batch_dict['teacher_rpn_preds'] = teacher_rpn_preds
+                batch_dict['teacher_rpn_preds'] = teacher_rpn_preds # to use inside student's dense_head 
+                batch_dict['unlabeled_inds'] = unlabeled_inds
 
                 pseudo_ious = []
                 pseudo_accs = []
