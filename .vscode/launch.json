@@ -1,0 +1,37 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run with argument",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/tools",
+            "env": {"CUDA_VISIBLE_DEVICES": "1"},
+            "args": ["--cfg_file" ,
+                    "cfgs/kitti_models/pv_rcnn_ssl_60.yaml",
+                    "--split",
+                    "train_0.01_1",
+                    "--batch_size",
+                    "2",
+                    "--ckpt_save_interval",
+                    "1",
+                    "--repeat",
+                    "5",
+                    "--fix_random_seed",
+                    "--extra_tag",
+                    "consistency_debug", 
+                    "--thresh",
+                    "0.0,0.25,0.25", 
+                    "--sem_thresh", 
+                    "0.0,0.0,0.0", 
+                    "--dbinfos",
+                    "kitti_dbinfos_train_0.01_1_37.pkl",
+                    "--set",
+                    "MODEL.DENSE_HEAD.CLASS_IMB_TYPE",
+                    "Ulogp"
+            ],
+        }
+    ]
+}
