@@ -51,6 +51,10 @@ class AnchorHeadSingle(AnchorHeadTemplate):
 
         self.forward_ret_dict['cls_preds'] = cls_preds
         self.forward_ret_dict['box_preds'] = box_preds
+        if 'teacher_rpn_preds' in data_dict.keys():
+            self.forward_ret_dict['teacher_rpn_preds'] = data_dict['teacher_rpn_preds']
+            self.forward_ret_dict['unlabeled_inds'] = data_dict['unlabeled_inds']
+
 
         if self.conv_dir_cls is not None:
             dir_cls_preds = self.conv_dir_cls(spatial_features_2d)

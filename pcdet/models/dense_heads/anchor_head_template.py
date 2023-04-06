@@ -8,6 +8,11 @@ from .target_assigner.atss_target_assigner import ATSSTargetAssigner
 from .target_assigner.axis_aligned_target_assigner import AxisAlignedTargetAssigner
 
 
+def replace_inf_to_zero(val):
+    val[val == float('inf')] = 0.0
+    return val
+
+
 class AnchorHeadTemplate(nn.Module):
     def __init__(self, model_cfg, num_class, class_names, grid_size, point_cloud_range, predict_boxes_when_training):
         super().__init__()
@@ -16,6 +21,12 @@ class AnchorHeadTemplate(nn.Module):
         self.class_names = class_names
         self.predict_boxes_when_training = predict_boxes_when_training
         self.use_multihead = self.model_cfg.get('USE_MULTIHEAD', False)
+
+        self.momentum = 0.9
+        self.p_tilde = torch.ones(num_class).cuda() #/ num_class #p~
+        self.tau_t = self.p_tilde.mean() #
+        self.label_hist = torch.ones(num_class).cuda() #/ num_class
+        
 
         anchor_target_cfg = self.model_cfg.TARGET_ASSIGNER_CONFIG
         self.box_coder = getattr(box_coder_utils, anchor_target_cfg.BOX_CODER)(
@@ -230,19 +241,74 @@ class AnchorHeadTemplate(nn.Module):
             tb_dict['rpn_loss_dir'] = dir_loss.item() if scalar else dir_loss
 
         return box_loss, tb_dict
+    
+    def get_global_threshold(self, clip_thresh):
+        '''
+        We set the global threshold τt as EMA of confidence from the model on unlabeled data
+        We estimate the global confidence as the exponential moving average (EMA) of the confidence at each training time step
+        lambda (0,1) is the momentum decay of EMA
+        '''
+        mu = 1 # ulb:lb batch size ratio
+        batch_size = (self.forward_ret_dict['cls_preds']).shape[0]
+        x_ulb_w = self.forward_ret_dict['cls_preds'].view(batch_size, 211200, -1)
+        unlabeled_inds = self.forward_ret_dict['unlabeled_inds']
+        x_ulb_w = x_ulb_w[unlabeled_inds, ...]
+        probs_x_ulb_w = torch.softmax(x_ulb_w,dim = 1) #batch_size,211200,3
+        max_probs,max_index = torch.max(x_ulb_w,dim=-1,keepdim=True)
+
+        self.tau_t = self.tau_t * self.momentum + (1-self.momentum) * max_probs.mean()
+
+        if clip_thresh==True:
+            self.tau_t = torch.clip(self.tau_t,0.0,0.95)
+        
+        self.p_tilde = self.p_tilde * self.momentum + (1 - self.momentum) * x_ulb_w.mean(dim=1).mean(dim=0)
+        max_probs, max_idx = probs_x_ulb_w.max(dim=-1)
+        tau = self.p_tilde/ self.p_tilde.max(dim=-1)[0]
+        mask = max_probs.ge(self.tau_t * tau[max_idx]).to(max_probs.dtype) #MaxNorm( ̃pt(c)) · τt 
+
+        return mask
+
+
+    def get_log_pbar_loss(self,clip_thresh=False, scalar=True):
+        U = torch.tensor([0.8192846565668072, 0.12985533659870144, 0.0508600068344914],
+                                    device=self.forward_ret_dict['cls_preds'].device)
+        batch_size = (self.forward_ret_dict['cls_preds']).shape[0]
+        mask = self.get_global_threshold(clip_thresh)
+        mask = mask.bool()
+        x_ulb_s = self.forward_ret_dict['teacher_rpn_preds'].view(batch_size, 211200, -1)
+        unlabeled = self.forward_ret_dict['unlabeled_inds']
+        x_ulb_s = x_ulb_s[unlabeled][:][:]
+
+        x_ulb_s = x_ulb_s[mask]
+
+        probs_x_ulb_s= torch.softmax(x_ulb_s,dim=1)
+        max_probs_s, pred_label_s = torch.max(probs_x_ulb_s, dim=-1)
+        p_bar = max_probs_s.mean()
+        
+        log_pbar_loss = U * torch.log(p_bar+ 1e-12)
+        classwise_log_pbar_loss = log_pbar_loss # For future logging
+        log_pbar_loss = log_pbar_loss.sum()
+        tb_dict = {
+            'log_pbar_loss':  log_pbar_loss.unsqueeze(0).repeat(self.forward_ret_dict['cls_preds'].shape[0], 1)
+        }
+        return log_pbar_loss, tb_dict
 
     def get_loss(self, scalar=True):
         cls_loss, tb_dict = self.get_cls_layer_loss(scalar=scalar)
         box_loss, tb_dict_box = self.get_box_reg_layer_loss(scalar=scalar)
+        # if self.model_cfg.DENSE_HEAD.get('CLASS_IMB_TYPE', False):
+        Ulog_pbar_loss, tb_dict_pbar = self.get_log_pbar_loss(scalar=scalar,clip_thresh = False)
         tb_dict.update(tb_dict_box)
-        rpn_loss = cls_loss + box_loss
+        tb_dict.update(tb_dict_pbar)
+
+        rpn_loss = cls_loss + box_loss+ Ulog_pbar_loss
 
         if scalar:
             tb_dict['rpn_loss'] = rpn_loss.item()
             return rpn_loss, tb_dict
         else:
             tb_dict['rpn_loss'] = rpn_loss
-            return cls_loss, box_loss, tb_dict
+            return cls_loss, box_loss, Ulog_pbar_loss, tb_dict
 
     def generate_predicted_boxes(self, batch_size, cls_preds, box_preds, dir_cls_preds=None):
         """

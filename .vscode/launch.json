@@ -28,9 +28,6 @@
                     "0.0,0.0,0.0", 
                     "--dbinfos",
                     "kitti_dbinfos_train_0.01_1_37.pkl",
-                    "--set",
-                    "MODEL.DENSE_HEAD.CLASS_IMB_TYPE",
-                    "Ulogp"
             ],
         }
     ]
