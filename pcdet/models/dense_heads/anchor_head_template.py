@@ -23,9 +23,10 @@ class AnchorHeadTemplate(nn.Module):
         self.use_multihead = self.model_cfg.get('USE_MULTIHEAD', False)
 
         self.momentum = 0.9
-        self.p_tilde = torch.ones(num_class).cuda() #/ num_class #p~
+        self.device=None
+        self.p_tilde = torch.ones(num_class) #/ num_class #p~
         self.tau_t = self.p_tilde.mean() #
-        self.label_hist = torch.ones(num_class).cuda() #/ num_class
+        self.label_hist = torch.ones(num_class) #/ num_class
         
 
         anchor_target_cfg = self.model_cfg.TARGET_ASSIGNER_CONFIG
@@ -254,14 +255,16 @@ class AnchorHeadTemplate(nn.Module):
         unlabeled_inds = self.forward_ret_dict['unlabeled_inds']
         x_ulb_w = x_ulb_w[unlabeled_inds, ...]
         probs_x_ulb_w = torch.softmax(x_ulb_w,dim = 1) #batch_size,211200,3
-        max_probs,max_index = torch.max(x_ulb_w,dim=-1,keepdim=True)
+        max_probs,max_index = x_ulb_w.max(dim=-1,keepdim=True)
 
-        self.tau_t = self.tau_t * self.momentum + (1-self.momentum) * max_probs.mean()
+        self.device = self.forward_ret_dict['cls_preds'].device
+
+        self.tau_t = self.tau_t.to(self.device) * self.momentum + (1-self.momentum) * max_probs.mean()
 
         if clip_thresh==True:
             self.tau_t = torch.clip(self.tau_t,0.0,0.95)
         
-        self.p_tilde = self.p_tilde * self.momentum + (1 - self.momentum) * x_ulb_w.mean(dim=1).mean(dim=0)
+        self.p_tilde = self.p_tilde.to(self.device) * self.momentum + (1 - self.momentum) * x_ulb_w.mean(dim=1).mean(dim=0)
         max_probs, max_idx = probs_x_ulb_w.max(dim=-1)
         tau = self.p_tilde/ self.p_tilde.max(dim=-1)[0]
         mask = max_probs.ge(self.tau_t * tau[max_idx]).to(max_probs.dtype) #MaxNorm( ̃pt(c)) · τt 
