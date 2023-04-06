@@ -103,7 +103,7 @@ class RoIHeadTemplate(nn.Module):
         return batch_dict
     
     def update_metrics(self, targets_dict, mask_type='cls', vis_type='pred_gt', pred_type=None):
-        metric_registry = targets_dict['metric_registry']
+        # metric_registry = targets_dict['metric_registry']
         unlabeled_inds = targets_dict['unlabeled_inds']
 
         sample_preds, sample_pred_scores, sample_pred_weights = [], [], []
@@ -196,13 +196,13 @@ class RoIHeadTemplate(nn.Module):
             metrics_pred_pl.update(**metric_inputs_pred_pl)
         if 'roi_pl_gt' in pred_type:
             tag = f'rcnn_roi_pl_gt_metrics_{mask_type}'
-            metrics = metric_registry.get(tag)
-            metric_inputs = {'preds': sample_rois, 'pred_scores': sample_roi_scores,
-                             'ground_truths': sample_gts, 'targets': sample_targets,
-                             'pseudo_labels': sample_pls, 'pseudo_label_scores': sample_pl_scores,
-                             'target_scores': sample_target_scores, 'pred_weights': sample_pred_weights,
-                             'pred_iou_wrt_pl': sample_gt_iou_of_rois}
-            metrics.update(**metric_inputs)
+            # metrics = metric_registry.get(tag)
+            # metric_inputs = {'preds': sample_rois, 'pred_scores': sample_roi_scores,
+            #                  'ground_truths': sample_gts, 'targets': sample_targets,
+            #                  'pseudo_labels': sample_pls, 'pseudo_label_scores': sample_pl_scores,
+            #                  'target_scores': sample_target_scores, 'pred_weights': sample_pred_weights,
+            #                  'pred_iou_wrt_pl': sample_gt_iou_of_rois}
+            # metrics.update(**metric_inputs)
 
     def assign_targets(self, batch_dict):
         batch_size = batch_dict['batch_size']
