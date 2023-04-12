@@ -21,13 +21,19 @@
                     "5",
                     "--fix_random_seed",
                     "--extra_tag",
-                    "consistency_debug", 
+                    "Ulogpbar_debug", 
                     "--thresh",
                     "0.0,0.25,0.25", 
                     "--sem_thresh", 
                     "0.0,0.0,0.0", 
                     "--dbinfos",
                     "kitti_dbinfos_train_0.01_1_37.pkl",
+                    "--set",
+                    "MODEL.DENSE_HEAD.LOSS_CONFIG.UL_CLASS_IMB_FAIRNESS",
+                    "UlogPbar",
+                    "MODEL.POST_PROCESSING.ENABLE_KITTI_EVAL",
+                    "False"
+
             ],
         }
     ]

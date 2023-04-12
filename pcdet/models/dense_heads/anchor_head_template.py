@@ -24,9 +24,9 @@ class AnchorHeadTemplate(nn.Module):
 
         self.momentum = 0.9
         self.device=None
-        self.p_tilde = torch.ones(num_class) #/ num_class #p~
+        self.p_tilde = torch.ones(num_class) / num_class #p~
         self.tau_t = self.p_tilde.mean() #
-        self.label_hist = torch.ones(num_class) #/ num_class
+        self.h_tilde = torch.ones(num_class) / num_class
         
 
         anchor_target_cfg = self.model_cfg.TARGET_ASSIGNER_CONFIG
@@ -254,22 +254,26 @@ class AnchorHeadTemplate(nn.Module):
         x_ulb_w = self.forward_ret_dict['cls_preds'].view(batch_size, 211200, -1)
         unlabeled_inds = self.forward_ret_dict['unlabeled_inds']
         x_ulb_w = x_ulb_w[unlabeled_inds, ...]
-        probs_x_ulb_w = torch.softmax(x_ulb_w,dim = 1) #batch_size,211200,3
-        max_probs,max_index = x_ulb_w.max(dim=-1,keepdim=True)
+        probs_x_ulb_w = torch.softmax(x_ulb_w.detach(),dim = -1) #batch_size,211200,3
+        max_probs,max_idx = probs_x_ulb_w.max(dim=-1)
 
         self.device = self.forward_ret_dict['cls_preds'].device
 
-        self.tau_t = self.tau_t.to(self.device) * self.momentum + (1-self.momentum) * max_probs.mean()
+        self.tau_t = self.tau_t.to(self.device) * self.momentum + (1-self.momentum) * max_probs.mean() #global threshold 
 
         if clip_thresh==True:
             self.tau_t = torch.clip(self.tau_t,0.0,0.95)
         
-        self.p_tilde = self.p_tilde.to(self.device) * self.momentum + (1 - self.momentum) * x_ulb_w.mean(dim=1).mean(dim=0)
-        max_probs, max_idx = probs_x_ulb_w.max(dim=-1)
-        tau = self.p_tilde/ self.p_tilde.max(dim=-1)[0]
-        mask = max_probs.ge(self.tau_t * tau[max_idx]).to(max_probs.dtype) #MaxNorm( ̃pt(c)) · τt 
+        self.p_tilde = self.p_tilde.to(self.device) * self.momentum + (1 - self.momentum) * max_probs.mean() #local threshold
+        tau_t_c = self.p_tilde/ self.p_tilde.max(dim=-1)[0]
+        mask = max_probs.ge(self.tau_t * tau_t_c[max_idx]).to(max_probs.dtype) #MaxNorm( ̃pt(c)) · τt 
 
-        return mask
+        # EMA h_tilde calculated over weak aug logits 
+        hist = torch.bincount(max_idx.reshape(-1), minlength=self.p_tilde.shape[0]).to(self.p_tilde.dtype)
+        self.h_tilde = self.h_tilde.to(self.device) * self.momentum + (1 - self.momentum) * (hist / hist.sum())
+
+
+        return mask #mask returned as all 0s
 
 
     def get_log_pbar_loss(self,clip_thresh=False, scalar=True):
@@ -278,40 +282,92 @@ class AnchorHeadTemplate(nn.Module):
         batch_size = (self.forward_ret_dict['cls_preds']).shape[0]
         mask = self.get_global_threshold(clip_thresh)
         mask = mask.bool()
-        x_ulb_s = self.forward_ret_dict['teacher_rpn_preds'].view(batch_size, 211200, -1)
-        unlabeled = self.forward_ret_dict['unlabeled_inds']
-        x_ulb_s = x_ulb_s[unlabeled][:][:]
-
-        x_ulb_s = x_ulb_s[mask]
-
-        probs_x_ulb_s= torch.softmax(x_ulb_s,dim=1)
-        max_probs_s, pred_label_s = torch.max(probs_x_ulb_s, dim=-1)
-        p_bar = max_probs_s.mean()
-        
-        log_pbar_loss = U * torch.log(p_bar+ 1e-12)
-        classwise_log_pbar_loss = log_pbar_loss # For future logging
-        log_pbar_loss = log_pbar_loss.sum()
+        if mask.sum() > 0:
+            x_ulb_s = self.forward_ret_dict['student_rpn_preds']
+            unlabeled = self.forward_ret_dict['unlabeled_inds']
+            x_ulb_s = x_ulb_s[unlabeled][:][:]
+            x_ulb_s = x_ulb_s[mask] #masked Q^
+            probs_x_ulb_s = torch.softmax(x_ulb_s,dim=-1)
+            p_bar = probs_x_ulb_s.mean(dim=0) #1x3
+            log_pbar_loss = U * torch.log(p_bar+ 1e-12)
+            #classwise_log_pbar_loss = log_pbar_loss # For future logging
+            log_pbar_loss = log_pbar_loss.sum(dim = -1)
+        else:
+            log_pbar_loss = 0.0
         tb_dict = {
             'log_pbar_loss':  log_pbar_loss.unsqueeze(0).repeat(self.forward_ret_dict['cls_preds'].shape[0], 1)
         }
         return log_pbar_loss, tb_dict
+    
+    def get_sumnorm_loss(self,clip_thresh=False, scalar=True): # U log SumNorm(pbar/hbar) 
+        U = torch.tensor([0.8192846565668072, 0.12985533659870144, 0.0508600068344914],
+                                    device=self.forward_ret_dict['cls_preds'].device)
+        batch_size = (self.forward_ret_dict['cls_preds']).shape[0]
+        mask = self.get_global_threshold(clip_thresh)
+        mask = mask.bool()
+
+        x_ulb_s = self.forward_ret_dict['student_rpn_preds']
+        unlabeled = self.forward_ret_dict['unlabeled_inds']
+        x_ulb_s = x_ulb_s[unlabeled][:][:]
+        # if mask.sum()==0: #  Handle scenario where mask is 0
+        #     x_ulb_s = torch.zeros_like(x_ulb_s) #x_ulb_s is all zeros
+        #     device = x_ulb_s.device
+        #     # probs_x_ulb_s = torch.softmax(x_ulb_s,dim=1)
+        #     probs_x_ulb_s = x_ulb_s # Pass x_ulb_s as zeroes
+        #     max_probs_s, pred_label_s = torch.max(probs_x_ulb_s, dim=-1)
+        #     p_bar = torch.zeros(self.num_class).to(device) #p_bar is all zeroes
+        #     h_bar = torch.bincount(pred_label_s.reshape(-1), minlength=x_ulb_s.shape[-1]).to(x_ulb_s.dtype)
+        #     # TODO - When tensor is all 0s, ensure that the h_bar doesn't penalize car class
+        if mask.sum()>0:
+            x_ulb_s = x_ulb_s[mask]
+            probs_x_ulb_s= torch.softmax(x_ulb_s,dim=1)
+            _ , pred_label_s = torch.max(probs_x_ulb_s, dim=-1)
+            p_bar = probs_x_ulb_s.mean(dim = 0)
+            h_bar = torch.bincount(pred_label_s, minlength=x_ulb_s.shape[-1]).to(x_ulb_s.dtype)
+            h_bar = h_bar / h_bar.sum()
+            h_bar_inv = replace_inf_to_zero(1 / h_bar).detach() # 1/h_bar
+            mean_pbar_hbar = probs_x_ulb_s.mean(dim=-1, keepdim=True) * h_bar_inv 
+            sumnorm_pbar_hbar = mean_pbar_hbar / mean_pbar_hbar.sum(dim=-1, keepdim=True) # SumNorm p_bar / h_bar
+            sumnorm_loss= U * torch.log(sumnorm_pbar_hbar + 1e-12)
+            
+            '''
+            #For self adaptive fairness as per Freematch , uncomment this code block
+            self.h_tilde = self.h_tilde.reshape(1, -1)
+            prob_model_scaler = replace_inf_to_zero(1 / self.h_tilde).detach() # 1/h_tilde
+            mod_prob_model = self.p_tilde * prob_model_scaler
+            mod_prob_model = mod_prob_model / mod_prob_model.sum(dim=-1, keepdim=True) #SumNorm p_tilde / h_tilde        
+            sumnorm_loss= mod_prob_model * torch.log(mod_mean_prob_s + 1e-12)
+            '''
+            sumnorm_loss = sumnorm_loss.sum(dim = -1)
+        else:
+            sumnorm_loss = 0.0 
+    
+        tb_dict = {
+            'sumnorm_loss':  sumnorm_loss.unsqueeze(0).repeat(self.forward_ret_dict['cls_preds'].shape[0], 1)
+        }
+        return sumnorm_loss.mean(), tb_dict
+    
+
+
 
     def get_loss(self, scalar=True):
         cls_loss, tb_dict = self.get_cls_layer_loss(scalar=scalar)
         box_loss, tb_dict_box = self.get_box_reg_layer_loss(scalar=scalar)
-        # if self.model_cfg.DENSE_HEAD.get('CLASS_IMB_TYPE', False):
-        Ulog_pbar_loss, tb_dict_pbar = self.get_log_pbar_loss(scalar=scalar,clip_thresh = False)
+        if self.model_cfg.LOSS_CONFIG.UL_CLASS_IMB_FAIRNESS == "UlogPbar":
+            ul_class_imb_loss, tb_dict_pbar = self.get_log_pbar_loss(scalar=scalar,clip_thresh = False)
+        elif self.model_cfg.LOSS_CONFIG.UL_CLASS_IMB_FAIRNESS == "Sumnorm":
+            ul_class_imb_loss, tb_dict_pbar = self.get_sumnorm_loss(scalar=scalar,clip_thresh = False)
         tb_dict.update(tb_dict_box)
         tb_dict.update(tb_dict_pbar)
 
-        rpn_loss = cls_loss + box_loss+ Ulog_pbar_loss
+        rpn_loss = cls_loss + box_loss+ ul_class_imb_loss
 
         if scalar:
             tb_dict['rpn_loss'] = rpn_loss.item()
             return rpn_loss, tb_dict
         else:
             tb_dict['rpn_loss'] = rpn_loss
-            return cls_loss, box_loss, Ulog_pbar_loss, tb_dict
+            return cls_loss, box_loss, ul_class_imb_loss, tb_dict
 
     def generate_predicted_boxes(self, batch_size, cls_preds, box_preds, dir_cls_preds=None):
         """

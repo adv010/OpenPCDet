@@ -7,7 +7,7 @@ from pcdet.datasets.augmentor.augmentor_utils import *
 from pcdet.ops.iou3d_nms import iou3d_nms_utils
 from .detector3d_template import Detector3DTemplate
 from.pv_rcnn import PVRCNN
-# from ...utils.stats_utils import KITTIEvalMetrics, PredQualityMetrics
+from ...utils.stats_utils import KITTIEvalMetrics, PredQualityMetrics
 from torchmetrics.collections import MetricCollection
 import torch.distributed as dist
 
@@ -17,27 +17,27 @@ def _mean(tensor_list):
     mean = tensor.mean() if len(tensor) > 0 else torch.tensor([float('nan')])
     return mean
 
-# class MetricRegistry(object):
-#     def __init__(self, **kwargs):
-#         self._tag_metrics = {}
-#         self.dataset = kwargs.get('dataset', None)
-#         self.cls_bg_thresh = kwargs.get('cls_bg_thresh', None)
-#         self.model_cfg = kwargs.get('model_cfg', None)
-#     def get(self, tag=None):
-#         if tag is None:
-#             tag = 'default'
-#         if tag in self._tag_metrics.keys():
-#             metric = self._tag_metrics[tag]
-#         else:
-#             kitti_eval_metric = KITTIEvalMetrics(tag=tag, dataset=self.dataset, config=self.model_cfg)
-#             pred_qual_metric = PredQualityMetrics(tag=tag, dataset=self.dataset, cls_bg_thresh=self.cls_bg_thresh, config=self.model_cfg)
-#             metric = MetricCollection({"kitti_eval_metric": kitti_eval_metric,
-#                                        "pred_quality_metric": pred_qual_metric})
-#             self._tag_metrics[tag] = metric
-#         return metric
+class MetricRegistry(object):
+    def __init__(self, **kwargs):
+        self._tag_metrics = {}
+        self.dataset = kwargs.get('dataset', None)
+        self.cls_bg_thresh = kwargs.get('cls_bg_thresh', None)
+        self.model_cfg = kwargs.get('model_cfg', None)
+    def get(self, tag=None):
+        if tag is None:
+            tag = 'default'
+        if tag in self._tag_metrics.keys():
+            metric = self._tag_metrics[tag]
+        else:
+            kitti_eval_metric = KITTIEvalMetrics(tag=tag, dataset=self.dataset, config=self.model_cfg)
+            pred_qual_metric = PredQualityMetrics(tag=tag, dataset=self.dataset, cls_bg_thresh=self.cls_bg_thresh, config=self.model_cfg)
+            metric = MetricCollection({"kitti_eval_metric": kitti_eval_metric,
+                                       "pred_quality_metric": pred_qual_metric})
+            self._tag_metrics[tag] = metric
+        return metric
 
-#     def tags(self):
-#         return self._tag_metrics.keys()
+    def tags(self):
+        return self._tag_metrics.keys()
     
 class PVRCNN_SSL(Detector3DTemplate):
     def __init__(self, model_cfg, num_class, dataset):
@@ -62,7 +62,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         self.unlabeled_weight = model_cfg.UNLABELED_WEIGHT
         self.no_nms = model_cfg.NO_NMS
         self.supervise_mode = model_cfg.SUPERVISE_MODE
-        # self.metric_registry = MetricRegistry(dataset=self.dataset, model_cfg=model_cfg)
+        self.metric_registry = MetricRegistry(dataset=self.dataset, model_cfg=model_cfg)
 
     def forward(self, batch_dict):
         if self.training:
@@ -232,18 +232,22 @@ class PVRCNN_SSL(Detector3DTemplate):
                         pseudo_ious.append(nan)
                         pseudo_accs.append(nan)
                         pseudo_fgs.append(nan)
-            # batch_dict['metric_registry'] = self.metric_registry
+            batch_dict['metric_registry'] = self.metric_registry
             batch_dict['ori_unlabeled_boxes'] = ori_unlabeled_boxes
 
             for cur_module in self.pv_rcnn.module_list:
                 batch_dict = cur_module(batch_dict)
+                if cur_module == self.pv_rcnn.module_list[5]:
+                    student_rpn_preds = batch_dict['batch_cls_preds']
                 
+            self.pv_rcnn.dense_head.forward_ret_dict['student_rpn_preds'] = student_rpn_preds
+
             self.pv_rcnn.roi_head.forward_ret_dict['unlabeled_inds'] = unlabeled_inds
             self.pv_rcnn.roi_head.forward_ret_dict['pl_boxes'] = batch_dict['gt_boxes']
             self.pv_rcnn.roi_head.forward_ret_dict['pl_scores'] = pseudo_scores
 
             disp_dict = {}
-            loss_rpn_cls, loss_rpn_box,loss_Ulog_pbar, tb_dict = self.pv_rcnn.dense_head.get_loss(scalar=False)
+            loss_rpn_cls, loss_rpn_box, ul_class_imb_loss, tb_dict = self.pv_rcnn.dense_head.get_loss(scalar=False)
             loss_point, tb_dict = self.pv_rcnn.point_head.get_loss(tb_dict, scalar=False)
             loss_rcnn_cls, loss_rcnn_box, tb_dict = self.pv_rcnn.roi_head.get_loss(tb_dict, scalar=False)
 
@@ -264,7 +268,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             else:
                 loss_rcnn_box = loss_rcnn_box[labeled_inds, ...].sum() + loss_rcnn_box[unlabeled_inds, ...].sum() * self.unlabeled_weight
 
-            loss = loss_rpn_cls + loss_rpn_box + loss_Ulog_pbar + loss_point + loss_rcnn_cls + loss_rcnn_box
+            loss = loss_rpn_cls + loss_rpn_box + ul_class_imb_loss + loss_point + loss_rcnn_cls + loss_rcnn_box
             tb_dict_ = {}
             for key in tb_dict.keys():
                 if 'loss' in key:
@@ -287,9 +291,9 @@ class PVRCNN_SSL(Detector3DTemplate):
             tb_dict_['max_box_num'] = max_box_num
             tb_dict_['max_pseudo_box_num'] = max_pseudo_box_num
 
-            # for key in self.metric_registry.tags():
-            #     metrics = self.compute_metrics(tag=key)
-            #     tb_dict_.update(metrics)
+            for key in self.metric_registry.tags():
+                metrics = self.compute_metrics(tag=key)
+                tb_dict_.update(metrics)
 
             if dist.is_initialized():
                 rank = os.getenv('RANK')

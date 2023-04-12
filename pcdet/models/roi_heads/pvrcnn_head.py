@@ -152,7 +152,7 @@ class PVRCNNHead(RoIHeadTemplate):
             batch_dict['rois'] = targets_dict['rois']
             batch_dict['roi_labels'] = targets_dict['roi_labels']
             targets_dict['unlabeled_inds'] = batch_dict['unlabeled_inds']
-            # targets_dict['metric_registry'] = batch_dict['metric_registry']
+            targets_dict['metric_registry'] = batch_dict['metric_registry']
             targets_dict['unlabeled_inds'] = batch_dict['unlabeled_inds']
             targets_dict['ori_unlabeled_boxes'] = batch_dict['ori_unlabeled_boxes']
 

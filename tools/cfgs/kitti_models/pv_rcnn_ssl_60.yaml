@@ -108,6 +108,7 @@ MODEL:
                 'dir_weight': 0.2,
                 'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
             }
+            UL_CLASS_IMB_FAIRNESS: 'UlogPbar' #  options: 'Ulogpbar' , 'Sumnorm', 'Adamatch', 'ReMixMatch'
 
     PFE:
         NAME: VoxelSetAbstraction
