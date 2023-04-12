@@ -277,7 +277,7 @@ class AnchorHeadTemplate(nn.Module):
 
 
     def get_log_pbar_loss(self,clip_thresh=False, scalar=True):
-        U = torch.tensor([0.8192846565668072, 0.12985533659870144, 0.0508600068344914],
+        U = torch.tensor([0.34, 0.33, 0.33],
                                     device=self.forward_ret_dict['cls_preds'].device)
         batch_size = (self.forward_ret_dict['cls_preds']).shape[0]
         mask = self.get_global_threshold(clip_thresh)
