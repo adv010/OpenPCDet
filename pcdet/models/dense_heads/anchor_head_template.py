@@ -309,15 +309,6 @@ class AnchorHeadTemplate(nn.Module):
         x_ulb_s = self.forward_ret_dict['student_rpn_preds']
         unlabeled = self.forward_ret_dict['unlabeled_inds']
         x_ulb_s = x_ulb_s[unlabeled][:][:]
-        # if mask.sum()==0: #  Handle scenario where mask is 0
-        #     x_ulb_s = torch.zeros_like(x_ulb_s) #x_ulb_s is all zeros
-        #     device = x_ulb_s.device
-        #     # probs_x_ulb_s = torch.softmax(x_ulb_s,dim=1)
-        #     probs_x_ulb_s = x_ulb_s # Pass x_ulb_s as zeroes
-        #     max_probs_s, pred_label_s = torch.max(probs_x_ulb_s, dim=-1)
-        #     p_bar = torch.zeros(self.num_class).to(device) #p_bar is all zeroes
-        #     h_bar = torch.bincount(pred_label_s.reshape(-1), minlength=x_ulb_s.shape[-1]).to(x_ulb_s.dtype)
-        #     # TODO - When tensor is all 0s, ensure that the h_bar doesn't penalize car class
         if mask.sum()>0:
             x_ulb_s = x_ulb_s[mask]
             probs_x_ulb_s= torch.softmax(x_ulb_s,dim=1)
@@ -329,15 +320,6 @@ class AnchorHeadTemplate(nn.Module):
             mean_pbar_hbar = probs_x_ulb_s.mean() * h_bar_inv 
             sumnorm_pbar_hbar = mean_pbar_hbar / mean_pbar_hbar.sum(dim=-1, keepdim=True) # SumNorm p_bar / h_bar
             sumnorm_loss= U * torch.log(sumnorm_pbar_hbar + 1e-12)
-            
-            '''
-            #For self adaptive fairness as per Freematch , uncomment this code block
-            self.h_tilde = self.h_tilde.reshape(1, -1)
-            prob_model_scaler = replace_inf_to_zero(1 / self.h_tilde).detach() # 1/h_tilde
-            mod_prob_model = self.p_tilde * prob_model_scaler
-            mod_prob_model = mod_prob_model / mod_prob_model.sum(dim=-1, keepdim=True) #SumNorm p_tilde / h_tilde        
-            sumnorm_loss= mod_prob_model * torch.log(mod_mean_prob_s + 1e-12)
-            '''
             sumnorm_loss = sumnorm_loss.sum(dim = -1)
         else:
             sumnorm_loss = 0.0 
@@ -350,6 +332,43 @@ class AnchorHeadTemplate(nn.Module):
         return sumnorm_loss.mean(), tb_dict
     
 
+    def get_saf_loss(self,clip_thresh=False, scalar=True): #Self Adaptive Fairness as per Freematch 
+        batch_size = (self.forward_ret_dict['cls_preds']).shape[0]
+        mask, tau_t_c = self.get_global_threshold(clip_thresh)
+        mask = mask.bool()
+
+        x_ulb_s = self.forward_ret_dict['student_rpn_preds']
+        unlabeled = self.forward_ret_dict['unlabeled_inds']
+        x_ulb_s = x_ulb_s[unlabeled][:][:]
+
+        if mask.sum()>0:
+            x_ulb_s = x_ulb_s[mask]
+            probs_x_ulb_s= torch.softmax(x_ulb_s,dim=1)
+            _ , pred_label_s = torch.max(probs_x_ulb_s, dim=-1)
+            p_bar = probs_x_ulb_s.mean(dim = 0)
+            h_bar = torch.bincount(pred_label_s, minlength=x_ulb_s.shape[-1]).to(x_ulb_s.dtype)
+            h_bar = h_bar / h_bar.sum()
+            h_bar_inv = replace_inf_to_zero(1 / h_bar).detach() # 1/h_bar
+            mean_pbar_hbar = probs_x_ulb_s.mean() * h_bar_inv 
+            sumnorm_pbar_hbar = mean_pbar_hbar / mean_pbar_hbar.sum(dim=-1, keepdim=True) # SumNorm p_bar / h_bar
+
+            #For self adaptive fairness as per Freematch , uncomment this code block
+            self.h_tilde = self.h_tilde.reshape(1, -1)
+            prob_model_scaler = replace_inf_to_zero(1 / self.h_tilde).detach() # 1/h_tilde
+            mod_prob_model = self.p_tilde * prob_model_scaler
+            mod_prob_model = mod_prob_model / mod_prob_model.sum(dim=-1, keepdim=True) #SumNorm p_tilde / h_tilde        
+            saf_loss= mod_prob_model * torch.log(sumnorm_pbar_hbar + 1e-12)
+
+            saf_loss = saf_loss.sum(dim = -1)
+        else:
+            saf_loss = 0.0 
+    
+        tb_dict = {
+            'saf_loss':  saf_loss.unsqueeze(0).repeat(self.forward_ret_dict['cls_preds'].shape[0], 1),
+            'tau' : {'car' :tau_t_c[0].item() , 'ped': tau_t_c[1].item(), 'cyc' : tau_t_c[2].item() },
+            'p_tilde' : {'car' :self.p_tilde[0].item() , 'ped': self.p_tilde[1].item(), 'cyc' :self.p_tilde[2].item()}
+        }
+        return saf_loss.mean(), tb_dict
 
 
     def get_loss(self, scalar=True):
@@ -359,6 +378,8 @@ class AnchorHeadTemplate(nn.Module):
             ul_class_imb_loss, tb_dict_pbar = self.get_log_pbar_loss(scalar=scalar,clip_thresh = False)
         elif self.model_cfg.LOSS_CONFIG.UL_CLASS_IMB_FAIRNESS == "Sumnorm":
             ul_class_imb_loss, tb_dict_pbar = self.get_sumnorm_loss(scalar=scalar,clip_thresh = False)
+        elif self.model_cfg.LOSS_CONFIG.UL_CLASS_IMB_FAIRNESS == "SAF":
+            ul_class_imb_loss, tb_dict_pbar = self.get_saf_loss(scalar=scalar,clip_thresh = False)
         else:
             ul_class_imb_loss = 0.0
             tb_dict_pbar = {}
