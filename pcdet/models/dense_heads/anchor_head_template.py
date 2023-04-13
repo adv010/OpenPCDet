@@ -386,7 +386,7 @@ class AnchorHeadTemplate(nn.Module):
         tb_dict.update(tb_dict_box)
         tb_dict.update(tb_dict_pbar)
 
-        rpn_loss = cls_loss + box_loss+ ul_class_imb_loss
+        rpn_loss = cls_loss + box_loss+ self.model_cfg.LOSS_CONFIG.UL_CLASS_IMB_RATIO * ul_class_imb_loss
 
         if scalar:
             tb_dict['rpn_loss'] = rpn_loss.item()

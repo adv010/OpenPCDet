@@ -109,6 +109,7 @@ MODEL:
                 'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
             }
             UL_CLASS_IMB_FAIRNESS: 'UlogPbar' #  options: 'Ulogpbar' , 'Sumnorm', 'Adamatch', 'ReMixMatch', 'SAF'
+            UL_CLASS_IMB_RATIO : 0.001 # from freematch configs (ent_loss_ratio)
 
     PFE:
         NAME: VoxelSetAbstraction
