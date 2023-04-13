@@ -271,16 +271,14 @@ class AnchorHeadTemplate(nn.Module):
         # EMA h_tilde calculated over weak aug logits 
         hist = torch.bincount(max_idx.reshape(-1), minlength=self.p_tilde.shape[0]).to(self.p_tilde.dtype)
         self.h_tilde = self.h_tilde.to(self.device) * self.momentum + (1 - self.momentum) * (hist / hist.sum())
-
-
-        return mask #mask returned as all 0s
+        return mask,tau_t_c #mask returned as all 0s
 
 
     def get_log_pbar_loss(self,clip_thresh=False, scalar=True):
         U = torch.tensor([0.34, 0.33, 0.33],
                                     device=self.forward_ret_dict['cls_preds'].device)
         batch_size = (self.forward_ret_dict['cls_preds']).shape[0]
-        mask = self.get_global_threshold(clip_thresh)
+        mask, tau_t_c = self.get_global_threshold(clip_thresh)
         mask = mask.bool()
         if mask.sum() > 0:
             x_ulb_s = self.forward_ret_dict['student_rpn_preds']
@@ -295,7 +293,9 @@ class AnchorHeadTemplate(nn.Module):
         else:
             log_pbar_loss = 0.0
         tb_dict = {
-            'log_pbar_loss':  log_pbar_loss.unsqueeze(0).repeat(self.forward_ret_dict['cls_preds'].shape[0], 1)
+            'log_pbar_loss':  log_pbar_loss.unsqueeze(0).repeat(self.forward_ret_dict['cls_preds'].shape[0], 1),
+            'tau' : {'car' :tau_t_c[0].item() , 'ped': tau_t_c[1].item(), 'cyc' : tau_t_c[2].item() },
+            'p_tilde' : {'car' :self.p_tilde[0].item() , 'ped': self.p_tilde[1].item(), 'cyc' :self.p_tilde[2].item() }
         }
         return log_pbar_loss, tb_dict
     
@@ -303,7 +303,7 @@ class AnchorHeadTemplate(nn.Module):
         U = torch.tensor([0.8192846565668072, 0.12985533659870144, 0.0508600068344914],
                                     device=self.forward_ret_dict['cls_preds'].device)
         batch_size = (self.forward_ret_dict['cls_preds']).shape[0]
-        mask = self.get_global_threshold(clip_thresh)
+        mask, tau_t_c = self.get_global_threshold(clip_thresh)
         mask = mask.bool()
 
         x_ulb_s = self.forward_ret_dict['student_rpn_preds']
@@ -326,7 +326,7 @@ class AnchorHeadTemplate(nn.Module):
             h_bar = torch.bincount(pred_label_s, minlength=x_ulb_s.shape[-1]).to(x_ulb_s.dtype)
             h_bar = h_bar / h_bar.sum()
             h_bar_inv = replace_inf_to_zero(1 / h_bar).detach() # 1/h_bar
-            mean_pbar_hbar = probs_x_ulb_s.mean(dim=-1, keepdim=True) * h_bar_inv 
+            mean_pbar_hbar = probs_x_ulb_s.mean() * h_bar_inv 
             sumnorm_pbar_hbar = mean_pbar_hbar / mean_pbar_hbar.sum(dim=-1, keepdim=True) # SumNorm p_bar / h_bar
             sumnorm_loss= U * torch.log(sumnorm_pbar_hbar + 1e-12)
             
@@ -343,7 +343,9 @@ class AnchorHeadTemplate(nn.Module):
             sumnorm_loss = 0.0 
     
         tb_dict = {
-            'sumnorm_loss':  sumnorm_loss.unsqueeze(0).repeat(self.forward_ret_dict['cls_preds'].shape[0], 1)
+            'sumnorm_loss':  sumnorm_loss.unsqueeze(0).repeat(self.forward_ret_dict['cls_preds'].shape[0], 1),
+            'tau' : {'car' :tau_t_c[0].item() , 'ped': tau_t_c[1].item(), 'cyc' : tau_t_c[2].item() },
+            'p_tilde' : {'car' :self.p_tilde[0].item() , 'ped': self.p_tilde[1].item(), 'cyc' :self.p_tilde[2].item()}
         }
         return sumnorm_loss.mean(), tb_dict
     
@@ -357,6 +359,9 @@ class AnchorHeadTemplate(nn.Module):
             ul_class_imb_loss, tb_dict_pbar = self.get_log_pbar_loss(scalar=scalar,clip_thresh = False)
         elif self.model_cfg.LOSS_CONFIG.UL_CLASS_IMB_FAIRNESS == "Sumnorm":
             ul_class_imb_loss, tb_dict_pbar = self.get_sumnorm_loss(scalar=scalar,clip_thresh = False)
+        else:
+            ul_class_imb_loss = 0.0
+            tb_dict_pbar = {}
         tb_dict.update(tb_dict_box)
         tb_dict.update(tb_dict_pbar)
 

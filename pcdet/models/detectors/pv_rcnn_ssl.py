@@ -69,6 +69,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             labeled_mask = batch_dict['labeled_mask'].view(-1)
             labeled_inds = torch.nonzero(labeled_mask).squeeze(1).long()
             unlabeled_inds = torch.nonzero(1-labeled_mask).squeeze(1).long()
+            batch_dict['unlabeled_inds'] = unlabeled_inds
             batch_dict_ema = {}
             keys = list(batch_dict.keys())
             for k in keys:
