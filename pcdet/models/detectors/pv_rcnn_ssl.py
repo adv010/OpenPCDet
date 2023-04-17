@@ -93,6 +93,9 @@ class PVRCNN_SSL(Detector3DTemplate):
                 pred_dicts, recall_dicts = self.pv_rcnn_ema.post_processing(batch_dict_ema,
                                                                             no_recall_dict=True, override_thresh=0.0, no_nms=self.no_nms)
                 ori_unlabeled_boxes = batch_dict['gt_boxes'][unlabeled_inds, ...]
+                if self.model_cfg.ROI_HEAD.get("ENABLE_EVAL", False):
+                # PL metrics before filtering
+                    self.update_metrics(batch_dict, pred_dicts, unlabeled_inds, labeled_inds)
                 pseudo_boxes = []
                 pseudo_scores = []
                 pseudo_sem_scores = []
@@ -313,14 +316,53 @@ class PVRCNN_SSL(Detector3DTemplate):
 
             pred_dicts, recall_dicts = self.pv_rcnn.post_processing(batch_dict)
 
+
+            pseudo_boxes_list = [torch.cat([pred_dict['pred_boxes'], pred_dict['pred_labels'].unsqueeze(-1)], dim=-1)
+                                 for pred_dict in pred_dicts]
+            pseudo_scores = [pred_dict['pred_scores'] for pred_dict in pred_dicts]
+            gt_boxes = [gt_box for gt_box in batch_dict['gt_boxes']]
+            metric_inputs = {'preds': pseudo_boxes_list,
+                             'pred_scores': pseudo_scores,
+                             'ground_truths': gt_boxes}
+
+            self.metric_registry.get('test').update(**metric_inputs)
+
             return pred_dicts, recall_dicts, {}
         
+    def update_metrics(self, input_dict, pred_dict, unlabeled_inds, labeled_inds):
+        """
+        Recording PL vs GT statistics BEFORE filtering
+        """
+        if 'pl_gt_metrics_before_filtering' in self.model_cfg.ROI_HEAD.METRICS_PRED_TYPES:
+            pseudo_boxes, pseudo_labels, pseudo_scores, pseudo_sem_scores, _, _ = self._unpack_predictions(
+                pred_dict, unlabeled_inds)
+            pseudo_boxes = [torch.cat([pseudo_box, pseudo_label.view(-1, 1).float()], dim=1) \
+                            for (pseudo_box, pseudo_label) in zip(pseudo_boxes, pseudo_labels)]
+
+            # Making consistent # of pseudo boxes in each batch
+            # NOTE: Need to store them in batch_dict in a new key, which can be removed later
+            input_dict['pseudo_boxes_prefilter'] = torch.zeros_like(input_dict['gt_boxes'])
+            self._fill_with_pseudo_labels(input_dict, pseudo_boxes, unlabeled_inds, labeled_inds,
+                                          key='pseudo_boxes_prefilter')
+
+            # apply student's augs on teacher's pseudo-boxes (w/o filtered)
+            batch_dict = self.apply_augmentation(input_dict, input_dict, unlabeled_inds, key='pseudo_boxes_prefilter')
+
+            tag = f'pl_gt_metrics_before_filtering'
+            metrics = self.metric_registry.get(tag)
+
+            preds_prefilter = [batch_dict['pseudo_boxes_prefilter'][uind] for uind in unlabeled_inds]
+            gts_prefilter = [batch_dict['gt_boxes'][uind] for uind in unlabeled_inds]
+            metric_inputs = {'preds': preds_prefilter, 'pred_scores': pseudo_scores, 'roi_scores': pseudo_sem_scores,
+                             'ground_truths': gts_prefilter}
+            metrics.update(**metric_inputs)
+            batch_dict.pop('pseudo_boxes_prefilter')
     def compute_metrics(self, tag):
         results = self.metric_registry.get(tag).compute()
         tag = tag + "/" if tag else ''
         metrics = {tag + key: val for key, val in results.items()}
         return metrics
-    
+
     def get_supervised_training_loss(self):
         disp_dict = {}
         loss_rpn, tb_dict = self.dense_head.get_loss()
