@@ -7,6 +7,7 @@ from ...utils import box_coder_utils, common_utils, loss_utils
 from ..model_utils.model_nms_utils import class_agnostic_nms
 from .target_assigner.proposal_target_layer import ProposalTargetLayer
 from ...ops.roiaware_pool3d import roiaware_pool3d_utils
+from pcdet.ops.iou3d_nms import iou3d_nms_utils
 
 
 class RoIHeadTemplate(nn.Module):
@@ -106,7 +107,10 @@ class RoIHeadTemplate(nn.Module):
     def update_metrics(self, targets_dict, mask_type='cls', vis_type='pred_gt', pred_type=None):
         metric_registry = targets_dict['metric_registry']
         unlabeled_inds = targets_dict['unlabeled_inds']
-
+        st_mean = None
+        if 'softmatch' in targets_dict.keys():
+            softmatch = targets_dict['softmatch']
+            st_mean = softmatch.st_mean
         sample_preds, sample_pred_scores, sample_pred_weights = [], [], []
         sample_rois, sample_roi_scores = [], []
         sample_targets, sample_target_scores = [], []
@@ -114,6 +118,11 @@ class RoIHeadTemplate(nn.Module):
         ema_preds_of_std_rois, ema_pred_scores_of_std_rois = [], []
         sample_gts = []
         sample_gt_iou_of_rois = []
+        sample_softmatch_weights,sample_objective,sample_valid_mask = [],[],[]
+        sample_ori_boxes = []
+
+        # if softmatch.st_mean:
+
         for i, uind in enumerate(unlabeled_inds):
             mask = (targets_dict['reg_valid_mask'][uind] > 0) if mask_type == 'reg' else (
                         targets_dict['rcnn_cls_labels'][uind] >= 0)
@@ -124,9 +133,11 @@ class RoIHeadTemplate(nn.Module):
             roi_scores = torch.sigmoid(targets_dict['roi_scores'])[uind][mask].detach().clone()
             roi_labeled_boxes = torch.cat([rois, roi_labels], dim=-1)
             gt_iou_of_rois = targets_dict['gt_iou_of_rois'][uind][mask].unsqueeze(-1).detach().clone()
+            softmatch_weights = targets_dict['softmatch_weights'][uind][mask].detach().clone()
             sample_rois.append(roi_labeled_boxes)
             sample_roi_scores.append(roi_scores)
             sample_gt_iou_of_rois.append(gt_iou_of_rois)
+            sample_softmatch_weights.append(softmatch_weights)
             # Target info
             target_labeled_boxes = targets_dict['gt_of_rois_src'][uind][mask].detach().clone()
             target_scores = targets_dict['rcnn_cls_labels'][uind][mask].detach().clone()
@@ -149,6 +160,19 @@ class RoIHeadTemplate(nn.Module):
             pl_scores = targets_dict['pl_scores'][i]
             sample_pls.append(pl_labeled_boxes)
             sample_pl_scores.append(pl_scores)
+
+            if 'rcnn_cls_weights' in targets_dict:
+                pred_weights = targets_dict['rcnn_cls_weights'][uind][mask].detach().clone()
+                sample_pred_weights.append(pred_weights)
+
+            # batch_loss_cls = F.binary_cross_entropy(pred_scores, target_scores.float(), reduction='none')
+            # cls_valid_mask = (target_scores >= 0).float()
+            # # rcnn_loss_cls_norm = (cls_valid_mask * pred_weights).sum(-1)
+            # rcnn_loss_cls = (batch_loss_cls * pred_weights) 
+
+            # sample_valid_mask.append(cls_valid_mask)
+
+            
 
             # Teacher refinements (Preds) of student's rois
             if 'ema_gt' in pred_type and self.get('ENABLE_SOFT_TEACHER', False):
@@ -199,7 +223,8 @@ class RoIHeadTemplate(nn.Module):
                              'ground_truths': sample_gts, 'targets': sample_targets,
                              'pseudo_labels': sample_pls, 'pseudo_label_scores': sample_pl_scores,
                              'target_scores': sample_target_scores, 'pred_weights': sample_pred_weights,
-                             'pred_iou_wrt_pl': sample_gt_iou_of_rois}
+                             'pred_iou_wrt_pl': sample_gt_iou_of_rois,'softmatch_weights':sample_softmatch_weights,
+                             'softmatch_thresh':st_mean}
             metrics.update(**metric_inputs)
 
     def assign_targets(self, batch_dict):
@@ -242,7 +267,28 @@ class RoIHeadTemplate(nn.Module):
         gt_of_rois[:, :, 6] = heading_label
         targets_dict['gt_of_rois'] = gt_of_rois
         return targets_dict
+    def preloss_filtering(self):
+        unlabeled_inds = self.forward_ret_dict['unlabeled_inds']
+        # unlabeled_rcnn_cls_weights = self.forward_ret_dict['rcnn_cls_weights'][unlabeled_inds]
+        ul_interval_mask = self.forward_ret_dict['interval_mask'][unlabeled_inds].clone().detach()
+        ul_weights = self.forward_ret_dict['softmatch_weights'][unlabeled_inds].clone().detach()
+        ul_targets = self.forward_ret_dict['rcnn_cls_labels'][unlabeled_inds].clone().detach()
+        gt_iou_of_rois = self.forward_ret_dict['gt_iou_of_rois'][unlabeled_inds].detach().clone()
+        roi_labels = self.forward_ret_dict['roi_labels'][unlabeled_inds].detach().clone() - 1
+    
+        softmatch = self.forward_ret_dict['softmatch']
+        fg_thresh = gt_iou_of_rois.new_tensor(softmatch.st_mean.to(gt_iou_of_rois.device)).reshape(1,1,-1).repeat(*ul_weights.shape[:2],1)
+        cls_fg_thresh = torch.gather(fg_thresh, dim=-1, index=roi_labels.unsqueeze(-1)).squeeze(-1)
+        
+        #NOTE: Interval weighting happens here
+        ul_weights[~self.forward_ret_dict['interval_mask'][unlabeled_inds]] = 1
 
+        if self.model_cfg.TARGET_CONFIG.UNLABELED_SAMPLER_TYPE == "subsample_unlabeled_rois_tr_gaussian":
+            self.forward_ret_dict['rcnn_cls_weights'] = torch.ones_like(self.forward_ret_dict['rcnn_cls_labels'])
+            self.forward_ret_dict['rcnn_cls_weights'][unlabeled_inds] = ul_weights
+        # iou3d = iou3d_nms_utils.boxes_iou3d_gpu(cur_roi, cur_gt_boxes[:, 0:7])  # (M, N)
+        # max_overlaps, gt_assignment = torch.max(iou3d, dim=1)
+        # self.forward_ret_dict['gt_iou_of_rois']
     def get_box_reg_layer_loss(self, forward_ret_dict, scalar=True):
         loss_cfgs = self.model_cfg.LOSS_CONFIG
         code_size = self.box_coder.code_size
@@ -282,6 +328,18 @@ class RoIHeadTemplate(nn.Module):
                                 / max(fg_sum, 1)
             else:
                 fg_sum_ = fg_mask.reshape(batch_size, -1).long().sum(-1)
+                                # Class-wise loss formulation
+                rcnn_loss_reg_dict = {'Car': None, 'Pedestrian': None, 'Cyclist': None}
+                for cls_idx, cls_name in enumerate(rcnn_loss_reg_dict.keys()):
+                    # Create classwise mask using ROI labels 
+                    cur_cls_mask = forward_ret_dict['roi_labels'] == (cls_idx+1)
+                    reg_cls_norm = (fg_mask.reshape(batch_size, -1) * cur_cls_mask).sum(-1)
+                    batch_rcnn_loss_reg = (rcnn_loss_reg.view(batch_size, -1, code_size) * fg_mask.reshape(batch_size, -1).unsqueeze(-1) * cur_cls_mask.unsqueeze(-1))
+                    rcnn_loss_reg_dict[cls_name] = batch_rcnn_loss_reg.sum(-1).sum(-1) / torch.clamp(fg_sum_, min=1.0)
+                tb_dict['rcnn_loss_reg_car'] = rcnn_loss_reg_dict['Car']
+                tb_dict['rcnn_loss_reg_ped'] = rcnn_loss_reg_dict['Pedestrian']
+                tb_dict['rcnn_loss_reg_cyc'] = rcnn_loss_reg_dict['Cyclist']
+                tb_dict['rcnn_loss_reg_total'] = rcnn_loss_reg_dict['Car'] + rcnn_loss_reg_dict['Pedestrian'] + rcnn_loss_reg_dict['Cyclist']
                 rcnn_loss_reg = (rcnn_loss_reg.view(rcnn_batch_size, -1) * fg_mask.unsqueeze(dim=-1).float()) \
                                     .reshape(batch_size, -1).sum(-1) / torch.clamp(fg_sum_.float(), min=1.0)
             rcnn_loss_reg = rcnn_loss_reg * loss_cfgs.LOSS_WEIGHTS['rcnn_reg_weight']
@@ -345,10 +403,27 @@ class RoIHeadTemplate(nn.Module):
             else:
                 batch_size = forward_ret_dict['rcnn_cls_labels'].shape[0]
                 batch_loss_cls = batch_loss_cls.reshape(batch_size, -1)
-                cls_valid_mask = cls_valid_mask.reshape(batch_size, -1)
-                rcnn_loss_cls = (batch_loss_cls * cls_valid_mask).sum(-1) / torch.clamp(cls_valid_mask.sum(-1), min=1.0)
+                cls_valid_mask = cls_valid_mask.reshape(batch_size, -1) #TODO:Deepika check
+                if 'rcnn_cls_weights' in forward_ret_dict:
+                    rcnn_cls_weights = forward_ret_dict['rcnn_cls_weights']
+                    rcnn_loss_cls_norm = (cls_valid_mask * rcnn_cls_weights).sum(-1)
+                    rcnn_loss_cls = (batch_loss_cls * cls_valid_mask * rcnn_cls_weights).sum(-1) / torch.clamp(rcnn_loss_cls_norm, min=1.0)
+                else:
+                    rcnn_loss_cls = (batch_loss_cls * cls_valid_mask).sum(-1) / torch.clamp(cls_valid_mask.sum(-1), min=1.0)
                 rcnn_acc_cls = torch.abs(torch.sigmoid(rcnn_cls_flat) - rcnn_cls_labels).reshape(batch_size, -1)
                 rcnn_acc_cls = (rcnn_acc_cls * cls_valid_mask).sum(-1) / torch.clamp(cls_valid_mask.sum(-1), min=1.0)
+
+                rcnn_loss_cls_dict = {'Car': None, 'Pedestrian': None, 'Cyclist': None}
+                for cls_idx, cls_name in enumerate(rcnn_loss_cls_dict.keys()):
+                    # Create classwise mask using ROI labels 
+                    cur_cls_mask = (forward_ret_dict['roi_labels'] == (cls_idx+1))
+                    if 'rcnn_cls_weights' in forward_ret_dict: #TODO:  #TODO:Deepika check
+                        rcnn_loss_cls_dict[cls_name] = (batch_loss_cls * cur_cls_mask * rcnn_cls_weights * cls_valid_mask).sum(-1) / torch.clamp(rcnn_loss_cls_norm, min=1.0)
+                    else:
+                        rcnn_loss_cls_dict[cls_name] = (batch_loss_cls * cur_cls_mask * cls_valid_mask).sum(-1) / torch.clamp(cls_valid_mask.sum(-1), min=1.0)
+                    # Adding these individual losses should be equal to rcnn_loss_cls (just for verificaiton)
+                rcnn_loss_cls_dict['Total'] = rcnn_loss_cls_dict['Car'] + rcnn_loss_cls_dict['Pedestrian'] + rcnn_loss_cls_dict['Cyclist']
+                
         elif loss_cfgs.CLS_LOSS == 'CrossEntropy':
             batch_loss_cls = F.cross_entropy(rcnn_cls, rcnn_cls_labels, reduction='none', ignore_index=-1)
             cls_valid_mask = (rcnn_cls_labels >= 0).float()
@@ -365,13 +440,18 @@ class RoIHeadTemplate(nn.Module):
         rcnn_loss_cls = rcnn_loss_cls * loss_cfgs.LOSS_WEIGHTS['rcnn_cls_weight']
         tb_dict = {
             'rcnn_loss_cls': rcnn_loss_cls.item() if scalar else rcnn_loss_cls,
-            'rcnn_acc_cls': rcnn_acc_cls.item() if scalar else rcnn_acc_cls
+            'rcnn_acc_cls': rcnn_acc_cls.item() if scalar else rcnn_acc_cls,
+            'rcnn_loss_cls_car': 0 if scalar else rcnn_loss_cls_dict['Car'],
+            'rcnn_loss_cls_ped': 0 if scalar else rcnn_loss_cls_dict['Pedestrian'],
+            'rcnn_loss_cls_cyc': 0 if scalar else rcnn_loss_cls_dict['Cyclist'],
+            'rcnn_loss_cls_total': 0 if scalar else rcnn_loss_cls_dict['Total']
         }
         return rcnn_loss_cls, tb_dict
 
     def get_loss(self, tb_dict=None, scalar=True):
         tb_dict = {} if tb_dict is None else tb_dict
-
+        if self.model_cfg.TARGET_CONFIG.UNLABELED_SAMPLER_TYPE == "subsample_unlabeled_rois_tr_gaussian":
+            self.preloss_filtering()
         if self.model_cfg.get("ENABLE_EVAL", None):
             # self.update_metrics(self.forward_ret_dict, mask_type='reg')
             metrics_pred_types = self.model_cfg.get("METRICS_PRED_TYPES", None)

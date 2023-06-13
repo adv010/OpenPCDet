@@ -10,6 +10,7 @@ from ...utils.stats_utils import KITTIEvalMetrics, PredQualityMetrics
 from torchmetrics.collections import MetricCollection
 from pcdet.ops.iou3d_nms import iou3d_nms_utils
 import torch.distributed as dist
+from ...utils.softmatch import AdaptiveThresholding
 
 class MetricRegistry(object):
     def __init__(self, **kwargs):
@@ -32,6 +33,37 @@ class MetricRegistry(object):
 
     def tags(self):
         return self._tag_metrics.keys()
+    
+class Adaptive_Thresh(object):
+    def __init__(self, **kwargs):
+        self._tag_metrics = {}
+        self.dataset = kwargs.get('dataset', None)
+        self.model_cfg = kwargs.get('model_cfg', None)
+
+    def get(self, tag=None):
+        if tag is None:
+            tag = 'default'
+        if tag in self._tag_metrics.keys():
+            metric = self._tag_metrics[tag]
+        else:
+            metric = AdaptiveThresholding(tag=tag, dataset=self.dataset, config=self.model_cfg)
+            self._tag_metrics[tag] = metric
+        return metric
+class Adaptive_Thresh(object):
+    def __init__(self, **kwargs):
+        self._tag_metrics = {}
+        self.dataset = kwargs.get('dataset', None)
+        self.model_cfg = kwargs.get('model_cfg', None)
+
+    def get(self, tag=None):
+        if tag is None:
+            tag = 'default'
+        if tag in self._tag_metrics.keys():
+            metric = self._tag_metrics[tag]
+        else:
+            metric = AdaptiveThresholding(tag=tag, dataset=self.dataset, config=self.model_cfg)
+            self._tag_metrics[tag] = metric
+        return metric
     
 class PVRCNN_SSL(Detector3DTemplate):
     def __init__(self, model_cfg, num_class, dataset):
@@ -57,10 +89,10 @@ class PVRCNN_SSL(Detector3DTemplate):
         self.no_nms = model_cfg.NO_NMS
         self.supervise_mode = model_cfg.SUPERVISE_MODE
         self.metric_registry = MetricRegistry(dataset=self.dataset, model_cfg=model_cfg)
-        # self.adaptive_thresh_metric = AdaptiveThreshMetrics(dataset=self.dataset, model_cfg=model_cfg)
+        self.adaptive_thresholding = Adaptive_Thresh(dataset=self.dataset, model_cfg=model_cfg)
         vals_to_store = ['iou_roi_pl', 'iou_roi_gt', 'pred_scores', 'teacher_pred_scores', 
                         'weights', 'roi_scores', 'pcv_scores', 'num_points_in_roi', 'class_labels',
-                        'iteration']
+                        'iteration','batch_mean','batch_var','ema_mean','ema_var','rcnn_cls_targets','softmatch_weights']
         self.val_dict = {val: [] for val in vals_to_store}
 
     def forward(self, batch_dict):
@@ -117,6 +149,8 @@ class PVRCNN_SSL(Detector3DTemplate):
             #         metrics.update(**metric_inputs)
 
             # batch_dict['adaptive_thresh_metric'] = self.adaptive_thresh_metric
+            if self.model_cfg.ROI_HEAD.TARGET_CONFIG.UNLABELED_SAMPLER_TYPE == "subsample_unlabeled_rois_tr_gaussian":
+                batch_dict['adaptive_thresh'] = self.adaptive_thresholding
             batch_dict['metric_registry'] = self.metric_registry
             batch_dict['ori_unlabeled_boxes'] = ori_unlabeled_boxes
             batch_dict['store_scores_in_pkl'] = self.model_cfg.STORE_SCORES_IN_PKL
@@ -129,7 +163,9 @@ class PVRCNN_SSL(Detector3DTemplate):
             self.pv_rcnn.roi_head.forward_ret_dict['unlabeled_inds'] = unlabeled_inds
             self.pv_rcnn.roi_head.forward_ret_dict['pl_boxes'] = batch_dict['gt_boxes']
             self.pv_rcnn.roi_head.forward_ret_dict['pl_scores'] = pseudo_scores
-
+            if self.model_cfg.ROI_HEAD.TARGET_CONFIG.UNLABELED_SAMPLER_TYPE == "subsample_unlabeled_rois_tr_gaussian":
+                self.pv_rcnn.roi_head.forward_ret_dict['softmatch'] = self.adaptive_thresholding.get(tag=f'softmatch')
+            
             disp_dict = {}
             loss_rpn_cls, loss_rpn_box, tb_dict = self.pv_rcnn.dense_head.get_loss(scalar=False)
             loss_point, tb_dict = self.pv_rcnn.point_head.get_loss(tb_dict, scalar=False)
@@ -166,9 +202,12 @@ class PVRCNN_SSL(Detector3DTemplate):
                     tb_dict_[key + "_unlabeled"] = tb_dict[key][unlabeled_inds, ...].sum()
                 else:
                     tb_dict_[key] = tb_dict[key]
+
             if self.model_cfg.get('STORE_SCORES_IN_PKL', False) :
                 # Store different types of scores over all itrs and epochs and dump them in a pickle for offline modeling 
                 # TODO (shashank) : Can be optimized later to save computational time, currently takes about 0.002sec
+
+
                 batch_roi_labels = self.pv_rcnn.roi_head.forward_ret_dict['roi_labels'][unlabeled_inds]
                 batch_roi_labels = [roi_labels.clone().detach() for roi_labels in batch_roi_labels]
 
@@ -204,12 +243,15 @@ class PVRCNN_SSL(Detector3DTemplate):
                         cur_pred_score = torch.sigmoid(batch_dict['batch_cls_preds'][cur_unlabeled_ind]).squeeze()
                         self.val_dict['pred_scores'].extend(cur_pred_score.tolist())
 
+                        cur_softmatch_weights = self.pv_rcnn.roi_head.forward_ret_dict['softmatch_weights'][cur_unlabeled_ind].squeeze()
+                        self.val_dict['softmatch_weights'].extend(cur_softmatch_weights.tolist())
                         # if 'rcnn_cls_score_teacher' in self.pv_rcnn.roi_head.forward_ret_dict:
                         #     cur_teacher_pred_score = self.pv_rcnn.roi_head.forward_ret_dict['rcnn_cls_score_teacher'][cur_unlabeled_ind]
                         #     self.val_dict['teacher_pred_scores'].extend(cur_teacher_pred_score.tolist())
 
-                            # cur_weight = self.pv_rcnn.roi_head.forward_ret_dict['rcnn_cls_weights'][cur_unlabeled_ind]
-                            # self.val_dict['weights'].extend(cur_weight.tolist())
+                        if 'rcnn_cls_weights' in self.pv_rcnn.roi_head.forward_ret_dict.keys():
+                            cur_weight = self.pv_rcnn.roi_head.forward_ret_dict['rcnn_cls_weights'][cur_unlabeled_ind]
+                            self.val_dict['weights'].extend(cur_weight.tolist())
 
                         cur_roi_score =  torch.sigmoid(self.pv_rcnn.roi_head.forward_ret_dict['roi_scores'][cur_unlabeled_ind])
                         self.val_dict['roi_scores'].extend(cur_roi_score.tolist())
@@ -226,15 +268,28 @@ class PVRCNN_SSL(Detector3DTemplate):
                         cur_iteration = torch.ones_like(preds_iou_max) * (batch_dict['cur_iteration'])
                         self.val_dict['iteration'].extend(cur_iteration.tolist())
 
+                        if self.model_cfg.ROI_HEAD.TARGET_CONFIG.UNLABELED_SAMPLER_TYPE == 'subsample_unlabeled_rois_tr_gaussian':
+                            softmatch = self.adaptive_thresholding.get(tag=f'softmatch')
+                            ema_mean = softmatch.st_mean.to(cur_roi_label.device).unsqueeze(dim=0).repeat(len(cur_roi_label),1).gather(1,(cur_roi_label.unsqueeze(dim=0)-1)).squeeze()
+                            ema_var = softmatch.st_var.to(cur_roi_label.device).unsqueeze(dim=0).repeat(len(cur_roi_label),1).gather(1,(cur_roi_label.unsqueeze(dim=0)-1)).squeeze()
+                            batch_mean = softmatch.batch_mean.to(cur_roi_label.device).unsqueeze(dim=0).repeat(len(cur_roi_label),1).gather(1,(cur_roi_label.unsqueeze(dim=0)-1)).squeeze()
+                            batch_var = softmatch.batch_var.to(cur_roi_label.device).unsqueeze(dim=0).repeat(len(cur_roi_label),1).gather(1,(cur_roi_label.unsqueeze(dim=0)-1)).squeeze()
+                            self.val_dict['batch_mean'].extend(batch_mean.tolist())
+                            self.val_dict['batch_var'].extend(batch_var.tolist())
+                            self.val_dict['ema_mean'].extend(ema_mean.tolist())
+                            self.val_dict['ema_var'].extend(ema_var.tolist())
+
                 # replace old pickle data (if exists) with updated one 
                 output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
                 file_path = os.path.join(output_dir, 'scores.pkl')
                 pickle.dump(self.val_dict, open(file_path, 'wb'))
 
             for key in self.metric_registry.tags():
-                metrics = self.compute_metrics(tag=key)
-                tb_dict_.update(metrics)
-
+                metrics = self.compute_metrics(registry=self.metric_registry,tag=key)
+                tb_dict_.update(metrics)             
+            if self.model_cfg.ROI_HEAD.TARGET_CONFIG.UNLABELED_SAMPLER_TYPE == 'subsample_unlabeled_rois_tr_gaussian':
+                adaptive_metrics = self.compute_metrics(registry=self.adaptive_thresholding,tag=f'softmatch')
+                tb_dict_.update(adaptive_metrics)
             # Metrics for adaptive thresholding
             # if self.model_cfg.ROI_HEAD.ADAPTIVE_THRESH_CONFIG.get('ENABLE', False):
                 # adaptive_metrics = self.adaptive_thresh_metric.compute()
@@ -295,8 +350,8 @@ class PVRCNN_SSL(Detector3DTemplate):
             metrics.update(**metric_inputs)
             batch_dict.pop('pseudo_boxes_prefilter')
 
-    def compute_metrics(self, tag):
-        results = self.metric_registry.get(tag).compute()
+    def compute_metrics(self,registry,tag):
+        results = registry.get(tag).compute()
         tag = tag + "/" if tag else ''
         metrics = {tag + key: val for key, val in results.items()}
         return metrics

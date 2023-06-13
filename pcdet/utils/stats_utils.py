@@ -43,24 +43,30 @@ class PredQualityMetrics(Metric):
                              "pred_weight_uc", "pred_fn_rate", "pred_tp_rate", "pred_fp_ratio", "pred_ious_wrt_pl_fg",
                              "pred_ious_wrt_pl_fn", "pred_ious_wrt_pl_fp", "pred_ious_wrt_pl_tp", "score_fgs_tp",
                              "score_fgs_fn", "score_fgs_fp", "target_score_fn", "target_score_tp", "target_score_fp",
-                             "pred_weight_fn", "pred_weight_tp", "pred_weight_fp"]
+                             "pred_weight_fn", "pred_weight_tp", "pred_weight_fp",'softmatch_bg','softmatch_uc','softmatch_fg',
+                             "softmatch_weights_fn","softmatch_weights_fp","softmatch_weights_tp","softmatch_quantity_fg","softmatch_quality_fg",
+                             "softmatch_adulteration_fp","softmatch_adulteration_fn","softmatch_adulteration","softmatch_quantity_uc","softmatch_quantity_bg",
+                             "softmatch_quantity_all","softmatch_quality"]
+        self.class_ag_metrics =["softmatch_quality_ag","softmatch_quantity_ag","softmatch_adulteration_ag"]
         self.min_overlaps = np.array([0.7, 0.5, 0.5, 0.7, 0.5, 0.7])
         self.class_agnostic_fg_thresh = 0.7
 
         for metric_name in self.metrics_name:
             self.add_state(metric_name, default=[], dist_reduce_fx='cat')
-
+        for metric_name in self.class_ag_metrics:
+            self.add_state(metric_name, default=[], dist_reduce_fx='cat')
 
     def update(self, preds: [torch.Tensor], ground_truths: [torch.Tensor], pred_scores: [torch.Tensor],
                rois=None, roi_scores=None, targets=None, target_scores=None, pred_weights=None,
-               pseudo_labels=None, pseudo_label_scores=None, pred_iou_wrt_pl=None) -> None:
+               pseudo_labels=None, pseudo_label_scores=None, pred_iou_wrt_pl=None,softmatch_weights=None,softmatch_thresh=None) -> None:
         
         assert isinstance(preds, list) and isinstance(ground_truths, list) and isinstance(pred_scores, list)
         assert all([pred.dim() == 2 for pred in preds]) and all([pred.dim() == 2 for pred in ground_truths]) and all([pred.dim() == 1 for pred in pred_scores])
         assert all([pred.shape[-1] == 8 for pred in preds]) and all([gt.shape[-1] == 8 for gt in ground_truths])
         if roi_scores is not None:
             assert len(pred_scores) == len(roi_scores)
-
+        
+        softmatch_weights = [weights.clone().detach() for weights in softmatch_weights] if softmatch_weights is not None else None
         roi_scores = [score.clone().detach() for score in roi_scores] if roi_scores is not None else None
         preds = [pred_box.clone().detach() for pred_box in preds]
         pred_scores = [ps_score.clone().detach() for ps_score in pred_scores]
@@ -71,17 +77,19 @@ class PredQualityMetrics(Metric):
         pred_weights = [pred_weight.clone().detach() for pred_weight in pred_weights] if pred_weights is not None else None
         sample_tensor = preds[0] if len(preds) else ground_truths[0]
         num_classes = len(self.dataset.class_names)
+
         for i in range(len(preds)):
             valid_preds_mask = torch.logical_not(torch.all(preds[i] == 0, dim=-1))
             valid_pred_boxes = preds[i][valid_preds_mask]
-
             valid_pred_scores = pred_scores[i][valid_preds_mask.nonzero().view(-1)]
             valid_roi_scores = roi_scores[i][valid_preds_mask.nonzero().view(-1)] if roi_scores else None
+            valid_softmatch_weights = softmatch_weights[i][valid_preds_mask.nonzero().view(-1)] if softmatch_weights else None
             valid_target_scores = target_scores[i][valid_preds_mask.nonzero().view(-1)] if target_scores else None
             valid_pred_weights = pred_weights[i][valid_preds_mask.nonzero().view(-1)] if pred_weights else None
             valid_pred_iou_wrt_pl = pred_iou_wrt_pl[i][valid_preds_mask.nonzero().view(-1)].squeeze() if pred_iou_wrt_pl else None
             valid_gts_mask = torch.logical_not(torch.all(ground_truths[i] == 0, dim=-1))
             valid_gt_boxes = ground_truths[i][valid_gts_mask]
+
             if pseudo_labels is not None:
                 valid_pl_mask = torch.logical_not(torch.all(pseudo_labels[i] == 0, dim=-1))
                 valid_pl_boxes = pseudo_labels[i][valid_pl_mask] if pseudo_labels else None
@@ -98,8 +106,44 @@ class PredQualityMetrics(Metric):
             num_preds = valid_preds_mask.sum()
 
             classwise_metrics = {}
+            class_ag_metrics = {}
             for metric_name in self.metrics_name:
                 classwise_metrics[metric_name] = sample_tensor.new_zeros(num_classes + 1).fill_(float('nan'))
+
+            for metric_name in self.class_ag_metrics:
+                class_ag_metrics[metric_name] = sample_tensor.new_zeros(1).fill_(float('nan'))
+            
+            
+            if softmatch_thresh is not None and len(valid_pred_weights):
+                    if num_gts > 0 and num_preds > 0:
+                        overlap = iou3d_nms_utils.boxes_iou3d_gpu(valid_pred_boxes[:, 0:7], valid_gt_boxes[:, 0:7])
+                        preds_iou_max, assigned_gt_inds = overlap.max(dim=1)
+                        classwise_thresh = valid_pred_scores.new_tensor(softmatch_thresh.to(valid_pred_boxes.device)).unsqueeze(0).repeat(valid_pred_scores.shape[0],1).gather(dim=-1, index=pred_labels.type(torch.int64).unsqueeze(-1)).view(-1)
+                        cc_mask = assigned_gt_inds == pred_labels
+                        fg_mask = preds_iou_max >= classwise_thresh
+                        bg_mask = preds_iou_max <= self.config.ROI_HEAD.TARGET_CONFIG.UNLABELED_CLS_BG_THRESH
+                        fg_tp_mask = cc_mask & fg_mask
+                        fg_uc_pl_mask = valid_pred_iou_wrt_pl > self.config.ROI_HEAD.TARGET_CONFIG.UNLABELED_CLS_BG_THRESH
+                        
+                        cc_uc_mask = ~(bg_mask | fg_mask) & cc_mask  # uncertain mask
+                        fg_uc_gt_mask = cc_uc_mask | fg_tp_mask
+                        
+                        if len(valid_pred_weights[fg_uc_pl_mask]): # to avoid zero division error
+                            quantity = valid_pred_weights[fg_uc_pl_mask].sum() / len(valid_pred_weights[fg_uc_pl_mask])
+                        else:
+                            quantity = sample_tensor.new_zeros(1)
+                        # valid_pred_weights[fg_uc_pl_mask].sum() => total weight going to fg_uc region
+                        norm = valid_pred_weights / valid_pred_weights[fg_uc_pl_mask].sum()
+                        quality = norm[fg_uc_gt_mask].sum()
+                        quality = quality.nan_to_num(0.00)
+                    else:
+                        quantity = sample_tensor.new_zeros(1).fill_(float('nan')).squeeze()
+                        quality = sample_tensor.new_zeros(1).fill_(float('nan')).squeeze()
+                    
+                    class_ag_metrics['softmatch_quality_ag'] = quality.unsqueeze(dim=0) if quality.ndim == 0 else quality
+                    class_ag_metrics['softmatch_quantity_ag'] = quantity.unsqueeze(dim=0) if quantity.ndim == 0 else quantity
+                    
+                        
 
             for cind in range(num_classes):
                 pred_cls_mask = pred_labels == cind
@@ -116,9 +160,12 @@ class PredQualityMetrics(Metric):
                     cc_mask = (pred_cls_mask & assigned_gt_cls_mask)  # correctly classified mask
                     mc_mask = (pred_cls_mask & (~assigned_gt_cls_mask)) | ((~pred_cls_mask) & assigned_gt_cls_mask)  # misclassified mask
 
-                    # Using kitti test class-wise fg threshold instead of thresholds used during train.
                     classwise_fg_thresh = self.min_overlaps[cind]
-                    fg_mask = preds_iou_max >= classwise_fg_thresh
+                    if softmatch_thresh is not None:   
+                        fg_mask = (preds_iou_max >= classwise_fg_thresh) & (preds_iou_max >= softmatch_thresh[cind]) #check fg wrt eval thresh & softmatch_thresh
+                    else:
+                        fg_mask = (preds_iou_max >= classwise_fg_thresh) 
+                        
                     bg_mask = preds_iou_max <= self.config.ROI_HEAD.TARGET_CONFIG.UNLABELED_CLS_BG_THRESH
                     uc_mask = ~(bg_mask | fg_mask)  # uncertain mask
 
@@ -161,6 +208,14 @@ class PredQualityMetrics(Metric):
                         classwise_metrics['pred_weight_uc'][cind] = cls_pred_weight_uc
                         cls_pred_weight_fg = (valid_pred_weights * cc_fg_mask.float()).sum() / cc_fg_mask.sum()
                         classwise_metrics['pred_weight_fg'][cind] = cls_pred_weight_fg
+                    
+                    if valid_softmatch_weights is not None:
+                        cls_pred_weight_bg = (valid_softmatch_weights * cls_bg_mask.float()).sum() / cls_bg_mask.float().sum()
+                        classwise_metrics['softmatch_bg'][cind] = cls_pred_weight_bg
+                        cls_pred_weight_uc = (valid_softmatch_weights * cc_uc_mask.float()).sum() / cc_uc_mask.float().sum()
+                        classwise_metrics['softmatch_uc'][cind] = cls_pred_weight_uc
+                        cls_pred_weight_fg = (valid_softmatch_weights * cc_fg_mask.float()).sum() / cc_fg_mask.sum()
+                        classwise_metrics['softmatch_fg'][cind] = cls_pred_weight_fg
 
                     if valid_pred_iou_wrt_pl is not None:
                         fg_threshs = self.config.ROI_HEAD.TARGET_CONFIG.UNLABELED_CLS_FG_THRESH
@@ -190,6 +245,14 @@ class PredQualityMetrics(Metric):
                         classwise_metrics['score_fgs_tp'][cind] = cls_score_fg_tp
                         classwise_metrics['score_fgs_fn'][cind] = cls_score_fg_fn
                         classwise_metrics['score_fgs_fp'][cind] = cls_score_fg_fp
+
+                        if valid_softmatch_weights is not None:
+                            cls_target_score_fn = (valid_softmatch_weights * fn_mask.float()).sum() / fn_mask.sum()
+                            classwise_metrics['softmatch_weights_fn'][cind] = cls_target_score_fn
+                            cls_target_score_tp = (valid_softmatch_weights * tp_mask.float()).sum() / tp_mask.sum()
+                            classwise_metrics['softmatch_weights_tp'][cind] = cls_target_score_tp
+                            cls_target_score_fp = (valid_softmatch_weights * fp_mask.float()).sum() / fp_mask.sum()
+                            classwise_metrics['softmatch_weights_fp'][cind] = cls_target_score_fp                            
                         if valid_target_scores is not None:
                             cls_target_score_fn = (valid_target_scores * fn_mask.float()).sum() / fn_mask.sum()
                             classwise_metrics['target_score_fn'][cind] = cls_target_score_fn
@@ -204,17 +267,27 @@ class PredQualityMetrics(Metric):
                             classwise_metrics['pred_weight_tp'][cind] = cls_pred_weight_cc_tp
                             cls_pred_weight_cc_fp = (valid_pred_weights * fp_mask).sum() / fp_mask.float().sum()
                             classwise_metrics['pred_weight_fp'][cind] = cls_pred_weight_cc_fp
+                            classwise_metrics['softmatch_quantity_all'][cind] = (valid_pred_weights[pred_cls_mask].sum() / pred_cls_mask.sum()) 
+                            softmatch_quality_prefiltering =  valid_pred_weights[pred_cls_mask] / valid_pred_weights.sum() 
+                            softmatch_quality = softmatch_quality_prefiltering[[tp_mask[pred_cls_mask]]].sum()
+                            classwise_metrics['softmatch_quality'][cind] = softmatch_quality
+                            classwise_metrics['softmatch_adulteration_fp'][cind] = softmatch_quality_prefiltering[fp_mask[pred_cls_mask]].sum()
+                            classwise_metrics['softmatch_adulteration_fn'][cind] = softmatch_quality_prefiltering[fn_mask[pred_cls_mask]].sum()
+                            classwise_metrics['softmatch_adulteration'][cind] =  (classwise_metrics['softmatch_adulteration_fp'][cind]  + classwise_metrics['softmatch_adulteration_fn'][cind])
 
             for key, val in classwise_metrics.items():
                 # Note that unsqueeze is necessary because torchmetric performs the dist cat on dim 0.
                 getattr(self, key).append(val.unsqueeze(dim=0))
 
+            for key,val in class_ag_metrics.items():
+                getattr(self, key).append(val.unsqueeze(dim=0))
 
         # If no prediction is given all states are filled with nan tensors
         if len(preds) == 0:
             for metric_name in self.metrics_name:
                 getattr(self, metric_name).append(sample_tensor.new_zeros(num_classes + 1).fill_(float('nan')))
-
+            for metric_name in self.class_ag_metrics:
+                getattr(self, metric_name).append(sample_tensor.new_zeros(1).fill_(float('nan')))
 
     def compute(self):
         final_results = {}
@@ -225,14 +298,23 @@ class PredQualityMetrics(Metric):
                 if isinstance(mstate, torch.Tensor):
                     mstate = [mstate]
                 results[mname] = nanmean(torch.cat(mstate, dim=0), dim=0)  # torch.nanmean is not available in pytorch < 1.8
-
+            for mname in self.class_ag_metrics:
+                mstate = getattr(self, mname)
+                if isinstance(mstate, torch.Tensor):
+                    mstate = [mstate]
+                results[mname] = nanmean(torch.cat(mstate, dim=0), dim=0)
+                
             for key, val in results.items():
                 classwise_results = {}
-                for cind, cls in enumerate(self.dataset.class_names + ['cls_agnostic']):
-                    if not torch.isnan(val[cind]):
-                        classwise_results[cls] = val[cind].item()
-                final_results[key] = classwise_results
-
+                if val.shape[0] == 1 :
+                    if not torch.isnan(val):
+                        classwise_results['cls_agn'] = val.item()                    
+                    final_results[key] = classwise_results
+                else:
+                    for cind, cls in enumerate(self.dataset.class_names + ['cls_agnostic']):
+                        if not torch.isnan(val[cind]):
+                            classwise_results[cls] = val[cind].item()
+                    final_results[key] = classwise_results
             # TODO(farzad) Does calling reset in compute make a trouble?
             self.reset()
 
@@ -244,7 +326,7 @@ class KITTIEvalMetrics(Metric):
     full_state_update: bool = False
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.reset_state_interval = kwargs.get('reset_state_interval', 64)
+        self.reset_state_interval = kwargs.get('reset_state_interval', 8)
         self.tag = kwargs.get('tag', None)
         self.dataset = kwargs.get('dataset', None)
         current_classes = self.dataset.class_names
@@ -293,7 +375,6 @@ class KITTIEvalMetrics(Metric):
             valid_pred_boxes = preds[i][valid_preds_mask]
             valid_gt_boxes = ground_truths[i][valid_gts_mask]
             valid_pred_scores = pred_scores[i][valid_preds_mask.nonzero().view(-1)]
-            # valid_roi_scores = roi_scores[i][valid_preds_mask.nonzero().view(-1)] if roi_scores else None
 
             # Starting class indices from zero
             valid_pred_boxes[:, -1] -= 1
