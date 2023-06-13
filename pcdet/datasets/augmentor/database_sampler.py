@@ -10,6 +10,7 @@ from ...ops.iou3d_nms import iou3d_nms_utils
 from ...utils import box_utils, common_utils
 
 
+
 class DataBaseSampler(object):
     def __init__(self, root_path, sampler_cfg, class_names, logger=None):
         self.root_path = root_path
@@ -34,6 +35,11 @@ class DataBaseSampler(object):
 
         for func_name, val in sampler_cfg.PREPARE.items():
             self.db_infos = getattr(self, func_name)(self.db_infos, val)
+        
+        # #Dump filtered db infos (Car =128, Cyclist = 8,, Pedestrian = 23) into a pkl
+        # file_path = "/mnt/data/adat01/adv_OpenPCDet/pcdet/utils/frame_splits/kitti_infos_train_37.pkl"
+        # with open(file_path, "wb") as file:
+        #         pickle.dump(self.db_infos, file)
 
         self.gt_database_data_key = self.load_db_to_shared_memory() if self.use_shared_memory else None
 

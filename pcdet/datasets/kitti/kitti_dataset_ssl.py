@@ -12,7 +12,7 @@ from ..dataset import DatasetTemplate
 from collections import Counter
 
 class KittiDatasetSSL(DatasetTemplate):
-    def __init__(self, dataset_cfg, class_names, training=True, root_path=None, logger=None):
+    def __init__(self, dataset_cfg, class_names, training=True, root_path=None, logger=None,args=None):
         """
         Args:
             root_path:
@@ -29,48 +29,147 @@ class KittiDatasetSSL(DatasetTemplate):
         self.repeat = self.dataset_cfg.REPEAT
 
         split_dir = self.root_path / 'ImageSets' / (self.split + '.txt')
-        # self.test = self.split == 'test' or self.split == 'val'
+        if args.ssda:
+            src_split_dir = self.root_path / 'ImageSets' / (args.split_src + '.txt')
+            trg_split_dir = self.root_path / 'ImageSets' / (args.split_trg + '.txt')
 
-        if not self.training:
-            self.sample_id_list = [x.strip() for x in open(split_dir).readlines()] if split_dir.exists() else None
-        else:
-            self.sample_id_list = [x.strip().split(' ')[0] for x in
-                               open(split_dir).readlines()] if split_dir.exists() else None
-            self.sample_index_list = [x.strip().split(' ')[1] for x in
-                                  open(split_dir).readlines()] if split_dir.exists() else None
 
-        self.kitti_infos = []
-        self.include_kitti_data(self.mode)
-
-        if self.training:
-            all_train = len(self.kitti_infos)
-            self.unlabeled_index_list = list(set(list(range(all_train))) - set(self.sample_index_list))  # float()!!!
-            # print(self.unlabeled_index_list)
-            self.unlabeled_kitti_infos = []
-
-            temp = []
-            for i in self.sample_index_list:
-                temp.append(self.kitti_infos[int(i)])
-            if len(self.sample_index_list) < 3712: # not 100%
-                for i in self.unlabeled_index_list:
-                    self.unlabeled_kitti_infos.append(self.kitti_infos[int(i)])
-            else:
-                self.unlabeled_index_list = list(range(len(self.sample_index_list)))
-                for i in self.sample_index_list:
-                    self.unlabeled_kitti_infos.append(self.kitti_infos[int(i)])
-                print("full set", len(self.unlabeled_kitti_infos))
-            self.kitti_infos = temp
-            assert len(self.kitti_infos) == len(self.sample_id_list)
-
-    
-        self.class_counter = Counter()
-        for info in self.kitti_infos:
-            for name in info['annos']['name']:
-                self.class_counter[name] += 1
-        print(self.class_counter)
             
-        if self.logger is not None:
-            self.logger.info('Total samples for KITTI dataset: %d' % (len(self.kitti_infos)))
+            if not self.training:
+                self.src_sample_id_list = [x.strip() for x in open(src_split_dir).readlines()] if src_split_dir.exists() else None
+                self.trg_sample_id_list = [x.strip() for x in open(trg_split_dir).readlines()] if trg_split_dir.exists() else None
+                self.sample_id_list = [x.strip() for x in open(src_split_dir).readlines()] if split_dir.exists() else None
+            
+            else:
+                self.sample_id_list = [x.strip().split(' ')[0] for x in
+                                open(split_dir).readlines()] if split_dir.exists() else None
+                self.src_sample_id_list = [x.strip().split(' ')[0] for x in
+                                open(src_split_dir).readlines()] if src_split_dir.exists() else None
+                self.trg_sample_id_list = [x.strip().split(' ')[0] for x in
+                                open(trg_split_dir).readlines()] if trg_split_dir.exists() else None
+                self.sample_index_list = [x.strip().split(' ')[1] for x in
+                                    open(split_dir).readlines()] if split_dir.exists() else None
+                self.src_sample_index_list = [x.strip().split(' ')[1] for x in
+                                    open(split_dir).readlines()] if src_split_dir.exists() else None
+                self.trg_sample_index_list = [x.strip().split(' ')[1] for x in
+                                    open(split_dir).readlines()] if trg_split_dir.exists() else None
+
+            self.kitti_infos = []
+            self.kitti_infos_src = []
+            self.kitti_infos_trg = []
+
+            if self.logger is not None:
+                self.logger.info('Loading KITTI SSDA dataset')
+
+                kitti_infos = []
+
+            for info_path in self.dataset_cfg.INFO_PATH[self.mode]:
+                info_path = self.root_path / info_path
+                if not info_path.exists():
+                    continue
+                with open(info_path, 'rb') as f:
+                    infos = pickle.load(f)
+                    kitti_infos.extend(infos)
+ 
+
+            self.kitti_infos.extend(kitti_infos)
+
+            if self.training:
+                all_train = len(self.kitti_infos)
+                self.unlabeled_index_list = list(set(list(range(all_train))) - set(self.sample_index_list))  # float()!!!
+                # print(self.unlabeled_index_list)
+                self.unlabeled_kitti_infos = []
+
+                temp = []
+                for i in self.sample_index_list:
+                    temp.append(self.kitti_infos[int(i)])
+
+                if len(self.sample_index_list) < 3712: # not 100%
+                    for i in self.unlabeled_index_list:
+                        self.unlabeled_kitti_infos.append(self.kitti_infos[int(i)])
+                else:
+                    self.unlabeled_index_list = list(range(len(self.sample_index_list)))
+                    for i in self.sample_index_list:
+                        self.unlabeled_kitti_infos.append(self.kitti_infos[int(i)])
+                    print("full set", len(self.unlabeled_kitti_infos))
+                self.kitti_infos = temp
+                assert len(self.kitti_infos) == len(self.sample_id_list)
+
+            self.class_counter = Counter()
+            for info in self.kitti_infos_src:
+                for name in info['annos']['name']:
+                    self.class_counter[name] += 1
+            print(self.class_counter)
+
+            self.class_counter = Counter()
+            for info in self.kitti_infos_trg:
+                for name in info['annos']['name']:
+                    self.class_counter[name] += 1
+            print(self.class_counter)
+        
+            self.class_counter = Counter()
+            for info in self.kitti_infos:
+                for name in info['annos']['name']:
+                    self.class_counter[name] += 1
+            print(self.class_counter)
+                
+            if self.logger is not None:
+                self.logger.info('Total samples for KITTI Source labeled dataset: %d' % (len(self.kitti_infos_src)))
+                self.logger.info('Total samples for KITTI Target labeled dataset: %d' % (len(self.kitti_infos_trg)))
+                self.logger.info('Total samples for KITTI dataset: %d' % (len(self.kitti_infos)))
+
+            
+
+            # self.test = self.split == 'test' or self.split == 'val'
+
+        else: # Normal SSL mode
+
+            if not self.training:
+                self.sample_id_list = [x.strip() for x in open(split_dir).readlines()] if split_dir.exists() else None
+            else:
+                self.sample_id_list = [x.strip().split(' ')[0] for x in
+                                open(split_dir).readlines()] if split_dir.exists() else None
+                self.sample_index_list = [x.strip().split(' ')[1] for x in
+                                    open(split_dir).readlines()] if split_dir.exists() else None
+
+            self.kitti_infos = []
+            self.include_kitti_data(self.mode)
+
+            if self.training:
+                all_train = len(self.kitti_infos)
+                self.unlabeled_index_list = list(set(list(range(all_train))) - set(self.sample_index_list))  # float()!!!
+                # print(self.unlabeled_index_list)
+                self.unlabeled_kitti_infos = []
+
+                temp = []
+                for i in self.sample_index_list:
+                    temp.append(self.kitti_infos[int(i)])
+
+                #Create train infos for 1% split
+                # file_path = "/mnt/data/adat01/adv_OpenPCDet/data/kitti/kitti_infos_train_37.pkl"
+                # with open(file_path, "wb") as file:
+                #     pickle.dump(temp, file)
+
+                if len(self.sample_index_list) < 3712: # not 100%
+                    for i in self.unlabeled_index_list:
+                        self.unlabeled_kitti_infos.append(self.kitti_infos[int(i)])
+                else:
+                    self.unlabeled_index_list = list(range(len(self.sample_index_list)))
+                    for i in self.sample_index_list:
+                        self.unlabeled_kitti_infos.append(self.kitti_infos[int(i)])
+                    print("full set", len(self.unlabeled_kitti_infos))
+                self.kitti_infos = temp
+                assert len(self.kitti_infos) == len(self.sample_id_list)
+
+        
+                self.class_counter = Counter()
+                for info in self.kitti_infos:
+                    for name in info['annos']['name']:
+                        self.class_counter[name] += 1
+                print(self.class_counter)
+                    
+                if self.logger is not None:
+                    self.logger.info('Total samples for KITTI dataset: %d' % (len(self.kitti_infos)))
 
     def include_kitti_data(self, mode):
         if self.logger is not None:
@@ -599,6 +698,8 @@ def create_kitti_infos(dataset_cfg, class_names, data_path, save_path, workers=4
     val_filename = save_path / ('kitti_infos_%s.pkl' % val_split)
     trainval_filename = save_path / 'kitti_infos_trainval.pkl'
     test_filename = save_path / 'kitti_infos_test.pkl'
+    train_src_filename = save_path / 'kitti_infos_train_src1.pkl'
+    train_trg_filename = save_path / 'kitti_infos_train_trg1.pkl'
 
     print('---------------Start to generate data infos---------------')
 
@@ -623,6 +724,20 @@ def create_kitti_infos(dataset_cfg, class_names, data_path, save_path, workers=4
     with open(test_filename, 'wb') as f:
         pickle.dump(kitti_infos_test, f)
     print('Kitti info test file is saved to %s' % test_filename)
+
+    '''
+    dataset.set_split('train_0.005_src_1')
+    kitti_infos_train_src = dataset.get_infos(num_workers=workers, has_label=True, count_inside_pts=True)
+    with open(train_src_filename, 'wb') as f:
+        pickle.dump(kitti_infos_train_src, f)
+    print('Kitti info train file is saved to %s' % train_src_filename)
+
+    dataset.set_split('train_0.005_trg_1')
+    kitti_infos_train_trg = dataset.get_infos(num_workers=workers, has_label=True, count_inside_pts=True)
+    with open(train_trg_filename, 'wb') as f:
+        pickle.dump(kitti_infos_train_trg, f)
+    print('Kitti info train file is saved to %s' % train_trg_filename)
+    '''
 
     print('---------------Start create groundtruth database for data augmentation---------------')
     dataset.set_split(train_split)

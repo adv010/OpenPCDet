@@ -50,7 +50,9 @@ def parse_config():
     parser.add_argument('--start_epoch', type=int, default=0, help='')
     parser.add_argument('--num_epochs_to_eval', type=int, default=0, help='number of checkpoints to be evaluated')
     parser.add_argument('--save_to_file', action='store_true', default=False, help='')
-    parser.add_argument('--split', type=str, default='train')
+    parser.add_argument('--split', type=str, default='train', help="/ImageSets/labeled.txt")
+    parser.add_argument('--split_src', type=str, default='', help ="")
+    parser.add_argument('--split_trg', type=str, default='', help = "")
     parser.add_argument('--repeat', type=int, default=1)
     parser.add_argument('--thresh', type=str, default='0.5, 0.25, 0.25')
     parser.add_argument('--sem_thresh', type=str, default='0.4, 0.0, 0.0')
@@ -62,7 +64,10 @@ def parse_config():
 
     parser.add_argument('--no_nms', action='store_true', default=False)
     parser.add_argument('--supervise_mode', type=int, default=0)
-    parser.add_argument('--dbinfos', type=str, default='kitti_dbinfos_train.pkl')
+    parser.add_argument('--dbinfos', type=str, default='kitti_dbinfos_train.pkl',help="dbinfos of (total) labeled data")
+    parser.add_argument('--src_dbinfos', type=str, default='kitti_dbinfos_train.pkl',help="dbinfos of source labeled data")
+    parser.add_argument('--trg_dbinfos', type=str, default='kitti_dbinfos_train.pkl',help="dbinfos of target labeled data")
+    parser.add_argument('--ssda', action='store_true', default=False)
 
     args = parser.parse_args()
 
@@ -158,7 +163,8 @@ def main():
         logger=logger,
         training=True,
         merge_all_iters_to_one_epoch=args.merge_all_iters_to_one_epoch,
-        total_epochs=args.epochs
+        total_epochs=args.epochs,
+        args = args
     )
 
     model = build_network(model_cfg=cfg.MODEL, num_class=len(cfg.CLASS_NAMES), dataset=train_set)

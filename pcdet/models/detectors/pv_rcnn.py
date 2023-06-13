@@ -1,5 +1,5 @@
 from .detector3d_template import Detector3DTemplate
-
+import pickle
 
 class PVRCNN(Detector3DTemplate):
     def __init__(self, model_cfg, num_class, dataset):
@@ -9,6 +9,18 @@ class PVRCNN(Detector3DTemplate):
     def forward(self, batch_dict):
         for cur_module in self.module_list:
             batch_dict = cur_module(batch_dict)
+            #save pickle of frame id, point features in a list
+            # vals = []
+            # if cur_module == self.module_list[3]:
+            #     vals.append(batch_dict['frame_id'])
+            #     vals.append(batch_dict['point_features'])
+            
+            # file_path = "/mnt/data/adat01/adv_OpenPCDet/pcdet/point_features_37.pkl"
+
+            # with open(file_path, "wb") as file:
+            #     pickle.dump(vals, file)
+
+
 
         if self.training:
             loss, tb_dict, disp_dict = self.get_training_loss()

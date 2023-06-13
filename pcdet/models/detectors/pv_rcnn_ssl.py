@@ -60,7 +60,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         # self.adaptive_thresh_metric = AdaptiveThreshMetrics(dataset=self.dataset, model_cfg=model_cfg)
         vals_to_store = ['iou_roi_pl', 'iou_roi_gt', 'pred_scores', 'teacher_pred_scores', 
                         'weights', 'roi_scores', 'pcv_scores', 'num_points_in_roi', 'class_labels',
-                        'iteration']
+                        'iteration','unwt_point_features','wt_point_features']
         self.val_dict = {val: [] for val in vals_to_store}
 
     def forward(self, batch_dict):
@@ -90,6 +90,8 @@ class PVRCNN_SSL(Detector3DTemplate):
                                                                             no_recall_dict=True, override_thresh=0.0, no_nms=self.no_nms)
             # Used for calc stats before and after filtering
             ori_unlabeled_boxes = batch_dict['gt_boxes'][unlabeled_inds, ...]
+            # unwt_point_features = batch_dict['unwt_point_features']
+            # wt_point_features = batch_dict['wt_point_features']
             
             """PL metrics before filtering"""
             if self.model_cfg.ROI_HEAD.get("ENABLE_EVAL", False):
