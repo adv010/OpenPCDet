@@ -50,6 +50,7 @@ class PVRCNNHead(RoIHeadTemplate):
         self.prototype = {'Car': None, 'Ped' : None, 'Cyc' : None}
         self.momentum = self.model_cfg.PROTOTYPE.MOMENTUM
         self.start_iter = self.model_cfg.PROTOTYPE.START_ITER
+        self.feature_points = {}
 
     def init_weights(self, weight_init='xavier'):
         if weight_init == 'kaiming':
@@ -85,6 +86,9 @@ class PVRCNNHead(RoIHeadTemplate):
 
         """
         batch_size = batch_dict['batch_size']
+        batch_dict['create_prototype'] = True # debugging, to create feature pkl for prototype
+
+        # rois_dist vs gt_boxes_dist , assertion checks!
         rois = batch_dict['gt_boxes'] if 'create_prototype' in batch_dict else batch_dict['rois']
         point_coords = batch_dict['point_coords']
         point_features = batch_dict['point_features']
@@ -116,6 +120,25 @@ class PVRCNNHead(RoIHeadTemplate):
             -1, self.model_cfg.ROI_GRID_POOL.GRID_SIZE ** 3,
             pooled_features.shape[-1]
         )  # (BxN, 6x6x6, C)
+
+        if 'create_prototype' in batch_dict:
+            gt_boxes = batch_dict['gt_boxes'].view(-1, 8)
+            valid_gt_boxes_mask = torch.logical_not(torch.all(gt_boxes == 0, dim=-1))
+            valid_gt_boxes = gt_boxes[valid_gt_boxes_mask, ...]
+
+            self.feature_points['local_roi_grid_points'] = local_roi_grid_points[valid_gt_boxes_mask, ...]
+            # self.feature_points['global_roi_grid_points'] = global_roi_grid_points[valid_gt_boxes_mask, ...]
+            self.feature_points['pooled_features'] = pooled_features[valid_gt_boxes_mask, ...]
+            self.feature_points['valid_gt_boxes'] = valid_gt_boxes
+        else:
+            self.feature_points['local_roi_grid_points'] = local_roi_grid_points #(B*N, 216, 3)
+            # self.feature_points['global_roi_grid_points'] = global_roi_grid_points
+            self.feature_points['pooled_features'] = pooled_features
+        # Save the BEV features seperately, might be useful later
+        self.feature_points['spatial_features_2d'] = batch_dict['spatial_features_2d']
+        output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
+        file_path = os.path.join(output_dir, 'features_points_new.pkl')
+        pickle.dump(self.feature_points, open(file_path, 'wb'))
         return pooled_features
 
     def get_global_grid_points_of_roi(self, rois, grid_size):
