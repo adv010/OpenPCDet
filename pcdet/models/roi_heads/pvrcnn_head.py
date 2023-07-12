@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from ...ops.pointnet2.pointnet2_stack import pointnet2_modules as pointnet2_stack_modules
 from ...utils import common_utils
 from .roi_head_template import RoIHeadTemplate
+from visual_utils import visualize_utils as V
 
 
 class PVRCNNHead(RoIHeadTemplate):
@@ -86,9 +87,9 @@ class PVRCNNHead(RoIHeadTemplate):
 
         """
         batch_size = batch_dict['batch_size']
-        batch_dict['create_prototype'] = True # debugging, to create feature pkl for prototype
-
-        # rois_dist vs gt_boxes_dist , assertion checks!
+        batch_size = batch_dict['batch_size']
+        batch_dict['create_prototype'] = False # debugging, to create feature pkl for prototype
+        batch_dict['enable_vis'] = False
         rois = batch_dict['gt_boxes'] if 'create_prototype' in batch_dict else batch_dict['rois']
         point_coords = batch_dict['point_coords']
         point_features = batch_dict['point_features']
@@ -121,7 +122,40 @@ class PVRCNNHead(RoIHeadTemplate):
             pooled_features.shape[-1]
         )  # (BxN, 6x6x6, C)
 
+        # if batch_dict['enable_vis'] == True:
+        #     vis_type = None
+        #     points_mask = targets_dict['points'][:, 0] == uind
+        #     points = targets_dict['points'][points_mask, 1:]
+        #     gt_boxes = gt_labeled_boxes[:, :-1]  # Default GT option
+        #     if vis_type == 'roi_gt':
+        #         vis_pred_boxes = roi_labeled_boxes[:, :-1]
+        #         vis_pred_scores = roi_scores
+        #     elif vis_type == 'roi_pl':
+        #         vis_pred_boxes = roi_labeled_boxes[:, :-1]
+        #         vis_pred_scores = roi_scores
+        #         gt_boxes = pl_labeled_boxes[:, :-1]
+        #     elif vis_type == 'target_gt':
+        #         vis_pred_boxes = target_labeled_boxes[:, :-1]
+        #         vis_pred_scores = target_scores
+        #     elif vis_type == 'pred_gt':
+        #         vis_pred_boxes = pred_boxes
+        #         vis_pred_scores = pred_scores
+        #     elif vis_type == 'ema_gt' and self.model_cfg.get('ENABLE_SOFT_TEACHER', False):
+        #         vis_pred_boxes = targets_dict['batch_box_preds_teacher'][uind][mask].detach().clone()
+        #         vis_pred_scores = targets_dict['rcnn_cls_score_teacher'][uind][mask].detach().clone()
+        #     else:
+        #         raise ValueError(vis_type)
+
+        #     V.vis(points, gt_boxes=gt_boxes, pred_boxes=vis_pred_boxes,
+        #             pred_scores=vis_pred_scores, pred_labels=roi_labels.view(-1),
+        #             filename=f'vis_{vis_type}_{uind}.png')
+
+
         if 'create_prototype' in batch_dict:
+            # rois_dist vs gt_boxes_dist , assertion checks!
+            self.feature_points['gt_boxes'] = batch_dict['gt_boxes']
+            self.feature_points['rois'] = torch.cat((batch_dict['rois'],batch_dict['roi_labels'].unsqueeze(-1)), dim=2)
+            self.feature_points['local_roi_grid_points'] = batch_dict['spatial_features_2d']
             gt_boxes = batch_dict['gt_boxes'].view(-1, 8)
             valid_gt_boxes_mask = torch.logical_not(torch.all(gt_boxes == 0, dim=-1))
             valid_gt_boxes = gt_boxes[valid_gt_boxes_mask, ...]
@@ -137,7 +171,7 @@ class PVRCNNHead(RoIHeadTemplate):
         # Save the BEV features seperately, might be useful later
         self.feature_points['spatial_features_2d'] = batch_dict['spatial_features_2d']
         output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
-        file_path = os.path.join(output_dir, 'features_points_new.pkl')
+        file_path = os.path.join(output_dir, 'features_points_100%.pkl')
         pickle.dump(self.feature_points, open(file_path, 'wb'))
         return pooled_features
 
