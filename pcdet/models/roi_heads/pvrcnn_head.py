@@ -156,18 +156,18 @@ class PVRCNNHead(RoIHeadTemplate):
                 )  # (BxN, 6x6x6, C)
 
         if 'create_prototype' in batch_dict and self.count<3713:
-            self.prototype_info['gt_boxes'] = batch_dict['gt_boxes']
+            self.prototype_info['gt_boxes'] = batch_dict['gt_boxes'].detach().cpu()
             self.prototype_info['rois'] = torch.cat((batch_dict['rois'],batch_dict['roi_labels'].unsqueeze(-1)), dim=2)
-            self.prototype_info['roi_labels'] = batch_dict['roi_labels']
+            self.prototype_info['roi_labels'] = batch_dict['roi_labels'].detach().cpu()
             self.prototype_info['gt_labels'] =  batch_dict['gt_boxes'][:,:,-1]
-            self.prototype_info['spatial_features'] = batch_dict['spatial_features']
-            self.prototype_info['spatial_features_2d'] = batch_dict['spatial_features_2d']
-            self.prototype_info['local_roi_grid_points'] = local_roi_grid_points
-            self.prototype_info['global_roi_grid_points'] = global_roi_grid_points
-            self.prototype_info['pooled_roi_features'] = pooled_roi_features
-            self.prototype_info['local_gt_grid_points'] = local_gt_grid_points
+            self.prototype_info['spatial_features'] = batch_dict['spatial_features'].detach().cpu()
+            self.prototype_info['spatial_features_2d'] = batch_dict['spatial_features_2d'].detach().cpu()
+            self.prototype_info['local_roi_grid_points'] = local_roi_grid_points.detach().cpu()
+            self.prototype_info['global_roi_grid_points'] = global_roi_grid_points.detach().cpu()
+            self.prototype_info['pooled_roi_features'] = pooled_roi_features.detach().cpu()
+            self.prototype_info['local_gt_grid_points'] = local_gt_grid_points.detach().cpu()
             self.prototype_info['global_gt_grid_points'] = global_gt_grid_points
-            self.prototype_info['pooled_gt_features'] = pooled_gt_features
+            self.prototype_info['pooled_gt_features'] = pooled_gt_features.detach().cpu()
 
         output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
         if dist.is_initialized():
@@ -231,44 +231,49 @@ class PVRCNNHead(RoIHeadTemplate):
         pooled_gt_features = pooled_gt_features.view(batch_dict['batch_size'],batch_dict['gt_boxes'][:,:,-1].shape[1],-1, grid_size, grid_size, grid_size)
         self.prototype_info['pooled_gt_features'] = pooled_gt_features #(B,N,C,6,6,6)
 
+        (B,N,C,G,G,G) = pooled_roi_features.size()         #shape - (B,N,128,6,6,6))
+        pooled_roi_features = pooled_roi_features.view(B*N, C*G*G*G)
+        pooled_roi_features = pooled_roi_features
+        (B,N,C,G,G,G) = pooled_gt_features.size()         #shape - (B,N,128,6,6,6))
+        pooled_gt_features = pooled_gt_features.view(B*N, C*G*G*G)  #shape - (B*N, 27648 (128*6*6*6))
+        pooled_gt_features = pooled_gt_features
         ''' Prototype calculation - ROI'''
         # 1/2 Current Features
         current_roi_features = {'Car': None, 'Ped' : None, 'Cyc' : None}
         for cls_idx, cls_name in enumerate(list(self.class_dict.values())):
-            cls_mask = (batch_dict['roi_labels'] == (cls_idx+1)).flatten()
-            (B,N,C,G,G,G) = pooled_roi_features.size()         #shape - (B,N,128,6,6,6))
-            pooled_roi_features = pooled_roi_features.view(B*N, C*G*G*G)  #shape - (B*N, 27648 (128*6*6*6))
+            cls_mask = (batch_dict['roi_labels'] == (cls_idx+1)).flatten().detach().cpu()
+  #shape - (B*N, 27648 (128*6*6*6))
             # Fetch classwise features , fill features with 0s if given class not found in iteration.
             current_roi_features[cls_name] = pooled_roi_features[cls_mask, ...] 
             if current_roi_features[cls_name].numel() == 0: 
-                current_roi_features[cls_name] = torch.zeros((1, C*G*G*G)).to(device=pooled_roi_features.device)
+                current_roi_features[cls_name] = torch.zeros((1, C*G*G*G)).detach().cpu()
         # 2/2 Calculate Prototype
-            current_roi_features[cls_name] =  (current_roi_features[cls_name].mean(dim=0)).detach().cpu()  
+        for cls_idx, cls_name in enumerate(list(self.class_dict.values())):   
+            current_roi_features[cls_name] =  (current_roi_features[cls_name].mean(dim=0))
+            current_roi_features[cls_name] = current_roi_features[cls_name].detach().cpu()  
             if self.count==0: 
-                self.roi_prototype = current_roi_features
+                self.roi_prototype = current_roi_features 
             else :
-                for cls_name in list(self.class_dict.values()):
-                    self.roi_prototype[cls_name] = self.momentum * self.roi_prototype[cls_name] + (1 - self.momentum) * current_roi_features[cls_name]  
-
+                self.roi_prototype[cls_name] = self.momentum * self.roi_prototype[cls_name].detach().cpu() + (1 - self.momentum) * current_roi_features[cls_name].detach().cpu() 
 
         ''' Prototype calculation - GT'''
         current_gt_features = {'Car': None, 'Ped' : None, 'Cyc' : None}
         for cls_idx, cls_name in enumerate(list(self.class_dict.values())):        
-            cls_mask = (batch_dict['gt_boxes'][:,:,-1] == (cls_idx+1)).flatten()
-            (B,N,C,G,G,G) = pooled_gt_features.size()         #shape - (B,N,128,6,6,6))
-            pooled_gt_features = pooled_gt_features.view(B*N, C*G*G*G)  #shape - (B*N, 27648 (128*6*6*6))
+            cls_mask = (batch_dict['gt_boxes'][:,:,-1] == (cls_idx+1)).flatten().detach().cpu()
             # Fetch classwise features , fill features with 0s if given class not found in iteration.
             current_gt_features[cls_name] = pooled_gt_features[cls_mask, ...] 
             if current_gt_features[cls_name].numel() == 0: 
-                current_gt_features[cls_name] = torch.zeros((1, C*G*G*G)).to(device=pooled_gt_features.device)
+                current_gt_features[cls_name] = torch.zeros((1, C*G*G*G)).cpu()
+            
         # 2/2 Calculate Prototype
-            current_gt_features[cls_name] =  (current_gt_features[cls_name].mean(dim=0)).detach().cpu()  
+        for cls_idx, cls_name in enumerate(list(self.class_dict.values())):   
+            current_gt_features[cls_name] =  (current_gt_features[cls_name].mean(dim=0))
+            current_gt_features[cls_name] = current_gt_features[cls_name].detach().cpu()  
             if self.count==0: 
                 self.gt_prototype = current_gt_features
                 self.count+=batch_dict['batch_size']
             else :
-                for cls_name in list(self.class_dict.values()):
-                    self.gt_prototype[cls_name] = self.momentum * self.gt_prototype[cls_name] + (1 - self.momentum) * current_gt_features[cls_name]
+                self.gt_prototype[cls_name] = self.momentum * self.gt_prototype[cls_name].detach().cpu() + (1 - self.momentum) * current_gt_features[cls_name].detach().cpu()
                 self.count+=batch_dict['batch_size']
 
         self.prototype_info['roi_prototype'] = self.roi_prototype
@@ -295,12 +300,12 @@ class PVRCNNHead(RoIHeadTemplate):
         rcnn_roi_cls = self.cls_layers(shared_roi_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
         rcnn_roi_reg = self.reg_layers(shared_roi_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
 
-        shared_gt_features = self.shared_fc_layer(pooled_gt_features.view(batch_size_rcnn, -1, 1))
-        rcnn_gt_cls = self.cls_layers(shared_gt_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
-        rcnn_gt_reg = self.reg_layers(shared_gt_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
+        # shared_gt_features = self.shared_fc_layer(pooled_gt_features.view(batch_size_rcnn, -1, 1))
+        # rcnn_gt_cls = self.cls_layers(shared_gt_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
+        # rcnn_gt_reg = self.reg_layers(shared_gt_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
 
-        self.prototype_info['shared_roi_features'] = shared_roi_features
-        self.prototype_info['shared_gt_features'] = shared_gt_features 
+        self.prototype_info['shared_roi_features'] = shared_roi_features.detach().cpu() 
+        # self.prototype_info['shared_gt_features'] = shared_gt_features 
 
 
         output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
