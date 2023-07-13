@@ -7,7 +7,7 @@ from ...ops.pointnet2.pointnet2_stack import pointnet2_modules as pointnet2_stac
 from ...utils import common_utils
 from .roi_head_template import RoIHeadTemplate
 from visual_utils import visualize_utils as V
-
+import torch.distributed as dist 
 
 class PVRCNNHead(RoIHeadTemplate):
     def __init__(self, input_channels, model_cfg, num_class=1,
@@ -48,7 +48,9 @@ class PVRCNNHead(RoIHeadTemplate):
 
         self.print_loss_when_eval = False
         self.class_dict = {1:'Car', 2 :'Ped', 3:'Cyc'}
-        self.prototype = {'Car': None, 'Ped' : None, 'Cyc' : None}
+        self.roi_prototype = {'Car': None, 'Ped' : None, 'Cyc' : None}
+        self.gt_prototype = {'Car': None, 'Ped' : None, 'Cyc' : None}
+        self.momentum = 0.9
         # self.momentum = self.model_cfg.PROTOTYPE.MOMENTUM
         # self.start_iter = self.model_cfg.PROTOTYPE.START_ITER
         self.prototype_info = {}
@@ -128,7 +130,7 @@ class PVRCNNHead(RoIHeadTemplate):
 
         with torch.no_grad():
                 global_gt_grid_points, local_gt_grid_points = self.get_global_grid_points_of_roi(
-                    rois, grid_size=self.model_cfg.ROI_GRID_POOL.GRID_SIZE
+                    gts, grid_size=self.model_cfg.ROI_GRID_POOL.GRID_SIZE
                 )  # (BxN, 6x6x6, 3)
                 global_gt_grid_points = global_gt_grid_points.view(batch_size, -1, 3)  # (B, Nx6x6x6, 3)
 
@@ -139,7 +141,7 @@ class PVRCNNHead(RoIHeadTemplate):
                     xyz_batch_cnt[k] = (batch_idx == k).sum()
 
                 new_xyz = global_gt_grid_points.view(-1, 3)
-                new_xyz_batch_cnt = xyz.new_zeros(batch_size).int().fill_(global_roi_grid_points.shape[1])
+                new_xyz_batch_cnt = xyz.new_zeros(batch_size).int().fill_(global_gt_grid_points.shape[1])
                 pooled_points, pooled_features = self.roi_grid_pool_layer(
                     xyz=xyz.contiguous(),
                     xyz_batch_cnt=xyz_batch_cnt,
@@ -154,26 +156,18 @@ class PVRCNNHead(RoIHeadTemplate):
                 )  # (BxN, 6x6x6, C)
 
         if 'create_prototype' in batch_dict and self.count<3713:
-            self.count+= batch_dict['batch_size']
             self.prototype_info['gt_boxes'] = batch_dict['gt_boxes']
             self.prototype_info['rois'] = torch.cat((batch_dict['rois'],batch_dict['roi_labels'].unsqueeze(-1)), dim=2)
-            valid_gt_boxes = batch_dict['gt_boxes'].view(-1, 8)
+            self.prototype_info['roi_labels'] = batch_dict['roi_labels']
+            self.prototype_info['gt_labels'] =  batch_dict['gt_boxes'][:,:,-1]
+            self.prototype_info['spatial_features'] = batch_dict['spatial_features']
+            self.prototype_info['spatial_features_2d'] = batch_dict['spatial_features_2d']
             self.prototype_info['local_roi_grid_points'] = local_roi_grid_points
             self.prototype_info['global_roi_grid_points'] = global_roi_grid_points
             self.prototype_info['pooled_roi_features'] = pooled_roi_features
-            self.prototype_info['valid_gt_boxes'] = valid_gt_boxes
-            self.prototype_info['spatial_features'] = batch_dict['spatial_features']
-            self.prototype_info['spatial_features_2d'] = batch_dict['spatial_features_2d']
             self.prototype_info['local_gt_grid_points'] = local_gt_grid_points
             self.prototype_info['global_gt_grid_points'] = global_gt_grid_points
             self.prototype_info['pooled_gt_features'] = pooled_gt_features
-
-            
-        #     if dist.is_initialized():
-        #         rank = os.getenv('RANK')
-        #         tb_dict_[f'bs_rank_{rank}'] = int(batch_dict['gt_boxes'].shape[0])
-        #     else:
-        #         tb_dict_[f'bs'] = int(batch_dict['gt_boxes'].shape[0])
 
         output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
         if dist.is_initialized():
@@ -182,7 +176,7 @@ class PVRCNNHead(RoIHeadTemplate):
         else:
             file_path = os.path.join(output_dir, 'prototype_infos_fully_sup.pkl')
         pickle.dump(self.prototype_info, open(file_path, 'wb'))
-        return pooled_features
+        return pooled_roi_features, pooled_gt_features
 
     def get_global_grid_points_of_roi(self, rois, grid_size):
         rois = rois.view(-1, rois.shape[-1])
@@ -223,44 +217,110 @@ class PVRCNNHead(RoIHeadTemplate):
             batch_dict['roi_labels'] = targets_dict['roi_labels']
 
         # RoI aware pooling
-        pooled_features = self.roi_grid_pool(batch_dict)  # (BxN, 6x6x6, C)
+        pooled_roi_features, pooled_gt_features = self.roi_grid_pool(batch_dict)  # (BxN, 6x6x6, C)
 
         grid_size = self.model_cfg.ROI_GRID_POOL.GRID_SIZE
-        batch_size_rcnn = pooled_features.shape[0]
-        pooled_features = pooled_features.permute(0, 2, 1).\
-            contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
-        
-        if self.training and self.model_cfg.PROTO_INTER_LOSS.ENABLE:
+        batch_size_rcnn = pooled_roi_features.shape[0]
+        # pooled_roi_features = pooled_roi_features.permute(0, 2, 1).\
+        #     contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
+        pooled_roi_features = pooled_roi_features.view(batch_dict['batch_size'],batch_dict['roi_labels'].shape[1],-1, grid_size, grid_size, grid_size)
+        self.prototype_info['pooled_roi_features'] = pooled_roi_features #(B,N,C,6,6,6)
+
+        # pooled_gt_features = pooled_gt_features.permute(0, 2, 1).\
+        #     contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
+        pooled_gt_features = pooled_gt_features.view(batch_dict['batch_size'],batch_dict['gt_boxes'][:,:,-1].shape[1],-1, grid_size, grid_size, grid_size)
+        self.prototype_info['pooled_gt_features'] = pooled_gt_features #(B,N,C,6,6,6)
+
+        ''' Prototype calculation - ROI'''
+        # 1/2 Current Features
+        current_roi_features = {'Car': None, 'Ped' : None, 'Cyc' : None}
+        for cls_idx, cls_name in enumerate(list(self.class_dict.values())):
+            cls_mask = (batch_dict['roi_labels'] == (cls_idx+1)).flatten()
+            (B,N,C,G,G,G) = pooled_roi_features.size()         #shape - (B,N,128,6,6,6))
+            pooled_roi_features = pooled_roi_features.view(B*N, C*G*G*G)  #shape - (B*N, 27648 (128*6*6*6))
+            # Fetch classwise features , fill features with 0s if given class not found in iteration.
+            current_roi_features[cls_name] = pooled_roi_features[cls_mask, ...] 
+            if current_roi_features[cls_name].numel() == 0: 
+                current_roi_features[cls_name] = torch.zeros((1, C*G*G*G)).to(device=pooled_roi_features.device)
+        # 2/2 Calculate Prototype
+            current_roi_features[cls_name] =  (current_roi_features[cls_name].mean(dim=0)).detach().cpu()  
+            if self.count==0: 
+                self.roi_prototype = current_roi_features
+            else :
+                for cls_name in list(self.class_dict.values()):
+                    self.roi_prototype[cls_name] = self.momentum * self.roi_prototype[cls_name] + (1 - self.momentum) * current_roi_features[cls_name]  
+
+
+        ''' Prototype calculation - GT'''
+        current_gt_features = {'Car': None, 'Ped' : None, 'Cyc' : None}
+        for cls_idx, cls_name in enumerate(list(self.class_dict.values())):        
+            cls_mask = (batch_dict['gt_boxes'][:,:,-1] == (cls_idx+1)).flatten()
+            (B,N,C,G,G,G) = pooled_gt_features.size()         #shape - (B,N,128,6,6,6))
+            pooled_gt_features = pooled_gt_features.view(B*N, C*G*G*G)  #shape - (B*N, 27648 (128*6*6*6))
+            # Fetch classwise features , fill features with 0s if given class not found in iteration.
+            current_gt_features[cls_name] = pooled_gt_features[cls_mask, ...] 
+            if current_gt_features[cls_name].numel() == 0: 
+                current_gt_features[cls_name] = torch.zeros((1, C*G*G*G)).to(device=pooled_gt_features.device)
+        # 2/2 Calculate Prototype
+            current_gt_features[cls_name] =  (current_gt_features[cls_name].mean(dim=0)).detach().cpu()  
+            if self.count==0: 
+                self.gt_prototype = current_gt_features
+                self.count+=batch_dict['batch_size']
+            else :
+                for cls_name in list(self.class_dict.values()):
+                    self.gt_prototype[cls_name] = self.momentum * self.gt_prototype[cls_name] + (1 - self.momentum) * current_gt_features[cls_name]
+                self.count+=batch_dict['batch_size']
+
+        self.prototype_info['roi_prototype'] = self.roi_prototype
+        self.prototype_info['gt_prototype'] = self.gt_prototype
+
+        # if self.training and self.model_cfg.PROTO_INTER_LOSS.ENABLE:
             
-            batch_dict['pooled_features'] =  pooled_features.view(batch_dict['batch_size'],batch_dict['roi_labels'].shape[1],-1, grid_size, grid_size, grid_size)
-            batch_dict['pooled_features_lbl'] = batch_dict['pooled_features'][batch_dict['labeled_inds']]
-            batch_dict['pooled_features_ulb'] =  batch_dict['pooled_features'][batch_dict['unlabeled_inds']]
+        #     batch_dict['pooled_features'] =  pooled_features.view(batch_dict['batch_size'],batch_dict['roi_labels'].shape[1],-1, grid_size, grid_size, grid_size)
+        #     batch_dict['pooled_features_lbl'] = batch_dict['pooled_features'][batch_dict['labeled_inds']]
+        #     batch_dict['pooled_features_ulb'] =  batch_dict['pooled_features'][batch_dict['unlabeled_inds']]
 
             
-            if batch_dict['module_type'] == 'WeakAug':
-                self.prototype = self.calc_prototype(batch_dict)
-                output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
-                file_path = os.path.join(output_dir, 'prototypes.pkl')
-                pickle.dump(self.prototype, open(file_path, 'wb'))
+            # if batch_dict['module_type'] == 'WeakAug':
+            #     self.prototype = self.calc_prototype(batch_dict)
+            #     output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
+            #     file_path = os.path.join(output_dir, 'prototypes.pkl')
+            #     pickle.dump(self.prototype, open(file_path, 'wb'))
 
-                features_weak_ulb = self.get_features(batch_dict,labeled=False)
-                batch_dict["prototype"] = self.prototype
-                batch_dict["features_weak_ulb"] = features_weak_ulb
+            #     features_weak_ulb = self.get_features(batch_dict,labeled=False)
+            #     batch_dict["prototype"] = self.prototype
+            #     batch_dict["features_weak_ulb"] = features_weak_ulb
 
-        shared_features = self.shared_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1))
-        rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
-        rcnn_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
+        shared_roi_features = self.shared_fc_layer(pooled_roi_features.view(batch_size_rcnn, -1, 1))
+        rcnn_roi_cls = self.cls_layers(shared_roi_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
+        rcnn_roi_reg = self.reg_layers(shared_roi_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
+
+        shared_gt_features = self.shared_fc_layer(pooled_gt_features.view(batch_size_rcnn, -1, 1))
+        rcnn_gt_cls = self.cls_layers(shared_gt_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
+        rcnn_gt_reg = self.reg_layers(shared_gt_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
+
+        self.prototype_info['shared_roi_features'] = shared_roi_features
+        self.prototype_info['shared_gt_features'] = shared_gt_features 
+
+
+        output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
+        if dist.is_initialized():
+            rank = os.getenv('RANK')
+            file_path = os.path.join('output_dir_{rank}', 'prototype_infos_fully_sup.pkl')
+        else:
+            file_path = os.path.join(output_dir, 'prototype_infos_fully_sup.pkl')
+        pickle.dump(self.prototype_info, open(file_path, 'wb'))
 
         if not self.training or self.predict_boxes_when_training:
             batch_cls_preds, batch_box_preds = self.generate_predicted_boxes(
-                batch_size=batch_dict['batch_size'], rois=batch_dict['rois'], cls_preds=rcnn_cls, box_preds=rcnn_reg
+                batch_size=batch_dict['batch_size'], rois=batch_dict['rois'], cls_preds=rcnn_roi_cls, box_preds=rcnn_roi_reg
             )
             batch_dict['batch_cls_preds'] = batch_cls_preds
             batch_dict['batch_box_preds'] = batch_box_preds
             batch_dict['cls_preds_normalized'] = False
         if self.training or self.print_loss_when_eval:
-            targets_dict['rcnn_cls'] = rcnn_cls
-            targets_dict['rcnn_reg'] = rcnn_reg
+            targets_dict['rcnn_cls'] = rcnn_roi_cls
+            targets_dict['rcnn_reg'] = rcnn_roi_reg
 
             self.forward_ret_dict = targets_dict
 
@@ -275,76 +335,76 @@ class PVRCNNHead(RoIHeadTemplate):
     #     return batch_dict
 
     #Compute current pooled_features. Set labeled on to get current labeled features, else off for unlabeled
-    def get_features(self,batch_dict,labeled):
-        current_features = {'Car': None, 'Ped' : None, 'Cyc' : None}
+    # def get_features(self,batch_dict,labeled):
+    #     current_features = {'Car': None, 'Ped' : None, 'Cyc' : None}
         
-        # get features for ROIs of unlabeled data (viewB)
-        if batch_dict['module_type'] == "StrongAug":    
-            batch_dict = self._get_pooled_features(batch_dict)
+    #     # get features for ROIs of unlabeled data (viewB)
+    #     if batch_dict['module_type'] == "StrongAug":    
+    #         batch_dict = self._get_pooled_features(batch_dict)
 
-        for cls_idx, cls_name in enumerate(list(self.class_dict.values())):
-            # get features for GTs of labeled data (for prototypes)
-            if labeled==True and batch_dict['module_type'] == "WeakAug":
-                feature_type ='pooled_features_lbl'
-                cls_mask = (batch_dict['gt_boxes'][batch_dict['labeled_inds'], :, -1] == (cls_idx+1)).flatten()
-            # get features for ROIs of unlabeled data (viewA)
-            else:
-                feature_type = 'pooled_features_ulb'
-                cls_mask = (batch_dict['roi_labels'][batch_dict['unlabeled_inds'], :] == (cls_idx+1)).flatten()
+    #     for cls_idx, cls_name in enumerate(list(self.class_dict.values())):
+    #         # get features for GTs of labeled data (for prototypes)
+    #         if labeled==True and batch_dict['module_type'] == "WeakAug":
+    #             feature_type ='pooled_features_lbl'
+    #             cls_mask = (batch_dict['gt_boxes'][batch_dict['labeled_inds'], :, -1] == (cls_idx+1)).flatten()
+    #         # get features for ROIs of unlabeled data (viewA)
+    #         else:
+    #             feature_type = 'pooled_features_ulb'
+    #             cls_mask = (batch_dict['roi_labels'][batch_dict['unlabeled_inds'], :] == (cls_idx+1)).flatten()
 
-            # B - batch size, N - No. of roi/gt
-            # C - No. of channels in features (128), G - grid size (6)
-            (B,N,C,G,G,G) = batch_dict[feature_type].size()         #shape - (B,N,128,6,6,6))
-            features = batch_dict[feature_type].view(B*N, C*G*G*G)  #shape - (B*N, 27648 (128*6*6*6))
+    #         # B - batch size, N - No. of roi/gt
+    #         # C - No. of channels in features (128), G - grid size (6)
+    #         (B,N,C,G,G,G) = batch_dict[feature_type].size()         #shape - (B,N,128,6,6,6))
+    #         features = batch_dict[feature_type].view(B*N, C*G*G*G)  #shape - (B*N, 27648 (128*6*6*6))
             
-            # Fetch classwise features 
-            current_features[cls_name] = features[cls_mask, ...] 
+    #         # Fetch classwise features 
+    #         current_features[cls_name] = features[cls_mask, ...] 
 
-            # TODO(shashank) : If ft. are aritficially filled like this way then 
-            # later there should be a check for such a scenario while computing cos_sim
-            if current_features[cls_name].numel() == 0: 
-                current_features[cls_name] = torch.zeros((1, C*G*G*G)).to(device=batch_dict['pooled_features'].device)
+    #         # TODO(shashank) : If ft. are aritficially filled like this way then 
+    #         # later there should be a check for such a scenario while computing cos_sim
+    #         if current_features[cls_name].numel() == 0: 
+    #             current_features[cls_name] = torch.zeros((1, C*G*G*G)).to(device=batch_dict['pooled_features'].device)
         
-        return current_features
+    #     return current_features
 
-    # Call current_features for labeled  and update labeled prototype 
-    # NOTE : Prototype created using GT boxes and labels for labeled entries.
-    def calc_prototype(self, batch_dict):
-        # get pooled features from viewA
-        batch_dict['create_prototype'] = True
-        batch_dict = self._get_pooled_features(batch_dict)  
-        batch_dict.pop('create_prototype')
+    # # Call current_features for labeled  and update labeled prototype 
+    # # NOTE : Prototype created using GT boxes and labels for labeled entries.
+    # def calc_prototype(self, batch_dict):
+    #     # get pooled features from viewA
+    #     batch_dict['create_prototype'] = True
+    #     batch_dict = self._get_pooled_features(batch_dict)  
+    #     batch_dict.pop('create_prototype')
         
-        # get features for GTs using above pooled features
-        current_features = self.get_features(batch_dict, labeled=True)
+    #     # get features for GTs using above pooled features
+    #     current_features = self.get_features(batch_dict, labeled=True)
         
-        # classwise mean of features across all GTs 
-        for cls_name in list(self.class_dict.values()):
-            current_features[cls_name] =  (current_features[cls_name].mean(dim=0)).detach().cpu()  
+    #     # classwise mean of features across all GTs 
+    #     for cls_name in list(self.class_dict.values()):
+    #         current_features[cls_name] =  (current_features[cls_name].mean(dim=0)).detach().cpu()  
 
-        # update prototype with current labeled features using EMA
-        if batch_dict['cur_iteration']< self.start_iter: 
-            self.prototype = current_features
-        else :
-            for cls_name in list(self.class_dict.values()):
-                self.prototype[cls_name] = self.momentum * self.prototype[cls_name] + (1 - self.momentum) * current_features[cls_name]        
-        return self.prototype
+    #     # update prototype with current labeled features using EMA
+    #     if batch_dict['cur_iteration']< self.start_iter: 
+    #         self.prototype = current_features
+    #     else :
+    #         for cls_name in list(self.class_dict.values()):
+    #             self.prototype[cls_name] = self.momentum * self.prototype[cls_name] + (1 - self.momentum) * current_features[cls_name]        
+    #     return self.prototype
 
-    # Called when computing unlabeled_features for strong_aug. Pass through ROI_Grid_pool and return to get_features() 
-    def _get_pooled_features(self,batch_dict):
+    # # Called when computing unlabeled_features for strong_aug. Pass through ROI_Grid_pool and return to get_features() 
+    # def _get_pooled_features(self,batch_dict):
 
-        pooled_features = self.roi_grid_pool(batch_dict) 
-        grid_size = self.model_cfg.ROI_GRID_POOL.GRID_SIZE
-        batch_size_rcnn = pooled_features.shape[0]
-        pooled_features = pooled_features.permute(0, 2, 1).\
-            contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
+    #     pooled_features = self.roi_grid_pool(batch_dict) 
+    #     grid_size = self.model_cfg.ROI_GRID_POOL.GRID_SIZE
+    #     batch_size_rcnn = pooled_features.shape[0]
+    #     pooled_features = pooled_features.permute(0, 2, 1).\
+    #         contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
     
         
-        if 'create_prototype' in batch_dict:
-            batch_dict['pooled_features'] =  pooled_features.view(batch_dict['batch_size'],batch_dict['gt_boxes'].shape[1],-1, grid_size, grid_size, grid_size)
-            batch_dict['pooled_features_lbl'] =  batch_dict['pooled_features'][batch_dict['labeled_inds']]
-        else:
-            batch_dict['pooled_features'] =  pooled_features.view(batch_dict['batch_size'],batch_dict['roi_labels'].shape[1],-1, grid_size, grid_size, grid_size)
-            batch_dict['pooled_features_ulb'] =  batch_dict['pooled_features'][batch_dict['unlabeled_inds']]
+    #     if 'create_prototype' in batch_dict:
+    #         batch_dict['pooled_features'] =  pooled_features.view(batch_dict['batch_size'],batch_dict['gt_boxes'].shape[1],-1, grid_size, grid_size, grid_size)
+    #         batch_dict['pooled_features_lbl'] =  batch_dict['pooled_features'][batch_dict['labeled_inds']]
+    #     else:
+    #         batch_dict['pooled_features'] =  pooled_features.view(batch_dict['batch_size'],batch_dict['roi_labels'].shape[1],-1, grid_size, grid_size, grid_size)
+    #         batch_dict['pooled_features_ulb'] =  batch_dict['pooled_features'][batch_dict['unlabeled_inds']]
 
-        return batch_dict
+    #     return batch_dict
