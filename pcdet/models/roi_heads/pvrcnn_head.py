@@ -54,6 +54,7 @@ class PVRCNNHead(RoIHeadTemplate):
         # self.momentum = self.model_cfg.PROTOTYPE.MOMENTUM
         # self.start_iter = self.model_cfg.PROTOTYPE.START_ITER
         self.prototype_info = {}
+        self.prototype_info['type'] = "Prototype collected on 100% supervised model for all 3712 samples. Collected by running pv_rcnn (not ssl!!) No GT Sampling, No Augmentation "
         self.count = 0
 
     def init_weights(self, weight_init='xavier'):
@@ -156,26 +157,19 @@ class PVRCNNHead(RoIHeadTemplate):
                 )  # (BxN, 6x6x6, C)
 
         if 'create_prototype' in batch_dict and self.count<3713:
-            self.prototype_info['gt_boxes'] = batch_dict['gt_boxes'].detach().cpu()
-            self.prototype_info['rois'] = torch.cat((batch_dict['rois'],batch_dict['roi_labels'].unsqueeze(-1)), dim=2)
-            self.prototype_info['roi_labels'] = batch_dict['roi_labels'].detach().cpu()
-            self.prototype_info['gt_labels'] =  batch_dict['gt_boxes'][:,:,-1]
-            self.prototype_info['spatial_features'] = batch_dict['spatial_features'].detach().cpu()
-            self.prototype_info['spatial_features_2d'] = batch_dict['spatial_features_2d'].detach().cpu()
-            self.prototype_info['local_roi_grid_points'] = local_roi_grid_points.detach().cpu()
-            self.prototype_info['global_roi_grid_points'] = global_roi_grid_points.detach().cpu()
-            self.prototype_info['pooled_roi_features'] = pooled_roi_features.detach().cpu()
-            self.prototype_info['local_gt_grid_points'] = local_gt_grid_points.detach().cpu()
-            self.prototype_info['global_gt_grid_points'] = global_gt_grid_points
-            self.prototype_info['pooled_gt_features'] = pooled_gt_features.detach().cpu()
+            self.prototype_info['gt_boxes'].append(batch_dict['gt_boxes'].detach().cpu().numpy())
+            self.prototype_info['rois'].append(torch.cat((batch_dict['rois'],batch_dict['roi_labels'].unsqueeze(-1)), dim=2))
+            self.prototype_info['roi_labels'].append(batch_dict['roi_labels'].detach().cpu().numpy())
+            self.prototype_info['gt_labels'].append(batch_dict['gt_boxes'][:,:,-1].numpy())
+            self.prototype_info['spatial_features'].append(['spatial_features'].detach().cpu().numpy())
+            self.prototype_info['spatial_features_2d'].append(batch_dict['spatial_features_2d'].detach().cpu().numpy())
+            self.prototype_info['local_roi_grid_points'].append(local_roi_grid_points.detach().cpu().numpy())
+            self.prototype_info['global_roi_grid_points'].append(global_roi_grid_points.detach().cpu().numpy())
+            self.prototype_info['pooled_roi_features'].append(pooled_roi_features.detach().cpu().numpy())
+            self.prototype_info['local_gt_grid_points'].append(local_gt_grid_points.detach().cpu().numpy())
+            self.prototype_info['global_gt_grid_points'].append(global_gt_grid_points.detach().cpu().numpy())
+            self.prototype_info['pooled_gt_features'].append(pooled_gt_features.detach().cpu().numpy())
 
-        output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
-        if dist.is_initialized():
-            rank = os.getenv('RANK')
-            file_path = os.path.join('output_dir_{rank}', 'prototype_infos_fully_sup.pkl')
-        else:
-            file_path = os.path.join(output_dir, 'prototype_infos_fully_sup.pkl')
-        pickle.dump(self.prototype_info, open(file_path, 'wb'))
         return pooled_roi_features, pooled_gt_features
 
     def get_global_grid_points_of_roi(self, rois, grid_size):
@@ -224,12 +218,12 @@ class PVRCNNHead(RoIHeadTemplate):
         # pooled_roi_features = pooled_roi_features.permute(0, 2, 1).\
         #     contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
         pooled_roi_features = pooled_roi_features.view(batch_dict['batch_size'],batch_dict['roi_labels'].shape[1],-1, grid_size, grid_size, grid_size)
-        self.prototype_info['pooled_roi_features'] = pooled_roi_features #(B,N,C,6,6,6)
+        self.prototype_info['pooled_roi_features'].append(pooled_roi_features.detach().cpu().numpy())
 
         # pooled_gt_features = pooled_gt_features.permute(0, 2, 1).\
         #     contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
         pooled_gt_features = pooled_gt_features.view(batch_dict['batch_size'],batch_dict['gt_boxes'][:,:,-1].shape[1],-1, grid_size, grid_size, grid_size)
-        self.prototype_info['pooled_gt_features'] = pooled_gt_features #(B,N,C,6,6,6)
+        self.prototype_info['pooled_gt_features'].append(pooled_gt_features.detach().cpu().numpy())
 
         (B,N,C,G,G,G) = pooled_roi_features.size()         #shape - (B,N,128,6,6,6))
         pooled_roi_features = pooled_roi_features.view(B*N, C*G*G*G)
@@ -276,8 +270,8 @@ class PVRCNNHead(RoIHeadTemplate):
                 self.gt_prototype[cls_name] = self.momentum * self.gt_prototype[cls_name].detach().cpu() + (1 - self.momentum) * current_gt_features[cls_name].detach().cpu()
                 self.count+=batch_dict['batch_size']
 
-        self.prototype_info['roi_prototype'] = self.roi_prototype
-        self.prototype_info['gt_prototype'] = self.gt_prototype
+        self.prototype_info['roi_prototype'].append(self.roi_prototype)
+        self.prototype_info['gt_prototype'].append(self.gt_prototype)
 
         # if self.training and self.model_cfg.PROTO_INTER_LOSS.ENABLE:
             
@@ -299,13 +293,8 @@ class PVRCNNHead(RoIHeadTemplate):
         shared_roi_features = self.shared_fc_layer(pooled_roi_features.view(batch_size_rcnn, -1, 1))
         rcnn_roi_cls = self.cls_layers(shared_roi_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
         rcnn_roi_reg = self.reg_layers(shared_roi_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
+        self.prototype_info['shared_roi_features'].append(shared_roi_features.detach().cpu().numpy())
 
-        # shared_gt_features = self.shared_fc_layer(pooled_gt_features.view(batch_size_rcnn, -1, 1))
-        # rcnn_gt_cls = self.cls_layers(shared_gt_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
-        # rcnn_gt_reg = self.reg_layers(shared_gt_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
-
-        self.prototype_info['shared_roi_features'] = shared_roi_features.detach().cpu() 
-        # self.prototype_info['shared_gt_features'] = shared_gt_features 
 
 
         output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
