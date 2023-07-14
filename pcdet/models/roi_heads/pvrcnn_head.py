@@ -55,7 +55,7 @@ class PVRCNNHead(RoIHeadTemplate):
         # self.prototype_keys = ['type','gt_boxes','rois','roi_labels','gt_labels','spatial_features','spatial_features_2d','local_roi_grid_points','global_roi_grid_points','pooled_roi_features','local_gt_grid_points','global_gt_grid_points','shared_roi_features','roi_prototype','gt_prototype','pooled_gt_features' ]
         # self.prototype_info = {key: None for key in self.prototype_keys}
         self.prototype_info = defaultdict(list)
-        self.prototype_info['type'] = "Prototype collected for all 3712 samples using fully supervised model(ckpt_72.pth) . Collected by running pv_rcnn (not ssl!!) No GT Sampling, No Augmentation "
+        self.prototype_info['type'] = " GT Prototype collected for all 3712 samples using fully supervised model(ckpt_72.pth) . Collected by running pv_rcnn (not ssl!!) No GT Sampling, No Augmentation "
         self.count = 0
 
     def init_weights(self, weight_init='xavier'):
@@ -160,14 +160,14 @@ class PVRCNNHead(RoIHeadTemplate):
         if 'create_prototype' in batch_dict:
             self.prototype_info['gt_boxes'].append(batch_dict['gt_boxes'].detach().cpu().numpy())
             self.prototype_info['rois'].append(torch.cat((batch_dict['rois'],batch_dict['roi_labels'].unsqueeze(-1)), dim=2).detach().cpu().numpy())
-            self.prototype_info['roi_labels'].append(batch_dict['roi_labels'].detach().cpu().numpy())
-            self.prototype_info['gt_labels'].append(batch_dict['gt_boxes'][:,:,-1].detach().cpu().numpy())
-            self.prototype_info['spatial_features'].append(batch_dict['spatial_features'].detach().cpu().numpy())
-            self.prototype_info['spatial_features_2d'].append(batch_dict['spatial_features_2d'].detach().cpu().numpy())
-            self.prototype_info['local_roi_grid_points'].append(local_roi_grid_points.detach().cpu().numpy())
-            self.prototype_info['global_roi_grid_points'].append(global_roi_grid_points.detach().cpu().numpy())
-            self.prototype_info['local_gt_grid_points'].append(local_gt_grid_points.detach().cpu().numpy())
-            self.prototype_info['global_gt_grid_points'].append(global_gt_grid_points.detach().cpu().numpy())
+            # self.prototype_info['roi_labels'].append(batch_dict['roi_labels'].detach().cpu().numpy())
+            # self.prototype_info['gt_labels'].append(batch_dict['gt_boxes'][:,:,-1].detach().cpu().numpy())
+            # self.prototype_info['spatial_features'].append(batch_dict['spatial_features'].detach().cpu().numpy())
+            # self.prototype_info['spatial_features_2d'].append(batch_dict['spatial_features_2d'].detach().cpu().numpy())
+            # self.prototype_info['local_roi_grid_points'].append(local_roi_grid_points.detach().cpu().numpy())
+            # self.prototype_info['global_roi_grid_points'].append(global_roi_grid_points.detach().cpu().numpy())
+            # self.prototype_info['local_gt_grid_points'].append(local_gt_grid_points.detach().cpu().numpy())
+            # self.prototype_info['global_gt_grid_points'].append(global_gt_grid_points.detach().cpu().numpy())
 
 
         return pooled_roi_features, pooled_gt_features
@@ -235,43 +235,50 @@ class PVRCNNHead(RoIHeadTemplate):
         # 1/2 Current Features
         current_roi_features = {'Car': None, 'Ped' : None, 'Cyc' : None}
         for cls_idx, cls_name in enumerate(list(self.class_dict.values())):
-            cls_mask = (batch_dict['roi_labels'] == (cls_idx+1)).flatten().detach().cpu()
-  #shape - (B*N, 27648 (128*6*6*6))
+            cls_mask = (batch_dict['roi_labels'] == (cls_idx+1)).flatten()
             # Fetch classwise features , fill features with 0s if given class not found in iteration.
-            current_roi_features[cls_name] = pooled_roi_features[cls_mask, ...] 
+            current_roi_features[cls_name] = pooled_roi_features[cls_mask, ...]
             if current_roi_features[cls_name].numel() == 0: 
-                current_roi_features[cls_name] = torch.zeros((1, C*G*G*G)).detach().cpu()
+                current_roi_features[cls_name] = torch.zeros((1, C*G*G*G)).to(device=pooled_roi_features.device)
         # 2/2 Calculate Prototype
         for cls_idx, cls_name in enumerate(list(self.class_dict.values())):   
             current_roi_features[cls_name] =  (current_roi_features[cls_name].mean(dim=0))
-            current_roi_features[cls_name] = current_roi_features[cls_name].detach().cpu()  
+            current_roi_features[cls_name] = current_roi_features[cls_name].detach().cpu()
             if self.count==0: 
                 self.roi_prototype = current_roi_features 
             else :
-                self.roi_prototype[cls_name] = self.momentum * self.roi_prototype[cls_name].detach().cpu() + (1 - self.momentum) * current_roi_features[cls_name].detach().cpu() 
+                self.roi_prototype[cls_name] = (self.momentum * self.roi_prototype[cls_name] + (1 - self.momentum) * current_roi_features[cls_name])
 
         ''' Prototype calculation - GT'''
         current_gt_features = {'Car': None, 'Ped' : None, 'Cyc' : None}
         for cls_idx, cls_name in enumerate(list(self.class_dict.values())):        
-            cls_mask = (batch_dict['gt_boxes'][:,:,-1] == (cls_idx+1)).flatten().detach().cpu()
+            gt_cls_mask = (batch_dict['gt_boxes'][:,:,-1] == (cls_idx+1)).flatten()
             # Fetch classwise features , fill features with 0s if given class not found in iteration.
-            current_gt_features[cls_name] = pooled_gt_features[cls_mask, ...] 
+            current_gt_features[cls_name] = pooled_gt_features[gt_cls_mask, ...]
             if current_gt_features[cls_name].numel() == 0: 
-                current_gt_features[cls_name] = torch.zeros((1, C*G*G*G)).cpu()
+                current_gt_features[cls_name] = torch.zeros((1, C*G*G*G)).to(device=pooled_gt_features.device)
             
         # 2/2 Calculate Prototype
         for cls_idx, cls_name in enumerate(list(self.class_dict.values())):   
             current_gt_features[cls_name] =  (current_gt_features[cls_name].mean(dim=0))
-            current_gt_features[cls_name] = current_gt_features[cls_name].detach().cpu()  
+            current_gt_features[cls_name] = current_gt_features[cls_name].detach().cpu()
             if self.count==0: 
                 self.gt_prototype = current_gt_features
                 self.count+=batch_dict['batch_size']
             else :
-                self.gt_prototype[cls_name] = self.momentum * self.gt_prototype[cls_name].detach().cpu() + (1 - self.momentum) * current_gt_features[cls_name].detach().cpu()
+                self.gt_prototype[cls_name] = (self.momentum * self.gt_prototype[cls_name] + (1 - self.momentum) * current_gt_features[cls_name])
                 self.count+=batch_dict['batch_size']
 
-        self.prototype_info['roi_prototype'].append(self.roi_prototype)
-        self.prototype_info['gt_prototype'].append(self.gt_prototype)
+        temp_dict_roi = {}
+        for key in self.roi_prototype.keys():
+            temp_dict_roi[key] = self.roi_prototype[key].clone().detach().cpu().numpy()  
+
+        temp_dict_gt = {}
+        for key in self.gt_prototype.keys():
+            temp_dict_gt[key] = self.gt_prototype[key].clone().detach().cpu().numpy()  
+
+        self.prototype_info['roi_prototype'] = temp_dict_roi
+        self.prototype_info['gt_prototype'] = temp_dict_gt
 
         # if self.training and self.model_cfg.PROTO_INTER_LOSS.ENABLE:
             
@@ -293,9 +300,7 @@ class PVRCNNHead(RoIHeadTemplate):
         shared_roi_features = self.shared_fc_layer(pooled_roi_features.view(batch_size_rcnn, -1, 1))
         rcnn_roi_cls = self.cls_layers(shared_roi_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
         rcnn_roi_reg = self.reg_layers(shared_roi_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
-        self.prototype_info['shared_roi_features'].append(shared_roi_features.detach().cpu().numpy())
-
-
+        # self.prototype_info['shared_roi_features'].append(shared_roi_features.detach().cpu().numpy())
 
         output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
         if dist.is_initialized():
