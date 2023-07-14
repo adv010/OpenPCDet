@@ -8,6 +8,7 @@ from ...utils import common_utils
 from .roi_head_template import RoIHeadTemplate
 from visual_utils import visualize_utils as V
 import torch.distributed as dist 
+from collections import defaultdict
 
 class PVRCNNHead(RoIHeadTemplate):
     def __init__(self, input_channels, model_cfg, num_class=1,
@@ -51,10 +52,10 @@ class PVRCNNHead(RoIHeadTemplate):
         self.roi_prototype = {'Car': None, 'Ped' : None, 'Cyc' : None}
         self.gt_prototype = {'Car': None, 'Ped' : None, 'Cyc' : None}
         self.momentum = 0.9
-        # self.momentum = self.model_cfg.PROTOTYPE.MOMENTUM
-        # self.start_iter = self.model_cfg.PROTOTYPE.START_ITER
-        self.prototype_info = {}
-        self.prototype_info['type'] = "Prototype collected on 100% supervised model for all 3712 samples. Collected by running pv_rcnn (not ssl!!) No GT Sampling, No Augmentation "
+        # self.prototype_keys = ['type','gt_boxes','rois','roi_labels','gt_labels','spatial_features','spatial_features_2d','local_roi_grid_points','global_roi_grid_points','pooled_roi_features','local_gt_grid_points','global_gt_grid_points','shared_roi_features','roi_prototype','gt_prototype','pooled_gt_features' ]
+        # self.prototype_info = {key: None for key in self.prototype_keys}
+        self.prototype_info = defaultdict(list)
+        self.prototype_info['type'] = "Prototype collected for all 3712 samples using fully supervised model(ckpt_72.pth) . Collected by running pv_rcnn (not ssl!!) No GT Sampling, No Augmentation "
         self.count = 0
 
     def init_weights(self, weight_init='xavier'):
@@ -129,7 +130,7 @@ class PVRCNNHead(RoIHeadTemplate):
         )  # (BxN, 6x6x6, C)
 
 
-        with torch.no_grad():
+        with torch.no_grad(): 
                 global_gt_grid_points, local_gt_grid_points = self.get_global_grid_points_of_roi(
                     gts, grid_size=self.model_cfg.ROI_GRID_POOL.GRID_SIZE
                 )  # (BxN, 6x6x6, 3)
@@ -156,19 +157,18 @@ class PVRCNNHead(RoIHeadTemplate):
                     pooled_features.shape[-1]
                 )  # (BxN, 6x6x6, C)
 
-        if 'create_prototype' in batch_dict and self.count<3713:
+        if 'create_prototype' in batch_dict:
             self.prototype_info['gt_boxes'].append(batch_dict['gt_boxes'].detach().cpu().numpy())
-            self.prototype_info['rois'].append(torch.cat((batch_dict['rois'],batch_dict['roi_labels'].unsqueeze(-1)), dim=2))
+            self.prototype_info['rois'].append(torch.cat((batch_dict['rois'],batch_dict['roi_labels'].unsqueeze(-1)), dim=2).detach().cpu().numpy())
             self.prototype_info['roi_labels'].append(batch_dict['roi_labels'].detach().cpu().numpy())
-            self.prototype_info['gt_labels'].append(batch_dict['gt_boxes'][:,:,-1].numpy())
-            self.prototype_info['spatial_features'].append(['spatial_features'].detach().cpu().numpy())
+            self.prototype_info['gt_labels'].append(batch_dict['gt_boxes'][:,:,-1].detach().cpu().numpy())
+            self.prototype_info['spatial_features'].append(batch_dict['spatial_features'].detach().cpu().numpy())
             self.prototype_info['spatial_features_2d'].append(batch_dict['spatial_features_2d'].detach().cpu().numpy())
             self.prototype_info['local_roi_grid_points'].append(local_roi_grid_points.detach().cpu().numpy())
             self.prototype_info['global_roi_grid_points'].append(global_roi_grid_points.detach().cpu().numpy())
-            self.prototype_info['pooled_roi_features'].append(pooled_roi_features.detach().cpu().numpy())
             self.prototype_info['local_gt_grid_points'].append(local_gt_grid_points.detach().cpu().numpy())
             self.prototype_info['global_gt_grid_points'].append(global_gt_grid_points.detach().cpu().numpy())
-            self.prototype_info['pooled_gt_features'].append(pooled_gt_features.detach().cpu().numpy())
+
 
         return pooled_roi_features, pooled_gt_features
 
