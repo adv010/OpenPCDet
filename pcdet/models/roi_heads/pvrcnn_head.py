@@ -166,8 +166,8 @@ class PVRCNNHead(RoIHeadTemplate):
             # self.prototype_info['spatial_features_2d'].append(batch_dict['spatial_features_2d'].detach().cpu().numpy())
             # self.prototype_info['local_roi_grid_points'].append(local_roi_grid_points.detach().cpu().numpy())
             # self.prototype_info['global_roi_grid_points'].append(global_roi_grid_points.detach().cpu().numpy())
-            # self.prototype_info['local_gt_grid_points'].append(local_gt_grid_points.detach().cpu().numpy())
-            # self.prototype_info['global_gt_grid_points'].append(global_gt_grid_points.detach().cpu().numpy())
+            self.prototype_info['local_gt_grid_points'].append(local_gt_grid_points.detach().cpu().numpy())
+            self.prototype_info['global_gt_grid_points'].append(global_gt_grid_points.detach().cpu().numpy())
 
 
         return pooled_roi_features, pooled_gt_features
@@ -305,7 +305,7 @@ class PVRCNNHead(RoIHeadTemplate):
         output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
         if dist.is_initialized():
             rank = os.getenv('RANK')
-            file_path = os.path.join('output_dir_{rank}', 'prototype_infos_fully_sup.pkl')
+            file_path = os.path.join(output_dir, f'prototype_infos_fully_sup{rank}.pkl')
         else:
             file_path = os.path.join(output_dir, 'prototype_infos_fully_sup.pkl')
         pickle.dump(self.prototype_info, open(file_path, 'wb'))
