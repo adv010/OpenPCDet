@@ -161,9 +161,9 @@ class PVRCNNHead(RoIHeadTemplate):
             gt_boxes = batch_dict['gt_boxes'].view(-1, 8)
             valid_gt_boxes_mask = torch.logical_not(torch.all(gt_boxes == 0, dim=-1))
             valid_gt_boxes = gt_boxes[valid_gt_boxes_mask, ...]
-
+            batch_dict['valid_gt_boxes'] = valid_gt_boxes
             self.prototype_info['local_gt_grid_points'].append(local_gt_grid_points[valid_gt_boxes_mask, ...].detach().cpu().numpy())
-            self.prototype_info['global_gt_grid_points'].append(global_gt_grid_points[valid_gt_boxes_mask, ...].detach().cpu().numpy())
+            # self.prototype_info['global_gt_grid_points'].append(global_gt_grid_points[valid_gt_boxes_mask, ...].detach().cpu().numpy())
             pooled_gt_features = pooled_gt_features[valid_gt_boxes_mask]
             self.prototype_info['gt_boxes'].append(valid_gt_boxes.detach().cpu().numpy())
             self.prototype_info['rois'].append(torch.cat((batch_dict['rois'],batch_dict['roi_labels'].unsqueeze(-1)), dim=2).detach().cpu().numpy())
@@ -227,14 +227,14 @@ class PVRCNNHead(RoIHeadTemplate):
 
         # pooled_gt_features = pooled_gt_features.permute(0, 2, 1).\
         #     contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
-        pooled_gt_features = pooled_gt_features.view(batch_dict['batch_size'],batch_dict['gt_boxes'][:,:,-1].shape[1],-1, grid_size, grid_size, grid_size)
+        pooled_gt_features = pooled_gt_features.view(pooled_gt_features.shape[0],-1, grid_size, grid_size, grid_size)
         self.prototype_info['pooled_gt_features'].append(pooled_gt_features.detach().cpu().numpy())
 
         (B,N,C,G,G,G) = pooled_roi_features.size()         #shape - (B,N,128,6,6,6))
         pooled_roi_features = pooled_roi_features.view(B*N, C*G*G*G)
         pooled_roi_features = pooled_roi_features
-        (B,N,C,G,G,G) = pooled_gt_features.size()         #shape - (B,N,128,6,6,6))
-        pooled_gt_features = pooled_gt_features.view(B*N, C*G*G*G)  #shape - (B*N, 27648 (128*6*6*6))
+        (BN,C,G,G,G) = pooled_gt_features.size()         #shape - (B,N,128,6,6,6))
+        pooled_gt_features = pooled_gt_features.view(BN, C*G*G*G)  #shape - (B*N, 27648 (128*6*6*6))
         pooled_gt_features = pooled_gt_features
         ''' Prototype calculation - ROI'''
         # 1/2 Current Features
@@ -257,7 +257,7 @@ class PVRCNNHead(RoIHeadTemplate):
         ''' Prototype calculation - GT'''
         current_gt_features = {'Car': None, 'Ped' : None, 'Cyc' : None}
         for cls_idx, cls_name in enumerate(list(self.class_dict.values())):        
-            gt_cls_mask = (batch_dict['gt_boxes'][:,:,-1] == (cls_idx+1)).flatten()
+            gt_cls_mask = (batch_dict['valid_gt_boxes'][:,-1] == (cls_idx+1)).flatten()
             # Fetch classwise features , fill features with 0s if given class not found in iteration.
             current_gt_features[cls_name] = pooled_gt_features[gt_cls_mask, ...]
             if current_gt_features[cls_name].numel() == 0: 
