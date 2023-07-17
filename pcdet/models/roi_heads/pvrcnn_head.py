@@ -158,16 +158,21 @@ class PVRCNNHead(RoIHeadTemplate):
                 )  # (BxN, 6x6x6, C)
 
         if 'create_prototype' in batch_dict:
-            self.prototype_info['gt_boxes'].append(batch_dict['gt_boxes'].detach().cpu().numpy())
+            gt_boxes = batch_dict['gt_boxes'].view(-1, 8)
+            valid_gt_boxes_mask = torch.logical_not(torch.all(gt_boxes == 0, dim=-1))
+            valid_gt_boxes = gt_boxes[valid_gt_boxes_mask, ...]
+
+            self.prototype_info['local_gt_grid_points'].append(local_gt_grid_points[valid_gt_boxes_mask, ...].detach().cpu().numpy())
+            self.prototype_info['global_gt_grid_points'].append(global_gt_grid_points[valid_gt_boxes_mask, ...].detach().cpu().numpy())
+            pooled_gt_features = pooled_gt_features[valid_gt_boxes_mask]
+            self.prototype_info['gt_boxes'].append(valid_gt_boxes.detach().cpu().numpy())
             self.prototype_info['rois'].append(torch.cat((batch_dict['rois'],batch_dict['roi_labels'].unsqueeze(-1)), dim=2).detach().cpu().numpy())
             # self.prototype_info['roi_labels'].append(batch_dict['roi_labels'].detach().cpu().numpy())
-            # self.prototype_info['gt_labels'].append(batch_dict['gt_boxes'][:,:,-1].detach().cpu().numpy())
             # self.prototype_info['spatial_features'].append(batch_dict['spatial_features'].detach().cpu().numpy())
             # self.prototype_info['spatial_features_2d'].append(batch_dict['spatial_features_2d'].detach().cpu().numpy())
             # self.prototype_info['local_roi_grid_points'].append(local_roi_grid_points.detach().cpu().numpy())
             # self.prototype_info['global_roi_grid_points'].append(global_roi_grid_points.detach().cpu().numpy())
-            self.prototype_info['local_gt_grid_points'].append(local_gt_grid_points.detach().cpu().numpy())
-            self.prototype_info['global_gt_grid_points'].append(global_gt_grid_points.detach().cpu().numpy())
+
 
 
         return pooled_roi_features, pooled_gt_features
