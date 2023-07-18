@@ -54,7 +54,9 @@
                     "MODEL.POST_PROCESSING.TEST_EVAL_DURING_TRAIN",
                     "False",
                     "MODEL.STORE_SCORES_IN_PKL",
-                    "True"
+                    "True",
+                    "MODEL.ROI_HEAD.BASE_PROTOTYPE",
+                "prototypes_pooled_shared_0.01_gt_proto_no_aug.pkl"
                     //  "subsample_unlabeled_rois_tr_gaussian",
                     // "MODEL.ROI_HEAD.LOSS_CONFIG.UL_RCNN_CLS_WEIGHT_TYPE",
                     // "all",
