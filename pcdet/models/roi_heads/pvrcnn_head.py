@@ -203,15 +203,15 @@ class PVRCNNHead(RoIHeadTemplate):
             cosine_scores = torch.zeros_like(batch_dict['roi_scores'].view(-1))
 
             # Cosine similarity between shared features and prototype
-            sh_protos = batch_dict['labeled_prototype'].to(labels.device).squeeze()  # [3, 256] == [num_protos, C]
-            sh_proposals = shared_features_clone.squeeze()  # [256, 256] == [num_proposals, C]
-            sh_cos_sim = F.normalize(sh_proposals) @ F.normalize(sh_protos).t()
-            for i,sh in enumerate(shared_features_clone):  #  cloned and detached already #NOTE: protype based classifier is to be from non-detached shared features in future
-                cosine_scores[i] = F.normalize(sh) @ F.normalize(prototype[labels[i]]).t() #  this is used for weighting (to be refactored in future)
+            # sh_protos = batch_dict['labeled_prototype'].to(labels.device).squeeze()  # [3, 256] == [num_protos, C]
+            # sh_proposals = shared_features_clone.squeeze()  # [256, 256] == [num_proposals, C]
+            # sh_cos_sim = F.normalize(sh_proposals) @ F.normalize(sh_protos).t()
+            # for i,sh in enumerate(shared_features_clone):  #  cloned and detached already #NOTE: protype based classifier is to be from non-detached shared features in future
+            #     cosine_scores[i] = F.normalize(sh) @ F.normalize(prototype[labels[i]]).t() #  this is used for weighting (to be refactored in future)
             
-            targets_dict['cos_scores_car_sh'] = sh_cos_sim[:,0].view(batch_dict['roi_scores'].shape[0],-1)
-            targets_dict['cos_scores_ped_sh'] = sh_cos_sim[:,1].view(batch_dict['roi_scores'].shape[0],-1)
-            targets_dict['cos_scores_cyc_sh'] = sh_cos_sim[:,2].view(batch_dict['roi_scores'].shape[0],-1)
+            # targets_dict['cos_scores_car_sh'] = sh_cos_sim[:,0].view(batch_dict['roi_scores'].shape[0],-1)
+            # targets_dict['cos_scores_ped_sh'] = sh_cos_sim[:,1].view(batch_dict['roi_scores'].shape[0],-1)
+            # targets_dict['cos_scores_cyc_sh'] = sh_cos_sim[:,2].view(batch_dict['roi_scores'].shape[0],-1)
 
             targets_dict['cos_scores'] = cosine_scores.view(batch_dict['roi_scores'].shape[0],-1)
             batch_dict['shared_features'] = shared_features_clone.view(batch_dict['roi_scores'].shape[0],-1,shared_features_clone.shape[-2],shared_features_clone.shape[-1]) # reshaping to batch_wise features, for ema update
@@ -227,9 +227,9 @@ class PVRCNNHead(RoIHeadTemplate):
             targets_dict['cos_scores_cyc_pool'] = pool_cos_sim[:,2].view(batch_dict['roi_scores'].shape[0],-1)
 
             targets_dict['cos_scores_pool_raw'] = pool_cos_sim.view(batch_dict['roi_scores'].shape[0],batch_dict['roi_scores'].shape[1],-1) # (N,128,3)
-            targets_dict['cos_scores_sh_raw'] = sh_cos_sim.view(batch_dict['roi_scores'].shape[0],batch_dict['roi_scores'].shape[1],-1) # (N,128,3)
+            # targets_dict['cos_scores_sh_raw'] = sh_cos_sim.view(batch_dict['roi_scores'].shape[0],batch_dict['roi_scores'].shape[1],-1) # (N,128,3)
             targets_dict['cos_scores_pool_norm'] = F.softmax(targets_dict['cos_scores_pool_raw'],dim=-1) # (N,128,3)
-            targets_dict['cos_scores_sh_norm'] = F.softmax(targets_dict['cos_scores_sh_raw'],dim=-1) # (N,128,3)
+            # targets_dict['cos_scores_sh_norm'] = F.softmax(targets_dict['cos_scores_sh_raw'],dim=-1) # (N,128,3)
 
         if not self.training or self.predict_boxes_when_training:
             batch_cls_preds, batch_box_preds = self.generate_predicted_boxes(
