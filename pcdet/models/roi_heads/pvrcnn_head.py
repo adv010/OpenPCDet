@@ -228,7 +228,7 @@ class PVRCNNHead(RoIHeadTemplate):
 
         # Saving pooled_gt_features as (BN,C,G,G,G)
         pooled_gt_features = pooled_gt_features.view(pooled_gt_features.shape[0],-1, grid_size, grid_size, grid_size)
-        self.prototype_info['pooled_gt_features'].append(pooled_gt_features.clone().detach().cpu().numpy())
+        # self.prototype_info['pooled_gt_features'].append(pooled_gt_features.clone().detach().cpu().numpy())
 
         (B,N,C,G,G,G) = pooled_roi_features.size()         #shape - (B,N,128,6,6,6))
         pooled_roi_features = pooled_roi_features.view(B*N, C*G*G*G)
