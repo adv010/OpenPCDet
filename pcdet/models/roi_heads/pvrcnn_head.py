@@ -50,12 +50,13 @@ class PVRCNNHead(RoIHeadTemplate):
         self.print_loss_when_eval = False
         self.class_dict = {1:'Car', 2 :'Ped', 3:'Cyc'}
         self.roi_prototype = {'Car': None, 'Ped' : None, 'Cyc' : None}
+        self.gt_prototype_list=[]
         self.gt_prototype = {'Car': None, 'Ped' : None, 'Cyc' : None}
         self.momentum = 0.9
         # self.prototype_keys = ['type','gt_boxes','rois','roi_labels','gt_labels','spatial_features','spatial_features_2d','local_roi_grid_points','global_roi_grid_points','pooled_roi_features','local_gt_grid_points','global_gt_grid_points','shared_roi_features','roi_prototype','gt_prototype','pooled_gt_features' ]
         # self.prototype_info = {key: None for key in self.prototype_keys}
         self.prototype_info = defaultdict(list)
-        self.prototype_info['type'] = " GT Prototype collected for all 3712 samples using fully supervised model(ckpt_72.pth) . Collected by running pv_rcnn (not ssl!!) Yes GT Sampling, No Augmentation "
+        self.prototype_info['type'] = " GT Prototype collected for all 3712 samples using pretrained model (ckpt_72.pth) . Collected by running pv_rcnn (not ssl!!) No GT Sampling, No Augmentation "
         self.count = 0
 
     def init_weights(self, weight_init='xavier'):
@@ -265,24 +266,45 @@ class PVRCNNHead(RoIHeadTemplate):
         # 2/2 Calculate Prototype
         for cls_idx, cls_name in enumerate(list(self.class_dict.values())):   
             current_gt_features[cls_name] =  (current_gt_features[cls_name].mean(dim=0))
-            current_gt_features[cls_name] = current_gt_features[cls_name].detach().cpu()
-            if self.count==0: 
-                self.gt_prototype = current_gt_features
-                self.count+=batch_dict['batch_size']
-            else :
-                self.gt_prototype[cls_name] = (self.momentum * self.gt_prototype[cls_name] + (1 - self.momentum) * current_gt_features[cls_name])
-                self.count+=batch_dict['batch_size']
+            current_gt_features[cls_name] = current_gt_features[cls_name].clone().detach().cpu()
+        self.gt_prototype_list.append(current_gt_features)
+        self.count+=1
+            # if self.count==0: 
+            #     self.gt_prototype = current_gt_features
+            #     self.count+=batch_dict['batch_size']
+            # else :
+            #     self.gt_prototype[cls_name] = (self.momentum * self.gt_prototype[cls_name] + (1 - self.momentum) * current_gt_features[cls_name])
+            #     self.count+=batch_dict['batch_size']
 
-        temp_dict_roi = {}
-        for key in self.roi_prototype.keys():
-            temp_dict_roi[key] = self.roi_prototype[key].clone().detach().cpu().numpy()  
 
-        temp_dict_gt = {}
-        for key in self.gt_prototype.keys():
-            temp_dict_gt[key] = self.gt_prototype[key].clone().detach().cpu().numpy()  
+        # temp_dict_roi = {}
+        # for key in self.roi_prototype.keys():
+        #     temp_dict_roi[key] = self.roi_prototype[key].clone().detach().cpu().numpy()  
+
+        # temp_dict_gt = {}
+        # for key in self.gt_prototype.keys():
+        #     temp_dict_gt[key] = self.gt_prototype[key].clone().detach().cpu().numpy()  
 
         # self.prototype_info['roi_prototype'] = temp_dict_roi
-        self.prototype_info['gt_prototype'] = temp_dict_gt
+
+        if self.count==3712:
+            car_mean = torch.zeros(27648)
+            cyc_mean = torch.zeros(27648)
+            ped_mean = torch.zeros(27648)
+            for val_dict in self.gt_prototype_list:
+                car_mean += val_dict['Car']
+                ped_mean += val_dict['Ped']
+                cyc_mean += val_dict['Cyc']
+            car_mean = car_mean.mean().numpy()
+            ped_mean = ped_mean.mean().numpy()
+            cyc_mean = cyc_mean.mean().numpy()
+            self.gt_prototype["Car"] = car_mean
+            self.gt_prototype["Ped"] = ped_mean
+            self.gt_prototype["Cyc"] = cyc_mean
+
+            self.prototype_info['gt_prototype'] = self.gt_prototype
+
+
 
         # if self.training and self.model_cfg.PROTO_INTER_LOSS.ENABLE:
             
