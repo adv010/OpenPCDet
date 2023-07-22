@@ -288,19 +288,19 @@ class PVRCNNHead(RoIHeadTemplate):
         # self.prototype_info['roi_prototype'] = temp_dict_roi
 
         if self.count==3712:
-            car_mean = torch.zeros(27648)
-            cyc_mean = torch.zeros(27648)
-            ped_mean = torch.zeros(27648)
+            car_avg = torch.zeros(27648)
+            cyc_avg = torch.zeros(27648)
+            ped_avg = torch.zeros(27648)
             for val_dict in self.gt_prototype_list:
-                car_mean += val_dict['Car']
-                ped_mean += val_dict['Ped']
-                cyc_mean += val_dict['Cyc']
-            car_mean = car_mean.mean().numpy()
-            ped_mean = ped_mean.mean().numpy()
-            cyc_mean = cyc_mean.mean().numpy()
-            self.gt_prototype["Car"] = car_mean
-            self.gt_prototype["Ped"] = ped_mean
-            self.gt_prototype["Cyc"] = cyc_mean
+                car_avg += val_dict['Car']
+                ped_avg += val_dict['Ped']
+                cyc_avg += val_dict['Cyc']
+            car_avg = (car_avg/3712).numpy()
+            ped_avg = (ped_avg/3712).numpy()
+            cyc_avg = (cyc_avg/3712).numpy()
+            self.gt_prototype["Car"] = car_avg
+            self.gt_prototype["Ped"] = ped_avg
+            self.gt_prototype["Cyc"] = cyc_avg
 
             self.prototype_info['gt_prototype'] = self.gt_prototype
 
