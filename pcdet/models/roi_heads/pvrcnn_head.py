@@ -51,7 +51,7 @@ class PVRCNNHead(RoIHeadTemplate):
         self.class_dict = {1:'Car', 2 :'Ped', 3:'Cyc'}
         self.roi_prototype = {'Car': None, 'Ped' : None, 'Cyc' : None}
         self.gt_prototype_list=[]
-        self.gt_prototype = {'Car': None, 'Ped' : None, 'Cyc' : None}
+        self.gt_prototype = {'Car': torch.zeros(0,27648), 'Ped' : torch.zeros(0,27648), 'Cyc' : torch.zeros(0,27648)}
         self.momentum = 0.9
         # self.prototype_keys = ['type','gt_boxes','rois','roi_labels','gt_labels','spatial_features','spatial_features_2d','local_roi_grid_points','global_roi_grid_points','pooled_roi_features','local_gt_grid_points','global_gt_grid_points','shared_roi_features','roi_prototype','gt_prototype','pooled_gt_features' ]
         # self.prototype_info = {key: None for key in self.prototype_keys}
@@ -259,13 +259,13 @@ class PVRCNNHead(RoIHeadTemplate):
         for cls_idx, cls_name in enumerate(list(self.class_dict.values())):        
             gt_cls_mask = (batch_dict['valid_gt_boxes'][:,-1] == (cls_idx+1)).flatten()
             # Fetch classwise features , fill features with 0s if given class not found in iteration.
-            current_gt_features[cls_name] = pooled_gt_features[gt_cls_mask, ...]
+            current_gt_features[cls_name] = pooled_gt_features[gt_cls_mask, ...] #[num_instances, 27648]
             if current_gt_features[cls_name].numel() == 0: 
                 current_gt_features[cls_name] = torch.zeros((1, C*G*G*G)).to(device=pooled_gt_features.device)
             
         # 2/2 Calculate Prototype
         for cls_idx, cls_name in enumerate(list(self.class_dict.values())):   
-            current_gt_features[cls_name] =  (current_gt_features[cls_name].mean(dim=0))
+            # current_gt_features[cls_name] =  (current_gt_features[cls_name].mean(dim=0))
             current_gt_features[cls_name] = current_gt_features[cls_name].clone().detach().cpu()
         self.gt_prototype_list.append(current_gt_features)
         self.count+=1
@@ -287,20 +287,15 @@ class PVRCNNHead(RoIHeadTemplate):
 
         # self.prototype_info['roi_prototype'] = temp_dict_roi
 
-        if self.count==3712:
-            car_avg = torch.zeros(27648)
-            cyc_avg = torch.zeros(27648)
-            ped_avg = torch.zeros(27648)
-            for val_dict in self.gt_prototype_list:
-                car_avg += val_dict['Car']
-                ped_avg += val_dict['Ped']
-                cyc_avg += val_dict['Cyc']
-            car_avg = (car_avg/3712).numpy()
-            ped_avg = (ped_avg/3712).numpy()
-            cyc_avg = (cyc_avg/3712).numpy()
-            self.gt_prototype["Car"] = car_avg
-            self.gt_prototype["Ped"] = ped_avg
-            self.gt_prototype["Cyc"] = cyc_avg
+        if self.count==37:
+            self.gt_prototype = {'Car': torch.zeros(0,27648), 'Ped':torch.zeros(0,27648), 'Cyc':torch.zeros(0,27648)}
+            for data_dict in self.gt_prototype_list:
+                for key, tensor in data_dict.items():
+                    self.gt_prototype[key] = torch.cat([self.gt_prototype[key], tensor], dim=0)
+
+            self.gt_prototype["Car"] = self.gt_prototype["Car"].mean(dim=0)
+            self.gt_prototype["Ped"] = self.gt_prototype["Ped"].mean(dim=0)
+            self.gt_prototype["Cyc"] = self.gt_prototype["Cyc"].mean(dim=0)
 
             self.prototype_info['gt_prototype'] = self.gt_prototype
 
