@@ -505,14 +505,14 @@ class PVRCNN_SSL(Detector3DTemplate):
                         cur_cos_scores_pool = self.pv_rcnn.roi_head.forward_ret_dict['cos_scores_pool_raw'][cur_unlabeled_ind]
                         self.val_dict['cos_scores_pool_raw'].extend(cur_cos_scores_pool.tolist())
 
-                        cur_cos_scores_sh = self.pv_rcnn.roi_head.forward_ret_dict['cos_scores_sh_raw'][cur_unlabeled_ind]
-                        self.val_dict['cos_scores_sh_raw'].extend(cur_cos_scores_sh.tolist())
+                        # cur_cos_scores_sh = self.pv_rcnn.roi_head.forward_ret_dict['cos_scores_sh_raw'][cur_unlabeled_ind]
+                        # self.val_dict['cos_scores_sh_raw'].extend(cur_cos_scores_sh.tolist())
 
                         cur_cos_scores_pool_norm = self.pv_rcnn.roi_head.forward_ret_dict['cos_scores_pool_norm'][cur_unlabeled_ind]
                         self.val_dict['cos_scores_pool_norm'].extend(cur_cos_scores_pool_norm.tolist())
 
-                        cur_cos_scores_sh_norm = self.pv_rcnn.roi_head.forward_ret_dict['cos_scores_sh_norm'][cur_unlabeled_ind]
-                        self.val_dict['cos_scores_sh_norm'].extend(cur_cos_scores_sh_norm.tolist())
+                        # cur_cos_scores_sh_norm = self.pv_rcnn.roi_head.forward_ret_dict['cos_scores_sh_norm'][cur_unlabeled_ind]
+                        # self.val_dict['cos_scores_sh_norm'].extend(cur_cos_scores_sh_norm.tolist())
 
                 # replace old pickle data (if exists) with updated one 
                 output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
