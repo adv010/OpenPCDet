@@ -44,25 +44,26 @@ class FeatureBank(Metric):
         self.proto_labels = labels
         self.num_updates = torch.zeros(self.bank_size).cuda()
         self.insId_protoId_mapping = {unique_ins_ids[i]: i for i in range(len(unique_ins_ids))}
+        
     def update(self, feats: [torch.Tensor], labels: [torch.Tensor], ins_ids: [torch.Tensor], smpl_ids: torch.Tensor,
                iteration: int) -> None:
         for i in range(len(feats)):
-            self.feats.append(feats[i])                 # (N, C)
-            self.labels.append(labels[i].view(-1))      # (N,)
-            self.ins_ids.append(ins_ids[i].view(-1))    # (N,)
-            self.smpl_ids.append(smpl_ids[i].view(-1))  # (1,)
+            self.feats.append(feats[i].contiguous())                 # (N, C)
+            self.labels.append(labels[i].to(feats[0].device).view(-1))      # (N,)
+            self.ins_ids.append(ins_ids[i].to(feats[0].device).view(-1))    # (N,)
+            self.smpl_ids.append(smpl_ids[i].to(feats[0].device).view(-1))  # (1,)
             rois_iter = torch.tensor(iteration, device=feats[0].device).expand_as(ins_ids[i].view(-1))
-            self.iterations.append(rois_iter)           # (N,)
+            self.iterations.append(rois_iter.contiguous())           # (N,)
 
     def compute(self):
-        unique_smpl_ids = torch.unique(torch.cat(self.smpl_ids))
+        unique_smpl_ids = torch.unique(self.smpl_ids)
         if len(unique_smpl_ids) < self.reset_state_interval:
             return None
 
-        features = torch.cat(self.feats)
-        labels = torch.cat(self.labels).int()
-        ins_ids = torch.cat(self.ins_ids).int().cpu().numpy()
-        iterations = torch.cat(self.iterations).int().cpu().numpy()
+        features = self.feats
+        labels = self.labels.int()
+        ins_ids = self.ins_ids.int().cpu().numpy()
+        iterations = self.iterations.int().cpu().numpy()
         assert len(features) == len(labels) == len(ins_ids) == len(iterations), \
                 "length of features, labels, ins_ids, and iterations should be the same"
         sorted_ins_ids, arg_sorted_ins_ids = np.sort(ins_ids), np.argsort(ins_ids)
@@ -97,7 +98,6 @@ class FeatureBank(Metric):
         classwise_prototypes = torch.zeros((3, self.feat_size)).cuda()
         for i in range(3):  # TODO: refactor it
             inds = torch.where(self.proto_labels == i)[0]
-            print(f"Update classwise prototypes for class {i} with {len(inds)} instances.")
             classwise_prototypes[i] = torch.mean(self.prototypes[inds], dim=0)
         self.classwise_prototypes = self.momentum * self.classwise_prototypes + (1 - self.momentum) * classwise_prototypes
 
