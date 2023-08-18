@@ -9,9 +9,9 @@ from pcdet.ops.roiaware_pool3d import roiaware_pool3d_utils
 from .detector3d_template import Detector3DTemplate
 from .pv_rcnn import PVRCNN
 
-import common_utils
-from stats_utils import metrics_registry
-from prototype_utils import feature_bank_registry
+from ...utils import common_utils
+from ...utils.stats_utils import metrics_registry
+from ...utils.prototype_utils import feature_bank_registry
 from collections import defaultdict
 from visual_utils import open3d_vis_utils as V
 
@@ -68,6 +68,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         bank_input = defaultdict(list)
         for i in labeled_inds:
             gt_boxes = batch_dict_temp['gt_boxes'][i]
+            device = gt_boxes.device
             nonzero_mask = torch.logical_not(torch.eq(gt_boxes, 0).all(dim=-1))
             if nonzero_mask.sum() == 0:
                 print(f"no gt instance in frame {batch_dict['frame_id'][i]}")
@@ -79,7 +80,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             gt_labels = gt_boxes[:, -1].int() - 1
             gt_boxes = gt_boxes[:, :7]
             ins_idxs = batch_dict['instance_idx'][i][nonzero_mask].int()
-            smpl_id = torch.from_numpy(batch_dict['frame_id'].astype(np.int32))[i].int()
+            smpl_id = torch.from_numpy(batch_dict['frame_id'].astype(np.int32))[i].int().unsqueeze(0).to(device)
 
             # filter out gt instances with too few points when updating the bank
             num_points_in_gt = roiaware_pool3d_utils.points_in_boxes_cpu(points.cpu(), gt_boxes.cpu()).sum(dim=-1)
@@ -256,11 +257,11 @@ class PVRCNN_SSL(Detector3DTemplate):
 
             return pred_dicts, recall_dicts, {}
 
-    def vis(self, boxes, box_labels, points):
-        boxes = boxes.cpu().numpy()
-        points = points.cpu().numpy()
-        box_labels = box_labels.cpu().numpy()
-        V.draw_scenes(points=points, gt_boxes=boxes, gt_labels=box_labels)
+    # def vis(self, boxes, box_labels, points):
+    #     boxes = boxes.cpu().numpy()
+    #     points = points.cpu().numpy()
+    #     box_labels = box_labels.cpu().numpy()
+    #     V.draw_scenes(points=points, gt_boxes=boxes, gt_labels=box_labels)
 
     def dump_statistics(self, batch_dict, unlabeled_inds):
         # Store different types of scores over all itrs and epochs and dump them in a pickle for offline modeling

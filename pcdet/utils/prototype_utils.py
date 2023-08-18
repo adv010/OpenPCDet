@@ -48,22 +48,24 @@ class FeatureBank(Metric):
     def update(self, feats: [torch.Tensor], labels: [torch.Tensor], ins_ids: [torch.Tensor], smpl_ids: torch.Tensor,
                iteration: int) -> None:
         for i in range(len(feats)):
-            self.feats.append(feats[i].contiguous())                 # (N, C)
-            self.labels.append(labels[i].to(feats[0].device).view(-1))      # (N,)
-            self.ins_ids.append(ins_ids[i].to(feats[0].device).view(-1))    # (N,)
-            self.smpl_ids.append(smpl_ids[i].to(feats[0].device).view(-1))  # (1,)
+            self.feats.append(feats[i])                 # (N, C)
+            self.labels.append(labels[i].view(-1))      # (N,)
+            self.ins_ids.append(ins_ids[i].view(-1))    # (N,)
+            self.smpl_ids.append(smpl_ids[i].view(-1))  # (1,)
             rois_iter = torch.tensor(iteration, device=feats[0].device).expand_as(ins_ids[i].view(-1))
-            self.iterations.append(rois_iter.contiguous())           # (N,)
+            self.iterations.append(rois_iter)           # (N,)
 
     def compute(self):
-        unique_smpl_ids = torch.unique(self.smpl_ids)
+        print(self.smpl_ids)
+        unique_smpl_ids = torch.unique(torch.cat(self.smpl_ids))
         if len(unique_smpl_ids) < self.reset_state_interval:
             return None
 
-        features = self.feats
-        labels = self.labels.int()
-        ins_ids = self.ins_ids.int().cpu().numpy()
-        iterations = self.iterations.int().cpu().numpy()
+        features = torch.cat(self.feats)
+        labels = torch.cat(self.labels).int()
+        ins_ids = torch.cat(self.ins_ids).int().cpu().numpy()
+        iterations = torch.cat(self.iterations).int().cpu().numpy()
+
         assert len(features) == len(labels) == len(ins_ids) == len(iterations), \
                 "length of features, labels, ins_ids, and iterations should be the same"
         sorted_ins_ids, arg_sorted_ins_ids = np.sort(ins_ids), np.argsort(ins_ids)
@@ -73,6 +75,7 @@ class FeatureBank(Metric):
             self._init(unique_ins_ids, labels[arg_sorted_ins_ids[split_indices]])
 
         # Groupby ins_ids
+        print("Post Initialization Phase")
         inds_groupby_ins_ids = np.split(arg_sorted_ins_ids, split_indices[1:])
         # For each group sort instance ids by iterations in ascending order and apply reduction operation
         for grouped_inds in inds_groupby_ins_ids:
@@ -82,10 +85,12 @@ class FeatureBank(Metric):
             assert torch.allclose(labels[grouped_inds[0]], labels[grouped_inds]), "labels should be the same for the same instance id"
 
             if not self.initialized or self.direct_update:
+                print("first prototype update")
                 self.num_updates[proto_id] += len(grouped_inds)
                 new_prototype = torch.mean(features[grouped_inds], dim=0, keepdim=True)  # TODO: maybe it'd be better to replaced it by the EMA
                 self.prototypes[proto_id] = new_prototype
             else:
+                print(" Next prototype update")
                 for ind in grouped_inds:
                     new_prototype = self.momentum * self.prototypes[proto_id] + (1 - self.momentum) * features[ind]
                     self.prototypes[proto_id] = new_prototype
