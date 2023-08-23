@@ -64,17 +64,40 @@ class PVRCNN_SSL(Detector3DTemplate):
     def dist_align(self,batch_dict,targets_dict,unlabeled_inds, labeled_inds):
         ''' Distribution alignment implemented from SimMatch (non_dist mode !!)'''
         # TODO (Advait) - convert into Metric class for handling dist mode!
+        num_class = 3
+        ulb_mean = []
         dict_indices = unlabeled_inds.cpu().tolist()  
         selected_dicts = [targets_dict[idx] for idx in dict_indices]
+        pred_lengths = [len(selected_dict['pred_sem_scores']) for selected_dict in selected_dicts]
         pred_sem_scores_list = [selected_dict['pred_sem_scores'] for selected_dict in selected_dicts]
-        probs_w_ulb = [tensor.mean().item() for tensor in pred_sem_scores_list]
-        # torch.distributed.all_reduce(probs_bt_mean)
-        ptr = int(self.p_model_ptr[0])
-        self.p_model[ptr] = probs_w_ulb #/ torch.distributed.get_world_size()
-        self.p_model_ptr[0] = (ptr + 1) % self.queue_length
-        probs_w_ulb_calibrated = probs_w_ulb / self.p_model.mean(0)
-        probs_w_ulb_calibrated = probs_w_ulb_calibrated / probs_w_ulb_calibrated.sum(dim=-1, keepdim=True)
-        return probs_w_ulb_calibrated.detach()
+        pred_sem_labels_list = [selected_dict['pred_labels'] for selected_dict in selected_dicts]
+        pred_sem_scores_tensor = torch.cat(pred_sem_scores_list)
+        pred_sem_labels_tensor = torch.cat(pred_sem_labels_list)
+        for cls in range(1, num_class+1):
+            mask = pred_sem_labels_tensor == cls
+            cls_sem = pred_sem_scores_tensor[mask].mean(0)
+            ulb_mean.append(cls_sem)
+
+        ulb_mean = torch.tensor(ulb_mean)
+        #torch.distributed.all_reduce(probs_bt_mean)
+        ptr = int(self.ptr)
+        self.DA_queue[ptr] = ulb_mean #/ torch.distributed.get_world_size()
+        self.ptr[0] = (ptr + 1) % self.queue_length
+        sem_scores_calibrated = pred_sem_scores_tensor / self.DA_queue.mean(0).mean() # TODO (Advait) - Verify correctness with Farzad 
+        sem_scores_calibrated = sem_scores_calibrated / sem_scores_calibrated.sum(dim=-1, keepdim=True)
+        sem_scores_calibrated= sem_scores_calibrated.detach()
+        pred_sem_scores_calib = []
+
+        idx = 0
+        for size in pred_lengths:
+            end_idx = idx + size
+            pred_sem_scores_calib.append({'pred_sem_scores_calib':pred_sem_scores_list[idx:end_idx]})
+            idx = end_idx
+
+
+        return pred_sem_scores_calib
+
+
 
     def _update_feature_bank(self, batch_dict, labeled_inds):
         # Update the bank with student's features from augmented labeled data
@@ -156,8 +179,8 @@ class PVRCNN_SSL(Detector3DTemplate):
             pred_dicts_ens, recall_dicts_ema = self.pv_rcnn_ema.post_processing(batch_dict_ema, no_recall_dict=True)
 
             if self.DA:
-                probs_w_ulb_calibrated = self.dist_align(batch_dict_ema,pred_dicts_ens,batch_dict_ema['unlabeled_inds'],batch_dict_ema['unlabeled_inds'])
-                pred_dicts_ens[batch_dict_ema['unlabeled_inds']]['pred_sem_scores'] = probs_w_ulb_calibrated
+                pred_sem_scores_ulb_calibrated = self.dist_align(batch_dict_ema,pred_dicts_ens,batch_dict_ema['unlabeled_inds'],batch_dict_ema['unlabeled_inds'])
+                # Integrate further functionality with calibrated sem_scores!
             
             # Used for calc stats before and after filtering
             ori_unlabeled_boxes = batch_dict['gt_boxes'][unlabeled_inds, ...]
