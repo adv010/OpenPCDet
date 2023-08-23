@@ -38,6 +38,17 @@ class PVRCNN_SSL(Detector3DTemplate):
         self.no_nms = model_cfg.NO_NMS
         self.supervise_mode = model_cfg.SUPERVISE_MODE
 
+        # TODO (Advait) - refactor params to yaml
+        self.DA = True
+        self.queue_length = 128 # (128 in ReMixMatch, SimMatch 256)
+        '''
+        (Advait) - Confirm whether below more accurate
+        target_dist = [0.84, 0.11, 0.05]
+        self.p_target = torch.full((128, num_classes), target_dist, dtype=torch.float)
+        '''
+        self.DA_queue = torch.zeros(self.queue_length, num_class, dtype=torch.float) # from https://github.com/mingkai-zheng/simmatch/blob/a62cd054ecb7beb8cc8ede9fc2fecb97d6b316c0/models/simmatch.py#L81
+        self.ptr = torch.zeros(1, dtype=torch.long)  # Pointer for DA_Queue
+
         for bank_configs in model_cfg.get("FEATURE_BANK_LIST", []):
             feature_bank_registry.register(tag=bank_configs["NAME"], **bank_configs)
 
@@ -48,6 +59,22 @@ class PVRCNN_SSL(Detector3DTemplate):
                         'weights', 'roi_scores', 'pcv_scores', 'num_points_in_roi', 'class_labels',
                         'iteration']
         self.val_dict = {val: [] for val in vals_to_store}
+
+    @torch.no_grad()
+    def dist_align(self,batch_dict,targets_dict,unlabeled_inds, labeled_inds):
+        ''' Distribution alignment implemented from SimMatch (non_dist mode !!)'''
+        # TODO (Advait) - convert into Metric class for handling dist mode!
+        dict_indices = unlabeled_inds.cpu().tolist()  
+        selected_dicts = [targets_dict[idx] for idx in dict_indices]
+        pred_sem_scores_list = [selected_dict['pred_sem_scores'] for selected_dict in selected_dicts]
+        probs_w_ulb = [tensor.mean().item() for tensor in pred_sem_scores_list]
+        # torch.distributed.all_reduce(probs_bt_mean)
+        ptr = int(self.p_model_ptr[0])
+        self.p_model[ptr] = probs_w_ulb #/ torch.distributed.get_world_size()
+        self.p_model_ptr[0] = (ptr + 1) % self.queue_length
+        probs_w_ulb_calibrated = probs_w_ulb / self.p_model.mean(0)
+        probs_w_ulb_calibrated = probs_w_ulb_calibrated / probs_w_ulb_calibrated.sum(dim=-1, keepdim=True)
+        return probs_w_ulb_calibrated.detach()
 
     def _update_feature_bank(self, batch_dict, labeled_inds):
         # Update the bank with student's features from augmented labeled data
@@ -128,6 +155,10 @@ class PVRCNN_SSL(Detector3DTemplate):
 
             pred_dicts_ens, recall_dicts_ema = self.pv_rcnn_ema.post_processing(batch_dict_ema, no_recall_dict=True)
 
+            if self.DA:
+                probs_w_ulb_calibrated = self.dist_align(batch_dict_ema,pred_dicts_ens,batch_dict_ema['unlabeled_inds'],batch_dict_ema['unlabeled_inds'])
+                pred_dicts_ens[batch_dict_ema['unlabeled_inds']]['pred_sem_scores'] = probs_w_ulb_calibrated
+            
             # Used for calc stats before and after filtering
             ori_unlabeled_boxes = batch_dict['gt_boxes'][unlabeled_inds, ...]
             # if self.model_cfg.ROI_HEAD.get("ENABLE_EVAL", False):
