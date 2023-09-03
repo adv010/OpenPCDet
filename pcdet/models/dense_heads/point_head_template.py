@@ -5,6 +5,11 @@ import torch.nn.functional as F
 from ...ops.roiaware_pool3d import roiaware_pool3d_utils
 from ...utils import common_utils, loss_utils
 
+'''
+Point_cls_labels are determined by 
+
+
+'''
 
 class PointHeadTemplate(nn.Module):
     def __init__(self, model_cfg, num_class):

@@ -33,14 +33,15 @@ class PointHeadSimple(PointHeadTemplate):
             point_part_labels: (N1 + N2 + N3 + ..., 3)
         """
         point_coords = input_dict['point_coords']
-        gt_boxes = input_dict['gt_boxes']
+        gt_boxes = input_dict['gt_boxes'] 
+        # Note! :  Gt_boxes == 0s for unlabeled IDs
         assert gt_boxes.shape.__len__() == 3, 'gt_boxes.shape=%s' % str(gt_boxes.shape)
         assert point_coords.shape.__len__() in [2], 'points.shape=%s' % str(point_coords.shape)
 
         batch_size = gt_boxes.shape[0]
         extend_gt_boxes = box_utils.enlarge_box3d(
             gt_boxes.view(-1, gt_boxes.shape[-1]), extra_width=self.model_cfg.TARGET_CONFIG.GT_EXTRA_WIDTH
-        ).view(batch_size, -1, gt_boxes.shape[-1])
+        ).view(batch_size, -1, gt_boxes.shape[-1]) # center
         targets_dict = self.assign_stack_targets(
             points=point_coords, gt_boxes=gt_boxes, extend_gt_boxes=extend_gt_boxes,
             set_ignore_flag=True, use_ball_constraint=False,

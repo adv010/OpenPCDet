@@ -38,7 +38,8 @@
            		 "MODEL.ROI_HEAD.ENABLE_EVAL",
            		 "True",
            		 "MODEL.ROI_HEAD.LOSS_CONFIG.UL_RCNN_CLS_WEIGHT_TYPE",
-           		 "all",
+           		 "rev-uc-bg",
+
    		 ],
    	 }
     ]

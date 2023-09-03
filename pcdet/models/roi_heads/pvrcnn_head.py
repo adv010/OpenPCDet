@@ -3,7 +3,8 @@ from ...ops.pointnet2.pointnet2_stack import pointnet2_modules as pointnet2_stac
 from ...utils import common_utils
 from .roi_head_template import RoIHeadTemplate
 from ...utils.prototype_utils import feature_bank_registry
-
+import os
+import pickle
 
 class PVRCNNHead(RoIHeadTemplate):
     def __init__(self, input_channels, model_cfg, num_class=1,
@@ -83,8 +84,11 @@ class PVRCNNHead(RoIHeadTemplate):
         point_coords = batch_dict["point_coords"]
         point_features = batch_dict["point_features"]
         point_cls_scores = batch_dict["point_cls_scores"]
+        # output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
+        # file_path = os.path.join(output_dir, 'roihead_stats.pkl')
 
         point_features = point_features * point_cls_scores.view(-1, 1)
+        # pickle.dump(point_features, open(file_path, 'wb'))  
 
         global_roi_grid_points, local_roi_grid_points = self.get_global_grid_points_of_roi(
             rois, grid_size=self.model_cfg.ROI_GRID_POOL.GRID_SIZE

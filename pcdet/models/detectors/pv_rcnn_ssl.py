@@ -39,7 +39,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         self.supervise_mode = model_cfg.SUPERVISE_MODE
 
         # TODO (Advait) - refactor params to yaml
-        self.DA = True
+        self.DA = False
         self.queue_length = 128 # (128 in ReMixMatch, SimMatch 256)
         '''
         (Advait) - Confirm whether below more accurate
@@ -260,7 +260,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                 loss_rpn_cls = reduce_loss(loss_rpn_cls[labeled_inds, ...]) + reduce_loss(loss_rpn_cls[unlabeled_inds, ...]) * self.unlabeled_weight
 
             loss_rpn_box = reduce_loss(loss_rpn_box[labeled_inds, ...]) + reduce_loss(loss_rpn_box[unlabeled_inds, ...]) * self.unlabeled_weight
-            loss_point = reduce_loss(loss_point[labeled_inds, ...])
+            loss_point = reduce_loss(loss_point[labeled_inds, ...]) + reduce_loss(loss_point[unlabeled_inds, ...])
             if self.model_cfg['ROI_HEAD'].get('ENABLE_SOFT_TEACHER', False) or self.model_cfg.get('UNLABELED_SUPERVISE_OBJ', False):
                 loss_rcnn_cls = reduce_loss(loss_rcnn_cls[labeled_inds, ...]) + reduce_loss(loss_rcnn_cls[unlabeled_inds, ...]) * self.unlabeled_weight
             else:
