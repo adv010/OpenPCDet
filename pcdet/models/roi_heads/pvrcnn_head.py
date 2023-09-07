@@ -1,9 +1,14 @@
+import pickle
+import os
+import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
 from ...ops.pointnet2.pointnet2_stack import pointnet2_modules as pointnet2_stack_modules
 from ...utils import common_utils
 from .roi_head_template import RoIHeadTemplate
-
+from visual_utils import visualize_utils as V
+import torch.distributed as dist 
+from collections import defaultdict
 
 class PVRCNNHead(RoIHeadTemplate):
     def __init__(self, input_channels, model_cfg, num_class=1,
@@ -11,7 +16,6 @@ class PVRCNNHead(RoIHeadTemplate):
         super().__init__(num_class=num_class, model_cfg=model_cfg,
                          predict_boxes_when_training=predict_boxes_when_training)
         self.model_cfg = model_cfg
-
         self.roi_grid_pool_layer, num_c_out = pointnet2_stack_modules.build_local_aggregation_module(
             input_channels=input_channels, config=self.model_cfg.ROI_GRID_POOL
         )
@@ -44,6 +48,10 @@ class PVRCNNHead(RoIHeadTemplate):
         self.init_weights(weight_init='xavier')
 
         self.print_loss_when_eval = False
+        self.class_dict = {1:'Car', 2 :'Ped', 3:'Cyc'}
+        self.gt_prototype_list=[]
+        self.momentum = 0.9
+
 
     def init_weights(self, weight_init='xavier'):
         if weight_init == 'kaiming':
@@ -79,12 +87,17 @@ class PVRCNNHead(RoIHeadTemplate):
 
         """
         batch_size = batch_dict['batch_size']
+        batch_dict['create_prototype'] = True # debugging, to create feature pkl for prototype
+        # batch_dict['enable_vis'] = False
         rois = batch_dict['rois']
+        gts = batch_dict['gt_boxes']
+
+        # rois = batch_dict['gt_boxes'] if 'create_prototype' in batch_dict else batch_dict['rois']
         point_coords = batch_dict['point_coords']
         point_features = batch_dict['point_features']
 
         point_features = point_features * batch_dict['point_cls_scores'].view(-1, 1)
-
+        batch_dict["weighted_point_features"] = point_features
         global_roi_grid_points, local_roi_grid_points = self.get_global_grid_points_of_roi(
             rois, grid_size=self.model_cfg.ROI_GRID_POOL.GRID_SIZE
         )  # (BxN, 6x6x6, 3)
@@ -106,11 +119,41 @@ class PVRCNNHead(RoIHeadTemplate):
             features=point_features.contiguous(),
         )  # (M1 + M2 ..., C)
 
-        pooled_features = pooled_features.view(
+        pooled_roi_features= pooled_features.view(
             -1, self.model_cfg.ROI_GRID_POOL.GRID_SIZE ** 3,
             pooled_features.shape[-1]
         )  # (BxN, 6x6x6, C)
-        return pooled_features
+
+
+        with torch.no_grad(): 
+            global_gt_grid_points, local_gt_grid_points = self.get_global_grid_points_of_roi(
+                gts, grid_size=self.model_cfg.ROI_GRID_POOL.GRID_SIZE
+            )  # (BxN, 6x6x6, 3)
+            global_gt_grid_points = global_gt_grid_points.view(batch_size, -1, 3)  # (B, Nx6x6x6, 3)
+
+            xyz = point_coords[:, 1:4]
+            xyz_batch_cnt = xyz.new_zeros(batch_size).int()
+            batch_idx = point_coords[:, 0]
+            for k in range(batch_size):
+                xyz_batch_cnt[k] = (batch_idx == k).sum()
+
+            new_xyz = global_gt_grid_points.view(-1, 3)
+            new_xyz_batch_cnt = xyz.new_zeros(batch_size).int().fill_(global_gt_grid_points.shape[1])
+            pooled_points, pooled_features = self.roi_grid_pool_layer(
+                xyz=xyz.contiguous(),
+                xyz_batch_cnt=xyz_batch_cnt,
+                new_xyz=new_xyz,
+                new_xyz_batch_cnt=new_xyz_batch_cnt,
+                features=point_features.contiguous(),
+            )  # (M1 + M2 ..., C)
+
+            pooled_gt_features = pooled_features.view(
+                -1, self.model_cfg.ROI_GRID_POOL.GRID_SIZE ** 3,
+                pooled_features.shape[-1]
+            )  # (BxN, 6x6x6, C)
+
+
+        return pooled_roi_features, pooled_gt_features
 
     def get_global_grid_points_of_roi(self, rois, grid_size):
         rois = rois.view(-1, rois.shape[-1])
@@ -140,8 +183,6 @@ class PVRCNNHead(RoIHeadTemplate):
         :param input_data: input dict
         :return:
         """
-
-        # use test-time nms for pseudo label generation
         targets_dict = self.proposal_layer(
             batch_dict, nms_config=self.model_cfg.NMS_CONFIG['TRAIN' if self.training and not disable_gt_roi_when_pseudo_labeling else 'TEST']
         )
@@ -153,28 +194,44 @@ class PVRCNNHead(RoIHeadTemplate):
             batch_dict['roi_labels'] = targets_dict['roi_labels']
 
         # RoI aware pooling
-        pooled_features = self.roi_grid_pool(batch_dict)  # (BxN, 6x6x6, C)
+        with torch.no_grad():
+            pooled_roi_features, pooled_gt_features = self.roi_grid_pool(batch_dict)  # (BxN, 6x6x6, C)
+            grid_size = self.model_cfg.ROI_GRID_POOL.GRID_SIZE
+            batch_size_rcnn = pooled_gt_features.shape[0]
+            pooled_features_gt= pooled_gt_features.permute(0, 2, 1).\
+                contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxNum_GT, C, 6, 6, 6)
+            # shared_features_gt = self.shared_fc_layer(pooled_features_gt.view(batch_size_rcnn, -1, 1))
 
-        grid_size = self.model_cfg.ROI_GRID_POOL.GRID_SIZE
-        batch_size_rcnn = pooled_features.shape[0]
-        pooled_features = pooled_features.permute(0, 2, 1).\
-            contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
 
-        shared_features = self.shared_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1))
-        rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
-        rcnn_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
+        batch_size_rcnn = pooled_roi_features.shape[0]
+        pooled_roi_features = pooled_roi_features.permute(0, 2, 1).\
+              contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
 
+        shared_features = self.shared_fc_layer(pooled_roi_features.view(batch_size_rcnn, -1, 1))
+        rcnn_roi_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
+        rcnn_roi_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
         if not self.training or self.predict_boxes_when_training:
             batch_cls_preds, batch_box_preds = self.generate_predicted_boxes(
-                batch_size=batch_dict['batch_size'], rois=batch_dict['rois'], cls_preds=rcnn_cls, box_preds=rcnn_reg
+                batch_size=batch_dict['batch_size'], rois=batch_dict['rois'], cls_preds=rcnn_roi_cls, box_preds=rcnn_roi_reg
             )
             batch_dict['batch_cls_preds'] = batch_cls_preds
             batch_dict['batch_box_preds'] = batch_box_preds
             batch_dict['cls_preds_normalized'] = False
+            batch_dict['shared_features'] = shared_features.view(batch_box_preds.shape[0],-1,shared_features.shape[1])
+            # batch_dict['shared_features_gt'] = shared_features_gt.view(batch_box_preds.shape[0],-1,shared_features_gt.shape[1])
+            batch_dict['pooled_features_gt'] = pooled_gt_features.view(batch_box_preds.shape[0],-1,128,6,6,6)
+            # batch_dict['pooled_points_gt'] = pooled_points_gt.view(batch_box_preds.shape[0],-1,3,6,6,6)
+            # batch_dict['rcnn_cls_interim'] = rcnn_cls_interim.view(batch_box_preds.shape[0],-1,rcnn_cls_interim.shape[1])
+            # batch_dict['pooled_features'] = pooled_features.view(batch_box_preds.shape[0],-1,128,6,6,6)
+            # batch_dict['rcnn_reg_interim'] = rcnn_reg_interim.view(batch_box_preds.shape[0],-1,rcnn_reg_interim.shape[1])
+            # Temporarily add infos to targets_dict for metrics
+            targets_dict['batch_box_preds'] = batch_box_preds
+
         if self.training or self.print_loss_when_eval:
-            targets_dict['rcnn_cls'] = rcnn_cls
-            targets_dict['rcnn_reg'] = rcnn_reg
+            targets_dict['rcnn_cls'] = rcnn_roi_cls
+            targets_dict['rcnn_reg'] = rcnn_roi_reg
 
             self.forward_ret_dict = targets_dict
 
         return batch_dict
+
