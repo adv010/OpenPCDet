@@ -216,7 +216,6 @@ class PVRCNN_SSL(Detector3DTemplate):
             """
             1. Augment ROIs ( currently uses ros_augmentation) # TODO : Augment doesn't affect the angle. Discuss about Angle
             2. Return pooled_fts and store in a new key
-            (Optional??)Store pooled_fts new key in bank
             3. Construct instance wise loss in student for labeled as per supervised contrastive loss
             4. Construct instance wise loss in student for unlabeled as per instance discriminative loss
             """
@@ -353,7 +352,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             return
         return proto_cont_loss.view(B, N)[ulb_inds][ulb_nonzero_mask].mean()
 
-    def _get_instance_contrastive_loss(self, batch_dict,pooled_ft, pooled_ft_paired, roi_labels, lbl_inds,temperature=0.07):
+    def _get_instance_contrastive_loss(self, batch_dict,pooled_ft, pooled_ft_paired, roi_labels, lbl_inds,temperature=0.07,base_temperature=0.07):
         '''
         Args:
             features: hidden vector of shape [bsz, n_views, ...].
@@ -363,6 +362,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         '''
         device= batch_dict['pooled_features'].device
         labels = roi_labels[lbl_inds]
+        batch_size_labeled = len(lbl_inds)
         pooled_ft = pooled_ft[lbl_inds]
         pooled_ft_paired = pooled_ft_paired[lbl_inds]
         mask = torch.eq(labels, labels.T).float().to(device) # Contrastive mask
@@ -370,22 +370,39 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         num_samples = features.shape[1]
 
+        contrast_count = features.shape[1]
+        contrast_feature = torch.cat(torch.unbind(features, dim=1), dim=0)
 
-        # gt_boxes = batch_dict['gt_boxes']
-        # B, N = gt_boxes.shape[:2]
-        # pl_feats = batch_dict['pooled_features']
-        # pl_feats_pair = batch_dict['pooled_features_pair']
-        # pl_labels = batch_dict['gt_boxes'][..., -1].view(-1).long() - 1
-        # inst_cont_loss_lbl = bank.get_proto_contrastive_loss(pl_feats, pl_feats_pair,pl_labels)
-        if inst_cont_loss_lbl is None:
+
+        # compute logits
+        anchor_dot_contrast = torch.div(
+            torch.matmul(contrast_feature, contrast_feature.T),
+           temperature)
+        # for numerical stability
+        logits_max, _ = torch.max(anchor_dot_contrast, dim=1, keepdim=True)
+        logits = anchor_dot_contrast - logits_max.detach()
+
+        # tile mask
+        mask = mask.repeat(contrast_count, contrast_count)
+        # mask-out self-contrast cases
+        logits_mask = torch.scatter(torch.ones_like(mask),1,torch.arange(batch_size_labeled * contrast_count).view(-1, 1).to(device),0)
+        mask = mask * logits_mask
+
+        # compute log_prob
+        exp_logits = torch.exp(logits) * logits_mask
+        log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True))
+
+        # compute mean of log-likelihood over positive
+        mean_log_prob_pos = (mask * log_prob).sum(1) / mask.sum(1)
+
+        # loss
+        loss = - ( temperature/ base_temperature) * mean_log_prob_pos
+        loss = loss.view(contrast_count, batch_size_labeled).mean() #len(lbl_inds_==batch_size_labeled
+
+        if loss is None:
             return
-        # nonzero_mask = torch.logical_not(torch.eq(gt_boxes, 0).all(dim=-1))
-        # lb_nonzero_mask = nonzero_mask[lbl_inds]
-        if lb_nonzero_mask.sum() == 0:
-            print(f"No pl instances predicted for strongly augmented frame(s) {batch_dict['frame_id'][lbl_inds]}")
-            return
-        
-        return inst_cont_loss_lbl.view(B, N)[lbl_inds][lb_nonzero_mask].mean()
+
+        return loss.mean()#inst_cont_loss_lbl.view(B, N)[lbl_inds][lb_nonzero_mask].mean()
 
 
     @staticmethod
