@@ -145,7 +145,7 @@ class PVRCNNHead(RoIHeadTemplate):
 
         return pooled_features
 
-    def forward(self, batch_dict, test_only=False):
+    def forward(self, batch_dict, test_only=False, paired_instance = False):
         """
         :param input_data: input dict
         :return:
@@ -166,7 +166,16 @@ class PVRCNNHead(RoIHeadTemplate):
             targets_dict['points'] = batch_dict['points']
 
         pooled_features = self.pool_features(batch_dict)
+        batch_size =  batch_dict['batch_size']
+        dim = int(pooled_features.shape[0]/batch_size)
         batch_size_rcnn = pooled_features.shape[0]
+        if paired_instance:
+            pooled_features_instloss = pooled_features.view(batch_size,dim, -1)
+            batch_dict['pooled_features_pair'] = pooled_features_instloss
+            return batch_dict # TODO : Discuss, allow till end of predictions? or return after feature pair generated?
+        else:
+            pooled_features_instloss = pooled_features.view(batch_size,dim, -1)
+            batch_dict['pooled_features'] = pooled_features_instloss
         shared_features = self.shared_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1))
         rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
         rcnn_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)

@@ -32,6 +32,7 @@ class FeatureBank(Metric):
 
         # Local feature/label which are used to update the global ones
         self.add_state('feats', default=[], dist_reduce_fx='cat')
+        # self.add_state('feats2', default=[], dist_reduce_fx='cat')
         self.add_state('labels', default=[], dist_reduce_fx='cat')
         self.add_state('ins_ids', default=[], dist_reduce_fx='cat')
         self.add_state('smpl_ids', default=[], dist_reduce_fx='cat')
@@ -50,6 +51,7 @@ class FeatureBank(Metric):
                iteration: int) -> None:
         for i in range(len(feats)):
             self.feats.append(feats[i])                 # (N, C)
+            #self.feats2.append(feats[i])               # (N, C) 
             self.labels.append(labels[i].view(-1))      # (N,)
             self.ins_ids.append(ins_ids[i].view(-1))    # (N,)
             self.smpl_ids.append(smpl_ids[i].view(-1))  # (1,)
@@ -57,15 +59,21 @@ class FeatureBank(Metric):
             self.iterations.append(rois_iter)           # (N,)
 
     def compute(self):
-        unique_smpl_ids = torch.unique(torch.cat((self.smpl_ids,), dim=0))
+        # unique_smpl_ids = torch.unique(torch.cat((self.smpl_ids,), dim=0))
+        unique_smpl_ids = torch.unique(torch.cat(self.smpl_ids))
         if len(unique_smpl_ids) < self.reset_state_interval:
             return None
 
         # Concatenate tensors along the specified dimension
-        features = torch.cat((self.feats,), dim=0)
-        labels = torch.cat((self.labels,), dim=0).int()
-        ins_ids = torch.cat((self.ins_ids,), dim=0).int().cpu().numpy()
-        iterations = torch.cat((self.iterations,), dim=0).int().cpu().numpy()
+        # features = torch.cat((self.feats,), dim=0)
+        # labels = torch.cat((self.labels,), dim=0).int()
+        # ins_ids = torch.cat((self.ins_ids,), dim=0).int().cpu().numpy()
+        # iterations = torch.cat((self.iterations,), dim=0).int().cpu().numpy()
+        features = torch.cat(self.feats)
+        # features2 = torch.cat(self.feats2)
+        labels = torch.cat(self.labels).int()
+        ins_ids = torch.cat(self.ins_ids).int().cpu().numpy()
+        iterations = torch.cat(self.iterations).int().cpu().numpy()
         assert len(features) == len(labels) == len(ins_ids) == len(iterations), \
             "length of features, labels, ins_ids, and iterations should be the same"
         sorted_ins_ids, arg_sorted_ins_ids = np.sort(ins_ids), np.argsort(ins_ids)
