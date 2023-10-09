@@ -246,7 +246,6 @@ class PVRCNN_SSL(Detector3DTemplate):
 
                 self.pv_rcnn.roi_head.forward(batch_dict_std,
                                                     test_only=True,paired_instance=True) # Student on augmented rois, interested in the 'pooled_features_pair' key of batch_dict_std 
-                ''' Call instance wise loss over pooled-features and pooled_features_pair of batch_dict_std'''
                 batch_dict['pooled_features_pair'] = batch_dict_std['pooled_features_pair']
 
 
@@ -398,12 +397,13 @@ class PVRCNN_SSL(Detector3DTemplate):
         mean_log_prob_pos = (mask * log_prob).sum(1) / mask.sum(1)
 
         # loss
-        loss = - ( temperature/ base_temperature) * mean_log_prob_pos
+        instance_loss = - ( temperature/ base_temperature) * mean_log_prob_pos
 
-        if loss is None:
+        if instance_loss is None:
             return
+        instance_loss = instance_loss.mean()
 
-        return loss.mean()#inst_cont_loss_lbl.view(B, N)[lbl_inds][lb_nonzero_mask].mean()
+        return instance_loss #inst_cont_loss_lbl.view(B, N)[lbl_inds][lb_nonzero_mask].mean()
 
 
     @staticmethod
