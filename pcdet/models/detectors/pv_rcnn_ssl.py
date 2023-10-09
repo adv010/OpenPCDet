@@ -9,7 +9,7 @@ from pcdet.ops.iou3d_nms import iou3d_nms_utils
 from pcdet.ops.roiaware_pool3d import roiaware_pool3d_utils
 from .detector3d_template import Detector3DTemplate
 from .pv_rcnn import PVRCNN
-
+import torch.nn.functional as F
 from pcdet.utils import common_utils
 from pcdet.utils.stats_utils import metrics_registry
 from pcdet.utils.prototype_utils import feature_bank_registry
@@ -221,33 +221,33 @@ class PVRCNN_SSL(Detector3DTemplate):
             """
         if self.model_cfg['ROI_HEAD'].get('ENABLE_INSTANCE_SUP_LOSS', False):  # Create instance_wise_loss
                 #  All incoming gradients to the cloned tensor will be propagated to the original tensor  - https://discuss.pytorch.org/t/how-does-clone-interact-with-backpropagation/8247/5
-                with torch.no_grad():# TODO : Discuss - instance wise loss would need grad/backprop. Discuss about torch.no_grad and data.clone 
-                    batch_dict_std = {}
-                    batch_dict_std['unlabeled_inds'] = batch_dict['unlabeled_inds']
-                    batch_dict_std['rois'] = batch_dict['rois'].data.clone() 
-                    batch_dict_std['roi_scores'] = batch_dict['roi_scores'].data.clone()
-                    batch_dict_std['roi_labels'] = batch_dict['roi_labels'].data.clone()
-                    batch_dict_std['has_class_labels'] = batch_dict['has_class_labels']
-                    batch_dict_std['batch_size'] = batch_dict['batch_size']
-                    batch_dict_std['point_features'] = batch_dict['point_features'].data.clone()
-                    batch_dict_std['point_coords'] = batch_dict['point_coords'].data.clone()
-                    batch_dict_std['point_cls_scores'] = batch_dict['point_cls_scores'].data.clone()
-                    batch_dict_std['pooled_features'] = batch_dict['pooled_features'].data.clone()
-                    batch_dict_std['roi_labels'] = batch_dict['roi_labels'].data.clone()
+                # with torch.no_grad():# TODO : Discuss - instance wise loss would need grad/backprop. Discuss about torch.no_grad and data.clone 
+                batch_dict_std = {}
+                batch_dict_std['cur_epoch'] = batch_dict['cur_epoch']
+                batch_dict_std['unlabeled_inds'] = batch_dict['unlabeled_inds']
+                batch_dict_std['rois'] = batch_dict['rois'].data.clone() 
+                batch_dict_std['roi_scores'] = batch_dict['roi_scores'].data.clone()
+                batch_dict_std['roi_labels'] = batch_dict['roi_labels'].data.clone()
+                batch_dict_std['has_class_labels'] = batch_dict['has_class_labels']
+                batch_dict_std['batch_size'] = batch_dict['batch_size']
+                batch_dict_std['point_features'] = batch_dict['point_features'].data.clone()
+                batch_dict_std['point_coords'] = batch_dict['point_coords'].data.clone()
+                batch_dict_std['point_cls_scores'] = batch_dict['point_cls_scores'].data.clone()
+                batch_dict_std['pooled_features'] = batch_dict['pooled_features'].data.clone()
+                batch_dict_std['roi_labels'] = batch_dict['roi_labels'].data.clone()
 
-                    # batch_dict_std = self.reverse_augmentation(batch_dict_std, batch_dict, lbl_inds) # Take student's proposals, unaugment them before passing to teacher's rcnn. 
-                    if self.model_cfg.ROI_HEAD.ROI_AUG.get('ENABLE', False):  
-                        augment_rois = getattr(augmentor_utils, self.model_cfg.ROI_HEAD.ROI_AUG.AUG_TYPE, augmentor_utils.roi_aug_ros)
-                        # augment rois on student
-                        batch_dict_std['rois_before_aug'] = batch_dict_std['rois'].clone().detach()
-                        batch_dict_std['rois'][lbl_inds] = \
-                            augment_rois(batch_dict_std['rois'][lbl_inds], self.model_cfg.ROI_HEAD)
+                # batch_dict_std = self.reverse_augmentation(batch_dict_std, batch_dict, lbl_inds) # Take student's proposals, unaugment them before passing to teacher's rcnn. 
+                if self.model_cfg.ROI_HEAD.ROI_AUG.get('ENABLE', False):  
+                    augment_rois = getattr(augmentor_utils, self.model_cfg.ROI_HEAD.ROI_AUG.AUG_TYPE, augmentor_utils.roi_aug_ros)
+                    # augment rois on student
+                    batch_dict_std['rois_before_aug'] = batch_dict_std['rois'].clone().detach()
+                    batch_dict_std['rois'][lbl_inds] = \
+                        augment_rois(batch_dict_std['rois'][lbl_inds], self.model_cfg.ROI_HEAD)
 
-                    self.pv_rcnn.roi_head.forward(batch_dict_std,
-                                                      test_only=True,paired_instance=True) # Student on augmented rois, interested in the 'pooled_features_pair' key of batch_dict_std 
-                    ''' Call instance wise loss over pooled-features and pooled_features_pair of batch_dict_std'''
-                    batch_dict['pooled_features_pair'] = batch_dict_std['pooled_features_pair']
-                    inst_cont_loss = self._get_instance_contrastive_loss(batch_dict_std,batch_dict_std['pooled_features'],batch_dict_std['pooled_features_pair'],batch_dict_std['roi_labels'], lbl_inds)
+                self.pv_rcnn.roi_head.forward(batch_dict_std,
+                                                    test_only=True,paired_instance=True) # Student on augmented rois, interested in the 'pooled_features_pair' key of batch_dict_std 
+                ''' Call instance wise loss over pooled-features and pooled_features_pair of batch_dict_std'''
+                batch_dict['pooled_features_pair'] = batch_dict_std['pooled_features_pair']
 
 
         if self.model_cfg.ROI_HEAD.ADAPTIVE_THRESH_CONFIG.get('ENABLE', False):
@@ -307,7 +307,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                 loss += proto_cont_loss * self.model_cfg['ROI_HEAD']['PROTO_CONTRASTIVE_LOSS_WEIGHT']
                 tb_dict['proto_cont_loss'] = proto_cont_loss.item()
         if self.model_cfg['ROI_HEAD'].get('ENABLE_INSTANCE_SUP_LOSS', False):
-            lbl_inst_cont_loss = self._get_instance_contrastive_loss(batch_dict_std,batch_dict_std['pooled_features'],batch_dict_std['pooled_features_pair'],batch_dict_std['labels'], lbl_inds)
+            lbl_inst_cont_loss = self._get_instance_contrastive_loss(batch_dict_std,batch_dict_std['pooled_features'],batch_dict_std['pooled_features_pair'],batch_dict_std['roi_labels'], lbl_inds)
             if lbl_inst_cont_loss is not None:
                 loss += lbl_inst_cont_loss * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT']
                 tb_dict['proto_cont_loss'] = lbl_inst_cont_loss.item()
@@ -352,7 +352,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             return
         return proto_cont_loss.view(B, N)[ulb_inds][ulb_nonzero_mask].mean()
 
-    def _get_instance_contrastive_loss(self, batch_dict,pooled_ft, pooled_ft_paired, roi_labels, lbl_inds,temperature=0.07,base_temperature=0.07):
+    def _get_instance_contrastive_loss(self, batch_dict,pooled_ft, pooled_ft_paired, roi_labels, lbl_inds,temperature=0.07,base_temperature=0.07, stop_epoch=10):
         '''
         Args:
             features: hidden vector of shape [bsz, n_views, ...].
@@ -367,12 +367,14 @@ class PVRCNN_SSL(Detector3DTemplate):
         pooled_ft_paired = pooled_ft_paired[lbl_inds]
         mask = torch.eq(labels, labels.T).float().to(device) # Contrastive mask
         features = torch.cat([pooled_ft.unsqueeze(1), pooled_ft_paired.unsqueeze(1)], dim=1)
+        if batch_dict['cur_epoch'] > stop_epoch:
+            return
 
-        num_samples = features.shape[1]
+        # num_samples = features.shape[1]
 
-        contrast_count = features.shape[1]
-        contrast_feature = torch.cat(torch.unbind(features, dim=1), dim=0)
-
+        contrast_count = features.shape[1] 
+        contrast_feature = torch.cat(torch.unbind(features, dim=1), dim=0) 
+        contrast_feature = F.normalize(contrast_feature.view(-1,features.shape[-1]))
 
         # compute logits
         anchor_dot_contrast = torch.div(
@@ -397,7 +399,6 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         # loss
         loss = - ( temperature/ base_temperature) * mean_log_prob_pos
-        loss = loss.view(contrast_count, batch_size_labeled).mean() #len(lbl_inds_==batch_size_labeled
 
         if loss is None:
             return
