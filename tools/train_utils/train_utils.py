@@ -9,20 +9,24 @@ from pcdet.utils import common_utils, commu_utils
 from matplotlib import pyplot as plt
 from pcdet.models import load_data_to_gpu
 
+
 def log_tb_dict(tb_log, tb_dict, accumulated_iter):
     for key, val in tb_dict.items():
         subkeys = key.split("/")
-        cat, key = (subkeys[0] + "/", subkeys[1]) if len(subkeys) > 1 else ('train/', key)
+        cat, key = (subkeys[0] + "/", subkeys[1]
+                    ) if len(subkeys) > 1 else ('train/', key)
         if key in ['bs']:
             cat = 'meta_data/'
         if "pr_curve" in key and isinstance(val, dict):
             for sub_key, sub_val in val.items():
-                tb_log.add_pr_curve(cat + key + "_" + sub_key, sub_val['labels'], sub_val['predictions'], accumulated_iter)
+                tb_log.add_pr_curve(
+                    cat + key + "_" + sub_key, sub_val['labels'], sub_val['predictions'], accumulated_iter)
         elif isinstance(val, dict):
-            if isinstance(list(val.values())[0], plt.Figure):# dict of figures
+            if isinstance(list(val.values())[0], plt.Figure):  # dict of figures
                 for kkey, vval in val.items():
                     if isinstance(vval, plt.Figure):
-                        tb_log.add_figure(cat + key +  "/" + kkey, vval, accumulated_iter)
+                        tb_log.add_figure(cat + key + "/" +
+                                          kkey, vval, accumulated_iter)
             else:
                 tb_log.add_scalars(cat + key, val, accumulated_iter)
 
@@ -39,7 +43,8 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
         dataloader_iter = iter(train_loader)
 
     if rank == 0:
-        pbar = tqdm.tqdm(total=total_it_each_epoch, leave=leave_pbar, desc='train', dynamic_ncols=True)
+        pbar = tqdm.tqdm(total=total_it_each_epoch,
+                         leave=leave_pbar, desc='train', dynamic_ncols=True)
         data_time = common_utils.AverageMeter()
         batch_time = common_utils.AverageMeter()
         forward_time = common_utils.AverageMeter()
@@ -74,7 +79,8 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
             cur_lr = optimizer.param_groups[0]['lr']
 
         if tb_log is not None:
-            tb_log.add_scalar('meta_data/learning_rate', cur_lr, accumulated_iter)
+            tb_log.add_scalar('meta_data/learning_rate',
+                              cur_lr, accumulated_iter)
 
         model.train()
         optimizer.zero_grad()
@@ -122,7 +128,8 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
 
             if tb_log is not None:
                 tb_log.add_scalar('train/loss', loss, accumulated_iter)
-                tb_log.add_scalar('meta_data/learning_rate', cur_lr, accumulated_iter)
+                tb_log.add_scalar('meta_data/learning_rate',
+                                  cur_lr, accumulated_iter)
                 log_tb_dict(tb_log, tb_dict, accumulated_iter)
                 if dataloader_test_iter:
                     log_tb_dict(tb_log, tb_dict_test, accumulated_iter)
@@ -139,8 +146,10 @@ def train_model(model, optimizer, train_loader, model_func, lr_scheduler, optim_
     with tqdm.trange(start_epoch, total_epochs, desc='epochs', dynamic_ncols=True, leave=(rank == 0)) as tbar:
         total_it_each_epoch = len(train_loader)
         if merge_all_iters_to_one_epoch:
-            assert hasattr(train_loader.dataset, 'merge_all_iters_to_one_epoch')
-            train_loader.dataset.merge_all_iters_to_one_epoch(merge=True, epochs=total_epochs)
+            assert hasattr(train_loader.dataset,
+                           'merge_all_iters_to_one_epoch')
+            train_loader.dataset.merge_all_iters_to_one_epoch(
+                merge=True, epochs=total_epochs)
             total_it_each_epoch = len(train_loader) // max(total_epochs, 1)
 
         dataloader_iter = iter(train_loader)
@@ -170,14 +179,16 @@ def train_model(model, optimizer, train_loader, model_func, lr_scheduler, optim_
             trained_epoch = cur_epoch + 1
             if trained_epoch % ckpt_save_interval == 0 and rank == 0:
 
-                ckpt_list = glob.glob(str(ckpt_save_dir / 'checkpoint_epoch_*.pth'))
+                ckpt_list = glob.glob(
+                    str(ckpt_save_dir / 'checkpoint_epoch_*.pth'))
                 ckpt_list.sort(key=os.path.getmtime)
 
                 if ckpt_list.__len__() >= max_ckpt_save_num:
                     for cur_file_idx in range(0, len(ckpt_list) - max_ckpt_save_num + 1):
                         os.remove(ckpt_list[cur_file_idx])
 
-                ckpt_name = ckpt_save_dir / ('checkpoint_epoch_%d' % trained_epoch)
+                ckpt_name = ckpt_save_dir / \
+                    ('checkpoint_epoch_%d' % trained_epoch)
                 save_checkpoint(
                     checkpoint_state(model, optimizer, trained_epoch, accumulated_iter), filename=ckpt_name,
                 )
@@ -215,9 +226,11 @@ def save_checkpoint(state, filename='checkpoint'):
         state.pop('optimizer_state', None)
         optimizer_filename = '{}_optim.pth'.format(filename)
         if torch.__version__ >= '1.4':
-            torch.save({'optimizer_state': optimizer_state}, optimizer_filename, _use_new_zipfile_serialization=False)
+            torch.save({'optimizer_state': optimizer_state},
+                       optimizer_filename, _use_new_zipfile_serialization=False)
         else:
-            torch.save({'optimizer_state': optimizer_state}, optimizer_filename)
+            torch.save({'optimizer_state': optimizer_state},
+                       optimizer_filename)
 
     filename = '{}.pth'.format(filename)
     if torch.__version__ >= '1.4':

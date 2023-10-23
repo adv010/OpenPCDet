@@ -15,14 +15,17 @@ class FeatureBank(Metric):
 
         self.temperature = kwargs.get('TEMPERATURE')
         self.feat_size = kwargs.get('FEATURE_SIZE')
-        self.bank_size = kwargs.get('BANK_SIZE')  # e.g., num. of classes or labeled instances
+        # e.g., num. of classes or labeled instances
+        self.bank_size = kwargs.get('BANK_SIZE')
         self.momentum = kwargs.get('MOMENTUM')
         self.direct_update = kwargs.get('DIRECT_UPDATE')
-        self.reset_state_interval = kwargs.get('RESET_STATE_INTERVAL')  # reset the state when N unique samples are seen
+        # reset the state when N unique samples are seen
+        self.reset_state_interval = kwargs.get('RESET_STATE_INTERVAL')
         self.num_points_thresh = kwargs.get('FILTER_MIN_POINTS_IN_GT', 0)
 
         self.initialized = False
-        self.insId_protoId_mapping = None  # mapping from instance index to prototype index
+        # mapping from instance index to prototype index
+        self.insId_protoId_mapping = None
 
         # Globally synchronized prototypes used in each process
         self.prototypes = None
@@ -39,12 +42,14 @@ class FeatureBank(Metric):
 
     def _init(self, unique_ins_ids, labels):
         self.bank_size = len(unique_ins_ids)
-        print(f"Initializing the feature bank with size {self.bank_size} and feature size {self.feat_size}")
+        print(
+            f"Initializing the feature bank with size {self.bank_size} and feature size {self.feat_size}")
         self.prototypes = torch.zeros((self.bank_size, self.feat_size)).cuda()
         self.classwise_prototypes = torch.zeros((3, self.feat_size)).cuda()
         self.proto_labels = labels
         self.num_updates = torch.zeros(self.bank_size).cuda()
-        self.insId_protoId_mapping = {unique_ins_ids[i]: i for i in range(len(unique_ins_ids))}
+        self.insId_protoId_mapping = {
+            unique_ins_ids[i]: i for i in range(len(unique_ins_ids))}
 
     def update(self, feats: [torch.Tensor], labels: [torch.Tensor], ins_ids: [torch.Tensor], smpl_ids: torch.Tensor,
                iteration: int) -> None:
@@ -53,7 +58,8 @@ class FeatureBank(Metric):
             self.labels.append(labels[i].view(-1))      # (N,)
             self.ins_ids.append(ins_ids[i].view(-1))    # (N,)
             self.smpl_ids.append(smpl_ids[i].view(-1))  # (1,)
-            rois_iter = torch.tensor(iteration, device=feats[0].device).expand_as(ins_ids[i].view(-1))
+            rois_iter = torch.tensor(
+                iteration, device=feats[0].device).expand_as(ins_ids[i].view(-1))
             self.iterations.append(rois_iter)           # (N,)
 
     def compute(self):
@@ -70,17 +76,21 @@ class FeatureBank(Metric):
             iterations = torch.cat(self.iterations).int().cpu().numpy()
         except:
             features = torch.cat((self.feats,), dim=0)
-            ins_ids = torch.cat((self.ins_ids,),dim = 0).int().cpu().numpy()
+            ins_ids = torch.cat((self.ins_ids,), dim=0).int().cpu().numpy()
             labels = torch.cat((self.labels,), dim=0).int()
-            iterations = torch.cat((self.iterations,), dim=0).int().cpu().numpy()
-        
+            iterations = torch.cat(
+                (self.iterations,), dim=0).int().cpu().numpy()
+
         assert len(features) == len(labels) == len(ins_ids) == len(iterations), \
             "length of features, labels, ins_ids, and iterations should be the same"
-        sorted_ins_ids, arg_sorted_ins_ids = np.sort(ins_ids), np.argsort(ins_ids)
-        unique_ins_ids, split_indices = np.unique(sorted_ins_ids, return_index=True)
+        sorted_ins_ids, arg_sorted_ins_ids = np.sort(
+            ins_ids), np.argsort(ins_ids)
+        unique_ins_ids, split_indices = np.unique(
+            sorted_ins_ids, return_index=True)
 
         if not self.initialized:
-            self._init(unique_ins_ids, labels[arg_sorted_ins_ids[split_indices]])
+            self._init(unique_ins_ids,
+                       labels[arg_sorted_ins_ids[split_indices]])
 
         # Group by ins_ids
         inds_groupby_ins_ids = np.split(arg_sorted_ins_ids, split_indices[1:])
@@ -89,15 +99,20 @@ class FeatureBank(Metric):
             grouped_inds = grouped_inds[np.argsort(iterations[grouped_inds])]
             ins_id = ins_ids[grouped_inds[0]]
             proto_id = self.insId_protoId_mapping[ins_id]
-            assert torch.allclose(labels[grouped_inds[0]], labels[grouped_inds]), "labels should be the same for the same instance id"
+            assert torch.allclose(labels[grouped_inds[0]], labels[grouped_inds]
+                                  ), "labels should be the same for the same instance id"
 
             if not self.initialized or self.direct_update:
                 self.num_updates[proto_id] += len(grouped_inds)
-                new_prototype = torch.mean(features[grouped_inds], dim=0, keepdim=True)  # TODO: maybe it'd be better to replaced it by the EMA
+                # TODO: maybe it'd be better to replaced it by the EMA
+                new_prototype = torch.mean(
+                    features[grouped_inds], dim=0, keepdim=True)
                 self.prototypes[proto_id] = new_prototype
             else:
                 for ind in grouped_inds:
-                    new_prototype = self.momentum * self.prototypes[proto_id] + (1 - self.momentum) * features[ind]
+                    new_prototype = self.momentum * \
+                        self.prototypes[proto_id] + \
+                        (1 - self.momentum) * features[ind]
                     self.prototypes[proto_id] = new_prototype
         self._update_classwise_prototypes()
         self.initialized = True
@@ -108,9 +123,11 @@ class FeatureBank(Metric):
         classwise_prototypes = torch.zeros((3, self.feat_size)).cuda()
         for i in range(3):  # TODO: refactor it
             inds = torch.where(self.proto_labels == i)[0]
-            print(f"Update classwise prototypes for class {i} with {len(inds)} instances.")
+            print(
+                f"Update classwise prototypes for class {i} with {len(inds)} instances.")
             classwise_prototypes[i] = torch.mean(self.prototypes[inds], dim=0)
-        self.classwise_prototypes = self.momentum * self.classwise_prototypes + (1 - self.momentum) * classwise_prototypes
+        self.classwise_prototypes = self.momentum * self.classwise_prototypes + \
+            (1 - self.momentum) * classwise_prototypes
 
     @torch.no_grad()
     def get_sim_scores(self, input_features, use_classwise_prototypes=True):
@@ -118,13 +135,15 @@ class FeatureBank(Metric):
         if not self.initialized:
             return input_features.new_zeros(input_features.shape[0], 3)
         if use_classwise_prototypes:
-            cos_sim = F.normalize(input_features) @ F.normalize(self.classwise_prototypes).t()
+            cos_sim = F.normalize(
+                input_features) @ F.normalize(self.classwise_prototypes).t()
             return F.softmax(cos_sim / self.temperature, dim=-1)
         else:
             self._get_sim_scores_with_instance_prototypes(input_features)
 
     def _get_sim_scores_with_instance_prototypes(self, input_features):
-        cos_sim = F.normalize(input_features) @ F.normalize(self.prototypes).t()
+        cos_sim = F.normalize(
+            input_features) @ F.normalize(self.prototypes).t()
         norm_cos_sim = F.softmax(cos_sim / self.temperature, dim=-1)
         classwise_sim = cos_sim.new_zeros(input_features.shape[0], 3)
         lbs = self.proto_labels.expand_as(cos_sim).long()
@@ -150,7 +169,8 @@ class FeatureBank(Metric):
         """
         if not self.initialized:
             return None
-        sim_scores = F.normalize(feats) @ F.normalize(self.classwise_prototypes).t()
+        sim_scores = F.normalize(
+            feats) @ F.normalize(self.classwise_prototypes).t()
         log_probs = F.log_softmax(sim_scores / self.temperature, dim=-1)
         return -log_probs[torch.arange(len(labels)), labels]
 

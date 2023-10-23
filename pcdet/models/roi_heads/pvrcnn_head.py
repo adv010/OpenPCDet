@@ -23,7 +23,8 @@ class PVRCNNHead(RoIHeadTemplate):
         shared_fc_list = []
         for k in range(0, self.model_cfg.SHARED_FC.__len__()):
             shared_fc_list.extend([
-                nn.Conv1d(pre_channel, self.model_cfg.SHARED_FC[k], kernel_size=1, bias=False),
+                nn.Conv1d(
+                    pre_channel, self.model_cfg.SHARED_FC[k], kernel_size=1, bias=False),
                 nn.BatchNorm1d(self.model_cfg.SHARED_FC[k]),
                 nn.ReLU()
             ])
@@ -93,7 +94,8 @@ class PVRCNNHead(RoIHeadTemplate):
         global_roi_grid_points, local_roi_grid_points = self.get_global_grid_points_of_roi(
             rois, grid_size=self.model_cfg.ROI_GRID_POOL.GRID_SIZE
         )  # (BxN, 6x6x6, 3)
-        global_roi_grid_points = global_roi_grid_points.view(batch_size, -1, 3)  # (B, Nx6x6x6, 3)
+        global_roi_grid_points = global_roi_grid_points.view(
+            batch_size, -1, 3)  # (B, Nx6x6x6, 3)
 
         xyz = point_coords[:, 1:4]
         xyz_batch_cnt = xyz.new_zeros(batch_size).int()
@@ -102,7 +104,8 @@ class PVRCNNHead(RoIHeadTemplate):
             xyz_batch_cnt[k] = (batch_idx == k).sum()
 
         new_xyz = global_roi_grid_points.view(-1, 3)
-        new_xyz_batch_cnt = xyz.new_zeros(batch_size).int().fill_(global_roi_grid_points.shape[1])
+        new_xyz_batch_cnt = xyz.new_zeros(batch_size).int().fill_(
+            global_roi_grid_points.shape[1])
         pooled_points, pooled_features = self.roi_grid_pool_layer(
             xyz=xyz.contiguous(),
             xyz_batch_cnt=xyz_batch_cnt,
@@ -121,7 +124,8 @@ class PVRCNNHead(RoIHeadTemplate):
         rois = rois.view(-1, rois.shape[-1])
         batch_size_rcnn = rois.shape[0]
 
-        local_roi_grid_points = self.get_dense_grid_points(rois, batch_size_rcnn, grid_size)  # (B, 6x6x6, 3)
+        local_roi_grid_points = self.get_dense_grid_points(
+            rois, batch_size_rcnn, grid_size)  # (B, 6x6x6, 3)
         global_roi_grid_points = common_utils.rotate_points_along_z(
             local_roi_grid_points.clone(), rois[:, 6]
         ).squeeze(dim=1)
@@ -133,23 +137,26 @@ class PVRCNNHead(RoIHeadTemplate):
     def get_dense_grid_points(rois, batch_size_rcnn, grid_size):
         faked_features = rois.new_ones((grid_size, grid_size, grid_size))
         dense_idx = faked_features.nonzero()  # (N, 3) [x_idx, y_idx, z_idx]
-        dense_idx = dense_idx.repeat(batch_size_rcnn, 1, 1).float()  # (B, 6x6x6, 3)
+        dense_idx = dense_idx.repeat(
+            batch_size_rcnn, 1, 1).float()  # (B, 6x6x6, 3)
 
         local_roi_size = rois.view(batch_size_rcnn, -1)[:, 3:6]
         roi_grid_points = (dense_idx + 0.5) / grid_size * local_roi_size.unsqueeze(dim=1) \
-                          - (local_roi_size.unsqueeze(dim=1) / 2)  # (B, 6x6x6, 3)
+            - (local_roi_size.unsqueeze(dim=1) / 2)  # (B, 6x6x6, 3)
         return roi_grid_points
 
     def pool_features(self, batch_dict, use_gtboxes=False):
-        pooled_features = self.roi_grid_pool(batch_dict, use_gtboxes=use_gtboxes)  # (BxN, 6x6x6, C)
+        pooled_features = self.roi_grid_pool(
+            batch_dict, use_gtboxes=use_gtboxes)  # (BxN, 6x6x6, C)
         grid_size = self.model_cfg.ROI_GRID_POOL.GRID_SIZE
         batch_size_rcnn = pooled_features.shape[0]
         pooled_features = pooled_features.permute(0, 2, 1). \
-            contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
+            contiguous().view(batch_size_rcnn, -1, grid_size,
+                              grid_size, grid_size)  # (BxN, C, 6, 6, 6)
 
         return pooled_features
 
-    def forward(self, batch_dict, test_only=False,use_gtboxes=False):
+    def forward(self, batch_dict, test_only=False, use_gtboxes=False):
         """
         :param input_data: input dict
         :return:
@@ -169,17 +176,22 @@ class PVRCNNHead(RoIHeadTemplate):
             targets_dict['ori_unlabeled_boxes'] = batch_dict['ori_unlabeled_boxes']
             targets_dict['points'] = batch_dict['points']
 
-        pooled_features = self.pool_features(batch_dict,use_gtboxes=use_gtboxes)
+        pooled_features = self.pool_features(
+            batch_dict, use_gtboxes=use_gtboxes)
         if use_gtboxes == True:
             # batch_dict['pooled_features_gt'] = pooled_features
             batch_size_rcnn = pooled_features.shape[0]
-            shared_features = self.shared_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1))
+            shared_features = self.shared_fc_layer(
+                pooled_features.view(batch_size_rcnn, -1, 1))
             batch_dict['shared_features_gt'] = shared_features
             return batch_dict
         batch_size_rcnn = pooled_features.shape[0]
-        shared_features = self.shared_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1))
-        rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
-        rcnn_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
+        shared_features = self.shared_fc_layer(
+            pooled_features.view(batch_size_rcnn, -1, 1))
+        rcnn_cls = self.cls_layers(shared_features).transpose(
+            1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
+        rcnn_reg = self.reg_layers(shared_features).transpose(
+            1, 2).contiguous().squeeze(dim=1)  # (B, C)
 
         if (self.training or self.print_loss_when_eval) and not test_only:
             # RoI-level similarity.
@@ -188,7 +200,8 @@ class PVRCNNHead(RoIHeadTemplate):
             roi_scores_shape = batch_dict['roi_scores'].shape  # (B, N)
             bank = feature_bank_registry.get('gt_aug_lbl_prototypes')
             sim_scores = bank.get_sim_scores(roi_features)
-            targets_dict['roi_sim_scores'] = sim_scores.view(*roi_scores_shape, -1)
+            targets_dict['roi_sim_scores'] = sim_scores.view(
+                *roi_scores_shape, -1)
 
         if not self.training or self.predict_boxes_when_training:
             batch_cls_preds, batch_box_preds = self.generate_predicted_boxes(

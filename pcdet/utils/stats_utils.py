@@ -17,12 +17,14 @@ def _detach(tensor: [torch.Tensor] = None) -> [torch.Tensor]:
 
 
 def _assert_inputs_are_valid(rois: [torch.Tensor], roi_scores: [torch.Tensor], ground_truths: [torch.Tensor]) -> None:
-    assert [len(sample_rois) != 0 for sample_rois in rois], "rois should not be empty"
-    assert isinstance(rois, list) and isinstance(ground_truths, list) and isinstance(roi_scores, list)
+    assert [len(sample_rois) !=
+            0 for sample_rois in rois], "rois should not be empty"
+    assert isinstance(rois, list) and isinstance(
+        ground_truths, list) and isinstance(roi_scores, list)
     assert (
-            all(roi.dim() == 2 for roi in rois)
-            and all(roi.dim() == 2 for roi in ground_truths)
-            and all(roi.dim() == 2 for roi in roi_scores)
+        all(roi.dim() == 2 for roi in rois)
+        and all(roi.dim() == 2 for roi in ground_truths)
+        and all(roi.dim() == 2 for roi in roi_scores)
     )
     assert all(roi.shape[-1] == 8 for roi in rois) and all(
         gt.shape[-1] == 8 for gt in ground_truths
@@ -92,8 +94,10 @@ class PredQualityMetrics(Metric):
         self.bg_thresh = kwargs.get('BG_THRESH', 0.25)
         self.min_overlaps = np.array([0.7, 0.5, 0.5])
 
-        self.add_state('num_samples', default=torch.tensor(0).cuda(), dist_reduce_fx='sum')
-        self.add_state('num_gts', default=torch.zeros((3,)).cuda(), dist_reduce_fx='sum')
+        self.add_state('num_samples', default=torch.tensor(
+            0).cuda(), dist_reduce_fx='sum')
+        self.add_state('num_gts', default=torch.zeros(
+            (3,)).cuda(), dist_reduce_fx='sum')
         for name in self.states_name:
             self.add_state(name, default=[], dist_reduce_fx='cat')
 
@@ -107,13 +111,15 @@ class PredQualityMetrics(Metric):
         for i, sample_rois in enumerate(rois):
             sample_roi_labels = sample_rois[:, -1].long() - 1
 
-            valid_gts_mask = torch.logical_not(torch.all(ground_truths[i] == 0, dim=-1))
+            valid_gts_mask = torch.logical_not(
+                torch.all(ground_truths[i] == 0, dim=-1))
             sample_gts = ground_truths[i][valid_gts_mask]
             sample_gts_labels = sample_gts[:, -1].long() - 1
             if len(sample_gts) > 0:
                 sample_roi_iou_wrt_gt, _ = get_max_iou_with_same_class(sample_rois[:, 0:7], sample_roi_labels,
                                                                        sample_gts[:, 0:7], sample_gts_labels)
-                num_gts += torch.bincount(sample_gts[:, -1].int() - 1, minlength=3)
+                num_gts += torch.bincount(sample_gts[:, -
+                                          1].int() - 1, minlength=3)
             else:
                 sample_roi_iou_wrt_gt = torch.zeros_like(sample_rois[:, 0])
 
@@ -173,22 +179,30 @@ class PredQualityMetrics(Metric):
         weights = accumulated_metrics["roi_weights"].view(-1)
         target_scores = accumulated_metrics["roi_target_scores"].view(-1)
 
-        true_mask = (iou_wrt_gt >= iou_wrt_gt.new_tensor(self.min_overlaps)[pred_labels]).long()
+        true_mask = (iou_wrt_gt >= iou_wrt_gt.new_tensor(
+            self.min_overlaps)[pred_labels]).long()
 
         # Multiclass classification average precision score based on different scores.
-        one_hot_labels = pred_labels.new_zeros(len(pred_labels), 3, dtype=torch.long, device=scores.device)
+        one_hot_labels = pred_labels.new_zeros(
+            len(pred_labels), 3, dtype=torch.long, device=scores.device)
         one_hot_labels.scatter_(-1, pred_labels.unsqueeze(dim=-1).long(), 1.0)
         one_hot_labels = one_hot_labels * true_mask.unsqueeze(dim=-1)
 
         y_labels = one_hot_labels.int().cpu().numpy()
         y_scores = scores.cpu().numpy()
         y_sim_scores = sim_scores.cpu().numpy()
-        classwise_metrics['multiclass_avg_precision_sem_score_micro'] = average_precision_score(y_labels, y_scores, average='micro')
-        classwise_metrics['multiclass_avg_precision_sem_score_weighted'] = average_precision_score(y_labels, y_scores, average='weighted')
-        classwise_metrics['multiclass_avg_precision_sem_score_macro'] = average_precision_score(y_labels, y_scores, average='macro')
-        classwise_metrics['multiclass_avg_precision_sim_score_micro'] = average_precision_score(y_labels, y_sim_scores, average='micro')
-        classwise_metrics['multiclass_avg_precision_sim_score_weighted'] = average_precision_score(y_labels, y_sim_scores, average='weighted')
-        classwise_metrics['multiclass_avg_precision_sim_score_macro'] = average_precision_score(y_labels, y_sim_scores, average='macro')
+        classwise_metrics['multiclass_avg_precision_sem_score_micro'] = average_precision_score(
+            y_labels, y_scores, average='micro')
+        classwise_metrics['multiclass_avg_precision_sem_score_weighted'] = average_precision_score(
+            y_labels, y_scores, average='weighted')
+        classwise_metrics['multiclass_avg_precision_sem_score_macro'] = average_precision_score(
+            y_labels, y_scores, average='macro')
+        classwise_metrics['multiclass_avg_precision_sim_score_micro'] = average_precision_score(
+            y_labels, y_sim_scores, average='micro')
+        classwise_metrics['multiclass_avg_precision_sim_score_weighted'] = average_precision_score(
+            y_labels, y_sim_scores, average='weighted')
+        classwise_metrics['multiclass_avg_precision_sim_score_macro'] = average_precision_score(
+            y_labels, y_sim_scores, average='macro')
 
         for cind, cls in enumerate(self.dataset.class_names):
             cls_pred_mask = pred_labels == cind
@@ -197,14 +211,17 @@ class PredQualityMetrics(Metric):
             # By using cls_true_mask we assume that the performance of RPN classification is perfect.
             cls_roi_scores = scores[cls_pred_mask, cind]
             cls_roi_sim_scores = sim_scores[cls_pred_mask, cind]
-            cls_roi_sim_scores_entropy = Categorical(sim_scores[cls_pred_mask] + torch.finfo(torch.float32).eps).entropy()
+            cls_roi_sim_scores_entropy = Categorical(
+                sim_scores[cls_pred_mask] + torch.finfo(torch.float32).eps).entropy()
             cls_roi_iou_wrt_gt = iou_wrt_gt[cls_pred_mask]
             cls_roi_iou_wrt_pl = iou_wrt_pl[cls_pred_mask]
             cls_roi_weights = weights[cls_pred_mask]
             cls_roi_target_scores = target_scores[cls_pred_mask]
 
-            sem_clf_pr_curve_sem_score_data = {'labels': y_labels, 'predictions': y_scores}
-            sem_clf_pr_curve_sim_score_data = {'labels': y_labels, 'predictions': y_sim_scores}
+            sem_clf_pr_curve_sem_score_data = {
+                'labels': y_labels, 'predictions': y_scores}
+            sem_clf_pr_curve_sim_score_data = {
+                'labels': y_labels, 'predictions': y_sim_scores}
             classwise_metrics['sem_clf_pr_curve_sem_score'][cls] = sem_clf_pr_curve_sem_score_data
             classwise_metrics['sem_clf_pr_curve_sim_score'][cls] = sem_clf_pr_curve_sim_score_data
 
@@ -215,18 +232,26 @@ class PredQualityMetrics(Metric):
             cls_uc_mask = ~(cls_bg_mask | cls_fg_mask)
 
             def add_avg_metric(key, metric):
-                classwise_metrics[f'fg_{key}'][cls] = (metric * cls_fg_mask.float()).sum() / cls_fg_mask.sum()
-                classwise_metrics[f'uc_{key}'][cls] = (metric * cls_uc_mask.float()).sum() / cls_uc_mask.sum()
+                classwise_metrics[f'fg_{key}'][cls] = (
+                    metric * cls_fg_mask.float()).sum() / cls_fg_mask.sum()
+                classwise_metrics[f'uc_{key}'][cls] = (
+                    metric * cls_uc_mask.float()).sum() / cls_uc_mask.sum()
                 # classwise_metrics[f'bg_{key}'][cls] = (metric * cls_bg_mask.float()).sum() / cls_bg_mask.sum()
 
-            classwise_metrics['avg_num_true_rois_per_sample'][cls] = cls_pred_mask.sum() / self.num_samples
-            classwise_metrics['avg_num_pred_rois_using_sem_score_per_sample'][cls] = cls_pred_mask.sum() / self.num_samples
-            classwise_metrics['avg_num_pred_rois_using_sim_score_per_sample'][cls] = cls_pred_mask.sum() / self.num_samples
+            classwise_metrics['avg_num_true_rois_per_sample'][cls] = cls_pred_mask.sum(
+            ) / self.num_samples
+            classwise_metrics['avg_num_pred_rois_using_sem_score_per_sample'][cls] = cls_pred_mask.sum(
+            ) / self.num_samples
+            classwise_metrics['avg_num_pred_rois_using_sim_score_per_sample'][cls] = cls_pred_mask.sum(
+            ) / self.num_samples
             # classwise_metrics['avg_num_gts_per_sample'].append()
 
-            classwise_metrics['rois_fg_ratio'][cls] = cls_fg_mask.sum() / cls_pred_mask.sum()
-            classwise_metrics['rois_uc_ratio'][cls] = cls_uc_mask.sum() / cls_pred_mask.sum()
-            classwise_metrics['rois_bg_ratio'][cls] = cls_bg_mask.sum() / cls_pred_mask.sum()
+            classwise_metrics['rois_fg_ratio'][cls] = cls_fg_mask.sum(
+            ) / cls_pred_mask.sum()
+            classwise_metrics['rois_uc_ratio'][cls] = cls_uc_mask.sum(
+            ) / cls_pred_mask.sum()
+            classwise_metrics['rois_bg_ratio'][cls] = cls_bg_mask.sum(
+            ) / cls_pred_mask.sum()
 
             add_avg_metric('rois_avg_score', cls_roi_scores)
             add_avg_metric('rois_avg_sim_score', cls_roi_sim_scores)
@@ -234,7 +259,8 @@ class PredQualityMetrics(Metric):
             add_avg_metric('rois_avg_iou_wrt_pl', cls_roi_iou_wrt_pl)
             add_avg_metric('rois_avg_weight', cls_roi_weights)
             add_avg_metric('rois_avg_target_score', cls_roi_target_scores)
-            add_avg_metric('rois_avg_sim_score_entropy', cls_roi_sim_scores_entropy)
+            add_avg_metric('rois_avg_sim_score_entropy',
+                           cls_roi_sim_scores_entropy)
             # tag = 'bin_clf_avg_precision_score_using_target_score'
             # classwise_metrics[tag][cls] = _average_precision_score(cls_fg_mask, cls_roi_target_scores)
             # tag = 'bin_clf_avg_precision_score_using_target_score_weighted'

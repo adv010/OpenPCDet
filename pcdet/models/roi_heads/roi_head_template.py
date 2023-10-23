@@ -16,26 +16,32 @@ def update_metrics(targets_dict, mask_type='cls'):
 
     for i, uind in enumerate(targets_dict['unlabeled_inds']):
         mask = (targets_dict['reg_valid_mask'][uind] > 0) if mask_type == 'reg' else (
-                    targets_dict['rcnn_cls_labels'][uind] >= 0)
+            targets_dict['rcnn_cls_labels'][uind] >= 0)
         if mask.sum() == 0:
             # print(f'Warning: No {mask_type} rois for unlabeled index {uind}')
             continue
 
         # (Proposals) ROI info
         rois = targets_dict['rois'][uind][mask].detach().clone()
-        roi_labels = targets_dict['roi_labels'][uind][mask].unsqueeze(-1).detach().clone()
-        roi_scores_multiclass = targets_dict['roi_scores_multiclass'][uind][mask].detach().clone()
-        roi_sim_scores_multiclass = targets_dict['roi_sim_scores'][uind][mask].detach().clone()
+        roi_labels = targets_dict['roi_labels'][uind][mask].unsqueeze(
+            -1).detach().clone()
+        roi_scores_multiclass = targets_dict['roi_scores_multiclass'][uind][mask].detach(
+        ).clone()
+        roi_sim_scores_multiclass = targets_dict['roi_sim_scores'][uind][mask].detach(
+        ).clone()
         roi_labeled_boxes = torch.cat([rois, roi_labels], dim=-1)
-        gt_iou_of_rois = targets_dict['gt_iou_of_rois'][uind][mask].unsqueeze(-1).detach().clone()
+        gt_iou_of_rois = targets_dict['gt_iou_of_rois'][uind][mask].unsqueeze(
+            -1).detach().clone()
         metrics_input['rois'].append(roi_labeled_boxes)
         metrics_input['roi_scores'].append(roi_scores_multiclass)
         metrics_input['roi_sim_scores'].append(roi_sim_scores_multiclass)
         metrics_input['roi_iou_wrt_pl'].append(gt_iou_of_rois)
 
         # Target info
-        target_labeled_boxes = targets_dict['gt_of_rois_src'][uind][mask].detach().clone()
-        target_scores = targets_dict['rcnn_cls_labels'][uind][mask].detach().clone()
+        target_labeled_boxes = targets_dict['gt_of_rois_src'][uind][mask].detach(
+        ).clone()
+        target_scores = targets_dict['rcnn_cls_labels'][uind][mask].detach(
+        ).clone()
         metrics_input['roi_target_scores'].append(target_scores)
 
         # (Real labels) GT info
@@ -43,7 +49,8 @@ def update_metrics(targets_dict, mask_type='cls'):
         metrics_input['ground_truths'].append(gt_labeled_boxes)
 
         # RoI weights
-        target_weights = targets_dict['rcnn_cls_weights'][uind][mask].detach().clone()
+        target_weights = targets_dict['rcnn_cls_weights'][uind][mask].detach(
+        ).clone()
         metrics_input['roi_weights'].append(target_weights)
 
         bs_id = targets_dict['points'][:, 0] == uind
@@ -64,7 +71,8 @@ class RoIHeadTemplate(nn.Module):
         self.box_coder = getattr(box_coder_utils, self.model_cfg.TARGET_CONFIG.BOX_CODER)(
             **self.model_cfg.TARGET_CONFIG.get('BOX_CODER_CONFIG', {})
         )
-        self.proposal_target_layer = ProposalTargetLayer(roi_sampler_cfg=self.model_cfg.TARGET_CONFIG)
+        self.proposal_target_layer = ProposalTargetLayer(
+            roi_sampler_cfg=self.model_cfg.TARGET_CONFIG)
         self.build_losses(self.model_cfg.LOSS_CONFIG)
         self.forward_ret_dict = None
         self.predict_boxes_when_training = predict_boxes_when_training
@@ -72,7 +80,8 @@ class RoIHeadTemplate(nn.Module):
     def build_losses(self, losses_cfg):
         self.add_module(
             'reg_loss_func',
-            loss_utils.WeightedSmoothL1Loss(code_weights=losses_cfg.LOSS_WEIGHTS['code_weights'])
+            loss_utils.WeightedSmoothL1Loss(
+                code_weights=losses_cfg.LOSS_WEIGHTS['code_weights'])
         )
 
     def make_fc_layers(self, input_channels, output_channels, fc_list):
@@ -87,7 +96,8 @@ class RoIHeadTemplate(nn.Module):
             pre_channel = fc_list[k]
             if self.model_cfg.DP_RATIO >= 0 and k == 0:
                 fc_layers.append(nn.Dropout(self.model_cfg.DP_RATIO))
-        fc_layers.append(nn.Conv1d(pre_channel, output_channels, kernel_size=1, bias=True))
+        fc_layers.append(
+            nn.Conv1d(pre_channel, output_channels, kernel_size=1, bias=True))
         fc_layers = nn.Sequential(*fc_layers)
         return fc_layers
 
@@ -116,10 +126,14 @@ class RoIHeadTemplate(nn.Module):
         batch_size = batch_dict['batch_size']
         batch_box_preds = batch_dict['batch_box_preds']
         batch_cls_preds = batch_dict['batch_cls_preds']
-        rois = batch_box_preds.new_zeros((batch_size, nms_config.NMS_POST_MAXSIZE, batch_box_preds.shape[-1]))
-        roi_scores = batch_box_preds.new_zeros((batch_size, nms_config.NMS_POST_MAXSIZE))
-        roi_labels = batch_box_preds.new_zeros((batch_size, nms_config.NMS_POST_MAXSIZE), dtype=torch.long)
-        roi_scores_multiclass = batch_box_preds.new_zeros((batch_size, nms_config.NMS_POST_MAXSIZE, batch_cls_preds.shape[-1]))
+        rois = batch_box_preds.new_zeros(
+            (batch_size, nms_config.NMS_POST_MAXSIZE, batch_box_preds.shape[-1]))
+        roi_scores = batch_box_preds.new_zeros(
+            (batch_size, nms_config.NMS_POST_MAXSIZE))
+        roi_labels = batch_box_preds.new_zeros(
+            (batch_size, nms_config.NMS_POST_MAXSIZE), dtype=torch.long)
+        roi_scores_multiclass = batch_box_preds.new_zeros(
+            (batch_size, nms_config.NMS_POST_MAXSIZE, batch_cls_preds.shape[-1]))
         for index in range(batch_size):
             if batch_dict.get('batch_index', None) is not None:
                 assert batch_cls_preds.shape.__len__() == 2
@@ -142,7 +156,8 @@ class RoIHeadTemplate(nn.Module):
             rois[index, :len(selected), :] = box_preds[selected]
             roi_scores[index, :len(selected)] = cur_roi_scores[selected]
             roi_labels[index, :len(selected)] = cur_roi_labels[selected]
-            roi_scores_multiclass[index, :len(selected), :] = cls_preds[selected]
+            roi_scores_multiclass[index, :len(
+                selected), :] = cls_preds[selected]
 
         batch_dict['rois'] = rois
         batch_dict['roi_scores'] = roi_scores
@@ -178,11 +193,14 @@ class RoIHeadTemplate(nn.Module):
 
         # flip orientation if rois have opposite orientation
         heading_label = gt_of_rois[:, :, 6] % (2 * np.pi)  # 0 ~ 2pi
-        opposite_flag = (heading_label > np.pi * 0.5) & (heading_label < np.pi * 1.5)
-        heading_label[opposite_flag] = (heading_label[opposite_flag] + np.pi) % (2 * np.pi)  # (0 ~ pi/2, 3pi/2 ~ 2pi)
+        opposite_flag = (heading_label > np.pi *
+                         0.5) & (heading_label < np.pi * 1.5)
+        heading_label[opposite_flag] = (
+            heading_label[opposite_flag] + np.pi) % (2 * np.pi)  # (0 ~ pi/2, 3pi/2 ~ 2pi)
         flag = heading_label > np.pi
         heading_label[flag] = heading_label[flag] - np.pi * 2  # (-pi/2, pi/2)
-        heading_label = torch.clamp(heading_label, min=-np.pi / 2, max=np.pi / 2)
+        heading_label = torch.clamp(
+            heading_label, min=-np.pi / 2, max=np.pi / 2)
 
         gt_of_rois[:, :, 6] = heading_label
         targets_dict['gt_of_rois'] = gt_of_rois
@@ -198,16 +216,19 @@ class RoIHeadTemplate(nn.Module):
 
         ulb_inds = forward_ret_dict['unlabeled_inds']
         ulb_cls_labels = forward_ret_dict['roi_labels'][ulb_inds]
-        ulb_num_cls = torch.bincount(ulb_cls_labels.view(-1), minlength=4)[1:].float()
+        ulb_num_cls = torch.bincount(
+            ulb_cls_labels.view(-1), minlength=4)[1:].float()
         ulb_cls_dist = ulb_num_cls / ulb_num_cls.sum()
 
         # calculate kl divergence between lbl_cls_dist and cls_dist_batch
         ulb_cls_dist = ulb_cls_dist + 1e-6
         lbl_cls_dist = lbl_cls_dist + 1e-6
-        ulb_cls_dist_loss = torch.sum(lbl_cls_dist * torch.log(lbl_cls_dist / ulb_cls_dist))
+        ulb_cls_dist_loss = torch.sum(
+            lbl_cls_dist * torch.log(lbl_cls_dist / ulb_cls_dist))
         # clamp ulb_cls_dist_loss
         ulb_cls_dist_loss = torch.clamp(ulb_cls_dist_loss, min=0.0, max=2.0)
-        ulb_cls_dist_loss = ulb_cls_dist_loss * loss_cfgs.LOSS_WEIGHTS['ulb_cls_dist_weight']
+        ulb_cls_dist_loss = ulb_cls_dist_loss * \
+            loss_cfgs.LOSS_WEIGHTS['ulb_cls_dist_weight']
 
         tb_dict = {
             # For consistency with other losses
@@ -221,7 +242,8 @@ class RoIHeadTemplate(nn.Module):
 
         reg_valid_mask = forward_ret_dict['reg_valid_mask'].view(-1)
         gt_boxes3d_ct = forward_ret_dict['gt_of_rois'][..., 0:code_size]
-        gt_of_rois_src = forward_ret_dict['gt_of_rois_src'][..., 0:code_size].view(-1, code_size)
+        gt_of_rois_src = forward_ret_dict['gt_of_rois_src'][...,
+                                                            0:code_size].view(-1, code_size)
         rcnn_reg = forward_ret_dict['rcnn_reg']  # (rcnn_batch_size, C)
         roi_boxes3d = forward_ret_dict['rois']
         rcnn_batch_size = gt_boxes3d_ct.view(-1, code_size).shape[0]
@@ -246,13 +268,15 @@ class RoIHeadTemplate(nn.Module):
             )  # [B, M, 7]
             if scalar:
                 rcnn_loss_reg = (rcnn_loss_reg.view(rcnn_batch_size, -1) * fg_mask.unsqueeze(dim=-1).float()).sum() \
-                                / max(fg_sum, 1)
+                    / max(fg_sum, 1)
             else:
                 fg_sum_ = fg_mask.reshape(batch_size, -1).long().sum(-1)
                 rcnn_loss_reg = (rcnn_loss_reg.view(rcnn_batch_size, -1) *
                                  fg_mask.unsqueeze(dim=-1).float()).reshape(batch_size, -1).sum(-1) / torch.clamp(fg_sum_.float(), min=1.0)
-            rcnn_loss_reg = rcnn_loss_reg * loss_cfgs.LOSS_WEIGHTS['rcnn_reg_weight']
-            tb_dict['rcnn_loss_reg'] = rcnn_loss_reg.item() if scalar else rcnn_loss_reg
+            rcnn_loss_reg = rcnn_loss_reg * \
+                loss_cfgs.LOSS_WEIGHTS['rcnn_reg_weight']
+            tb_dict['rcnn_loss_reg'] = rcnn_loss_reg.item(
+            ) if scalar else rcnn_loss_reg
 
             if loss_cfgs.CORNER_LOSS_REGULARIZATION and fg_sum > 0:
                 split_size = []
@@ -269,7 +293,8 @@ class RoIHeadTemplate(nn.Module):
                 roi_xyz = fg_roi_boxes3d[:, :, 0:3].view(-1, 3)
                 batch_anchors[:, :, 0:3] = 0
                 rcnn_boxes3d = self.box_coder.decode_torch(
-                    fg_rcnn_reg.view(batch_anchors.shape[0], -1, code_size), batch_anchors
+                    fg_rcnn_reg.view(
+                        batch_anchors.shape[0], -1, code_size), batch_anchors
                 ).view(-1, code_size)
 
                 rcnn_boxes3d = common_utils.rotate_points_along_z(
@@ -286,12 +311,15 @@ class RoIHeadTemplate(nn.Module):
                 else:
                     loss_corner = torch.split(loss_corner, split_size, dim=0)
                     zero = torch.zeros([1], device=fg_mask.device)
-                    loss_corner = [x.mean(dim=0, keepdim=True) if len(x) > 0 else zero for x in loss_corner]
+                    loss_corner = [x.mean(dim=0, keepdim=True) if len(
+                        x) > 0 else zero for x in loss_corner]
                     loss_corner = torch.cat(loss_corner, dim=0)
-                loss_corner = loss_corner * loss_cfgs.LOSS_WEIGHTS['rcnn_corner_weight']
+                loss_corner = loss_corner * \
+                    loss_cfgs.LOSS_WEIGHTS['rcnn_corner_weight']
 
                 rcnn_loss_reg += loss_corner
-                tb_dict['rcnn_loss_corner'] = loss_corner.item() if scalar else loss_corner
+                tb_dict['rcnn_loss_corner'] = loss_corner.item(
+                ) if scalar else loss_corner
         else:
             raise NotImplementedError
 
@@ -303,38 +331,49 @@ class RoIHeadTemplate(nn.Module):
         rcnn_cls_labels = forward_ret_dict['rcnn_cls_labels'].view(-1)
         if loss_cfgs.CLS_LOSS == 'BinaryCrossEntropy':
             rcnn_cls_flat = rcnn_cls.view(-1)
-            batch_loss_cls = F.binary_cross_entropy(torch.sigmoid(rcnn_cls_flat), rcnn_cls_labels.float(), reduction='none')
+            batch_loss_cls = F.binary_cross_entropy(torch.sigmoid(
+                rcnn_cls_flat), rcnn_cls_labels.float(), reduction='none')
             cls_valid_mask = (rcnn_cls_labels >= 0).float()
             if scalar:
-                rcnn_loss_cls = (batch_loss_cls * cls_valid_mask).sum() / torch.clamp(cls_valid_mask.sum(), min=1.0)
+                rcnn_loss_cls = (batch_loss_cls * cls_valid_mask).sum() / \
+                    torch.clamp(cls_valid_mask.sum(), min=1.0)
                 rcnn_acc_cls = (torch.abs(torch.sigmoid(rcnn_cls_flat) - rcnn_cls_labels) * cls_valid_mask).sum() \
-                               / torch.clamp(cls_valid_mask.sum(), min=1.0)
+                    / torch.clamp(cls_valid_mask.sum(), min=1.0)
             else:
                 batch_size = forward_ret_dict['rcnn_cls_labels'].shape[0]
                 batch_loss_cls = batch_loss_cls.reshape(batch_size, -1)
                 cls_valid_mask = cls_valid_mask.reshape(batch_size, -1)
                 if 'rcnn_cls_weights' in forward_ret_dict:
                     rcnn_cls_weights = forward_ret_dict['rcnn_cls_weights']
-                    rcnn_loss_cls_norm = (cls_valid_mask * rcnn_cls_weights).sum(-1)
-                    rcnn_loss_cls = (batch_loss_cls * cls_valid_mask * rcnn_cls_weights).sum(-1) / torch.clamp(rcnn_loss_cls_norm, min=1.0)
+                    rcnn_loss_cls_norm = (
+                        cls_valid_mask * rcnn_cls_weights).sum(-1)
+                    rcnn_loss_cls = (batch_loss_cls * cls_valid_mask *
+                                     rcnn_cls_weights).sum(-1) / torch.clamp(rcnn_loss_cls_norm, min=1.0)
                 else:
-                    rcnn_loss_cls = (batch_loss_cls * cls_valid_mask).sum(-1) / torch.clamp(cls_valid_mask.sum(-1), min=1.0)
-                rcnn_acc_cls = torch.abs(torch.sigmoid(rcnn_cls_flat) - rcnn_cls_labels).reshape(batch_size, -1)
-                rcnn_acc_cls = (rcnn_acc_cls * cls_valid_mask).sum(-1) / torch.clamp(cls_valid_mask.sum(-1), min=1.0)
+                    rcnn_loss_cls = (batch_loss_cls * cls_valid_mask).sum(-1) / \
+                        torch.clamp(cls_valid_mask.sum(-1), min=1.0)
+                rcnn_acc_cls = torch.abs(torch.sigmoid(
+                    rcnn_cls_flat) - rcnn_cls_labels).reshape(batch_size, -1)
+                rcnn_acc_cls = (rcnn_acc_cls * cls_valid_mask).sum(-1) / \
+                    torch.clamp(cls_valid_mask.sum(-1), min=1.0)
         elif loss_cfgs.CLS_LOSS == 'CrossEntropy':
-            batch_loss_cls = F.cross_entropy(rcnn_cls, rcnn_cls_labels, reduction='none', ignore_index=-1)
+            batch_loss_cls = F.cross_entropy(
+                rcnn_cls, rcnn_cls_labels, reduction='none', ignore_index=-1)
             cls_valid_mask = (rcnn_cls_labels >= 0).float()
             if scalar:
-                rcnn_loss_cls = (batch_loss_cls * cls_valid_mask).sum() / torch.clamp(cls_valid_mask.sum(), min=1.0)
+                rcnn_loss_cls = (batch_loss_cls * cls_valid_mask).sum() / \
+                    torch.clamp(cls_valid_mask.sum(), min=1.0)
             else:
                 batch_size = forward_ret_dict['rcnn_cls_labels'].shape[0]
                 batch_loss_cls = batch_loss_cls.reshape(batch_size, -1)
                 cls_valid_mask = cls_valid_mask.reshape(batch_size, -1)
-                rcnn_loss_cls = (batch_loss_cls * cls_valid_mask).sum(-1) / torch.clamp(cls_valid_mask.sum(-1), min=1.0)
+                rcnn_loss_cls = (batch_loss_cls * cls_valid_mask).sum(-1) / \
+                    torch.clamp(cls_valid_mask.sum(-1), min=1.0)
         else:
             raise NotImplementedError
 
-        rcnn_loss_cls = rcnn_loss_cls * loss_cfgs.LOSS_WEIGHTS['rcnn_cls_weight']
+        rcnn_loss_cls = rcnn_loss_cls * \
+            loss_cfgs.LOSS_WEIGHTS['rcnn_cls_weight']
         tb_dict = {
             'rcnn_loss_cls': rcnn_loss_cls.item() if scalar else rcnn_loss_cls,
             'rcnn_acc_cls': rcnn_acc_cls.item() if scalar else rcnn_acc_cls
@@ -343,10 +382,12 @@ class RoIHeadTemplate(nn.Module):
 
     def _get_reliability_weight(self, unlabeled_inds):
         # Initialize reliability weights with 1s
-        self.forward_ret_dict['rcnn_cls_weights'] = torch.ones_like(self.forward_ret_dict['rcnn_cls_labels'])
+        self.forward_ret_dict['rcnn_cls_weights'] = torch.ones_like(
+            self.forward_ret_dict['rcnn_cls_labels'])
 
         # Compute the background scores from the teacher based on student proposals
-        rcnn_bg_score_teacher = 1 - self.forward_ret_dict['rcnn_cls_score_teacher']
+        rcnn_bg_score_teacher = 1 - \
+            self.forward_ret_dict['rcnn_cls_score_teacher']
         unlabeled_rcnn_cls_weights = self.forward_ret_dict['rcnn_cls_weights'][unlabeled_inds]
         ul_interval_mask = self.forward_ret_dict['interval_mask'][unlabeled_inds]
         ulb_fg_mask = self.forward_ret_dict['rcnn_cls_labels'][unlabeled_inds] == 1
@@ -357,20 +398,25 @@ class RoIHeadTemplate(nn.Module):
         # Use Teacher's FG scores instead of BG scores for UCs (its the reverse of "all")
         # (assuming, we have more FPs > FNs in UC)
         elif self.model_cfg['LOSS_CONFIG']['UL_RCNN_CLS_WEIGHT_TYPE'] == 'rev_uc':
-            unlabeled_rcnn_cls_weights[ul_interval_mask] = self.forward_ret_dict['rcnn_cls_score_teacher'][unlabeled_inds][ul_interval_mask]
+            unlabeled_rcnn_cls_weights[ul_interval_mask] = self.forward_ret_dict[
+                'rcnn_cls_score_teacher'][unlabeled_inds][ul_interval_mask]
 
         elif self.model_cfg['LOSS_CONFIG']['UL_RCNN_CLS_WEIGHT_TYPE'] == 'interval-only':
-            unlabeled_rcnn_cls_weights = torch.zeros_like(self.forward_ret_dict['rcnn_cls_labels'][unlabeled_inds])
+            unlabeled_rcnn_cls_weights = torch.zeros_like(
+                self.forward_ret_dict['rcnn_cls_labels'][unlabeled_inds])
             unlabeled_rcnn_cls_weights[ul_interval_mask] = rcnn_bg_score_teacher[unlabeled_inds][ul_interval_mask]
         elif self.model_cfg['LOSS_CONFIG']['UL_RCNN_CLS_WEIGHT_TYPE'] == 'bg':
             ulb_bg_mask = self.forward_ret_dict['rcnn_cls_labels'][unlabeled_inds] == 0
             unlabeled_rcnn_cls_weights[ulb_bg_mask] = rcnn_bg_score_teacher[unlabeled_inds][ulb_bg_mask]
         elif self.model_cfg['LOSS_CONFIG']['UL_RCNN_CLS_WEIGHT_TYPE'] == 'fg':
-            unlabeled_rcnn_cls_weights[ulb_fg_mask] = self.forward_ret_dict['rcnn_cls_score_teacher'][unlabeled_inds][ulb_fg_mask]
+            unlabeled_rcnn_cls_weights[ulb_fg_mask] = self.forward_ret_dict[
+                'rcnn_cls_score_teacher'][unlabeled_inds][ulb_fg_mask]
 
-        elif self.model_cfg['LOSS_CONFIG']['UL_RCNN_CLS_WEIGHT_TYPE'] == 'ignore_interval':  # Naive baseline
+        # Naive baseline
+        elif self.model_cfg['LOSS_CONFIG']['UL_RCNN_CLS_WEIGHT_TYPE'] == 'ignore_interval':
             unlabeled_rcnn_cls_weights[ul_interval_mask] = 0
-        elif self.model_cfg['LOSS_CONFIG']['UL_RCNN_CLS_WEIGHT_TYPE'] == 'ignore-bg':  # Naive baseline
+        # Naive baseline
+        elif self.model_cfg['LOSS_CONFIG']['UL_RCNN_CLS_WEIGHT_TYPE'] == 'ignore-bg':
             unlabeled_rcnn_cls_weights[ulb_bg_mask] = 0
         elif self.model_cfg['LOSS_CONFIG']['UL_RCNN_CLS_WEIGHT_TYPE'] == 'full-ema':
             unlabeled_rcnn_cls_weights = rcnn_bg_score_teacher[unlabeled_inds]
@@ -381,23 +427,27 @@ class RoIHeadTemplate(nn.Module):
             unlabeled_rcnn_cls_weights[~ulb_fg_mask] = rcnn_bg_score_teacher[unlabeled_inds][~ulb_fg_mask]
         # Use 1s for FG mask, suppress false positives from UC, false negatives from BG regions
         elif self.model_cfg['LOSS_CONFIG']['UL_RCNN_CLS_WEIGHT_TYPE'] == 'rev_uc-bg':
-            unlabeled_rcnn_cls_weights[ul_interval_mask] = self.forward_ret_dict['rcnn_cls_score_teacher'][unlabeled_inds][ul_interval_mask]
+            unlabeled_rcnn_cls_weights[ul_interval_mask] = self.forward_ret_dict[
+                'rcnn_cls_score_teacher'][unlabeled_inds][ul_interval_mask]
             ulb_bg_mask = self.forward_ret_dict['rcnn_cls_labels'][unlabeled_inds] == 0
             unlabeled_rcnn_cls_weights[ulb_bg_mask] = rcnn_bg_score_teacher[unlabeled_inds][ulb_bg_mask]
 
         # Use teacher's FG scores for FG mask, teacher's BG scores for UC+BG mask
         elif self.model_cfg['LOSS_CONFIG']['UL_RCNN_CLS_WEIGHT_TYPE'] == 'fg-uc-bg':
             ulb_fg_mask = self.forward_ret_dict['rcnn_cls_labels'][unlabeled_inds] == 1
-            unlabeled_rcnn_cls_weights[ulb_fg_mask] = self.forward_ret_dict['rcnn_cls_score_teacher'][unlabeled_inds][ulb_fg_mask]
+            unlabeled_rcnn_cls_weights[ulb_fg_mask] = self.forward_ret_dict[
+                'rcnn_cls_score_teacher'][unlabeled_inds][ulb_fg_mask]
             unlabeled_rcnn_cls_weights[~ulb_fg_mask] = rcnn_bg_score_teacher[unlabeled_inds][~ulb_fg_mask]
         # Use teacher's FG scores for FG+UC mask, teacher's BG scores for BG mask
         elif self.model_cfg['LOSS_CONFIG']['UL_RCNN_CLS_WEIGHT_TYPE'] == 'fg-rev_uc-bg':
-            unlabeled_rcnn_cls_weights[~ulb_bg_mask] = self.forward_ret_dict['rcnn_cls_score_teacher'][unlabeled_inds][~ulb_bg_mask]
+            unlabeled_rcnn_cls_weights[~ulb_bg_mask] = self.forward_ret_dict[
+                'rcnn_cls_score_teacher'][unlabeled_inds][~ulb_bg_mask]
             unlabeled_rcnn_cls_weights[ulb_bg_mask] = rcnn_bg_score_teacher[unlabeled_inds][ulb_bg_mask]
 
         # Use 1s for UC, FG scores for FG, BG scores for BG
         elif self.model_cfg['LOSS_CONFIG']['UL_RCNN_CLS_WEIGHT_TYPE'] == 'fg-bg':
-            unlabeled_rcnn_cls_weights[ulb_fg_mask] = self.forward_ret_dict['rcnn_cls_score_teacher'][unlabeled_inds][ulb_fg_mask]
+            unlabeled_rcnn_cls_weights[ulb_fg_mask] = self.forward_ret_dict[
+                'rcnn_cls_score_teacher'][unlabeled_inds][ulb_fg_mask]
             unlabeled_rcnn_cls_weights[ulb_bg_mask] = rcnn_bg_score_teacher[unlabeled_inds][ulb_bg_mask]
 
         # Use cos scores for UC, 1s for FG and BG
@@ -407,14 +457,19 @@ class RoIHeadTemplate(nn.Module):
         # Use cos scores for FG,UC, 1 - cos_scores for BG
         elif self.model_cfg['LOSS_CONFIG']['UL_RCNN_CLS_WEIGHT_TYPE'] == 'cos-uc-bg':
             unlabeled_rcnn_cls_weights[ul_interval_mask] = self.forward_ret_dict['cos_scores'][unlabeled_inds][ul_interval_mask]
-            unlabeled_rcnn_cls_weights[ulb_bg_mask] = 1 - self.forward_ret_dict['cos_scores'][unlabeled_inds][ulb_bg_mask]
-            unlabeled_rcnn_cls_weights[ulb_fg_mask] = torch.clamp(self.forward_ret_dict['cos_scores'][unlabeled_inds][ulb_fg_mask]+0.22,max=1.0)
+            unlabeled_rcnn_cls_weights[ulb_bg_mask] = 1 - \
+                self.forward_ret_dict['cos_scores'][unlabeled_inds][ulb_bg_mask]
+            unlabeled_rcnn_cls_weights[ulb_fg_mask] = torch.clamp(
+                self.forward_ret_dict['cos_scores'][unlabeled_inds][ulb_fg_mask]+0.22, max=1.0)
 
         # Use cos scores for FG, 1-cos scores for UC and BG
         elif self.model_cfg['LOSS_CONFIG']['UL_RCNN_CLS_WEIGHT_TYPE'] == 'cos-rev-uc-bg':
-            unlabeled_rcnn_cls_weights[ul_interval_mask] = 1 - self.forward_ret_dict['cos_scores'][unlabeled_inds][ul_interval_mask]
-            unlabeled_rcnn_cls_weights[ulb_bg_mask] = 1 - self.forward_ret_dict['cos_scores'][unlabeled_inds][ulb_bg_mask]
-            unlabeled_rcnn_cls_weights[ulb_fg_mask] = torch.clamp((self.forward_ret_dict['cos_scores'][unlabeled_inds][ulb_fg_mask]+0.22),max=1.0)
+            unlabeled_rcnn_cls_weights[ul_interval_mask] = 1 - \
+                self.forward_ret_dict['cos_scores'][unlabeled_inds][ul_interval_mask]
+            unlabeled_rcnn_cls_weights[ulb_bg_mask] = 1 - \
+                self.forward_ret_dict['cos_scores'][unlabeled_inds][ulb_bg_mask]
+            unlabeled_rcnn_cls_weights[ulb_fg_mask] = torch.clamp(
+                (self.forward_ret_dict['cos_scores'][unlabeled_inds][ulb_fg_mask]+0.22), max=1.0)
 
         else:
             raise ValueError
@@ -425,11 +480,13 @@ class RoIHeadTemplate(nn.Module):
         tb_dict = {} if tb_dict is None else tb_dict
 
         if not self.model_cfg.ENABLE_SOFT_TEACHER or self.model_cfg.TARGET_CONFIG.DISABLE_ST_WEIGHTS:
-            self.forward_ret_dict['rcnn_cls_weights'] = torch.ones_like(self.forward_ret_dict['rcnn_cls_labels'])
+            self.forward_ret_dict['rcnn_cls_weights'] = torch.ones_like(
+                self.forward_ret_dict['rcnn_cls_labels'])
         else:
             # Get reliability weights for unlabeled samples
             unlabeled_inds = self.forward_ret_dict['unlabeled_inds']
-            self.forward_ret_dict['rcnn_cls_weights'][unlabeled_inds] = self._get_reliability_weight(unlabeled_inds)
+            self.forward_ret_dict['rcnn_cls_weights'][unlabeled_inds] = self._get_reliability_weight(
+                unlabeled_inds)
 
         if self.model_cfg.get("ENABLE_EVAL", None):
             # update_metrics(self.forward_ret_dict, mask_type='reg')
@@ -437,9 +494,12 @@ class RoIHeadTemplate(nn.Module):
             if metrics_pred_types is not None:
                 update_metrics(self.forward_ret_dict, mask_type='cls')
 
-        rcnn_loss_cls, cls_tb_dict = self.get_box_cls_layer_loss(self.forward_ret_dict, scalar=scalar)
-        rcnn_loss_reg, reg_tb_dict = self.get_box_reg_layer_loss(self.forward_ret_dict, scalar=scalar)
-        ulb_loss_cls_dist, cls_dist_dict = self.get_ulb_cls_dist_loss(self.forward_ret_dict)
+        rcnn_loss_cls, cls_tb_dict = self.get_box_cls_layer_loss(
+            self.forward_ret_dict, scalar=scalar)
+        rcnn_loss_reg, reg_tb_dict = self.get_box_reg_layer_loss(
+            self.forward_ret_dict, scalar=scalar)
+        ulb_loss_cls_dist, cls_dist_dict = self.get_ulb_cls_dist_loss(
+            self.forward_ret_dict)
         rcnn_loss = rcnn_loss_cls + rcnn_loss_reg + ulb_loss_cls_dist
 
         tb_dict.update(cls_tb_dict)
@@ -472,7 +532,8 @@ class RoIHeadTemplate(nn.Module):
         local_rois = rois.clone().detach()
         local_rois[:, :, 0:3] = 0
 
-        batch_box_preds = self.box_coder.decode_torch(batch_box_preds, local_rois).view(-1, code_size)
+        batch_box_preds = self.box_coder.decode_torch(
+            batch_box_preds, local_rois).view(-1, code_size)
 
         batch_box_preds = common_utils.rotate_points_along_z(
             batch_box_preds.unsqueeze(dim=1), roi_ry
