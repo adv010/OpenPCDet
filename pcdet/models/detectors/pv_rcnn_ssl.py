@@ -67,12 +67,12 @@ class PVRCNN_SSL(Detector3DTemplate):
             metrics_registry.register(tag=metrics_configs["NAME"], dataset=self.dataset, **metrics_configs)
 
         vals_to_store = ['iou_roi_pl', 'iou_roi_gt', 'pred_scores', 'teacher_pred_scores',
-                         'weights', 'roi_scores', 'num_points_in_roi', 'class_labels', 'iteration','lbl_inst_freq', 'positive_pairs_duped', 'negative_pairs_duped']
+                         'weights', 'roi_scores', 'num_points_in_roi', 'class_labels', 'iteration','lbl_inst_freq', 'positive_pairs', 'negative_pairs']
         
         self.val_dict = {val: [] for val in vals_to_store}
-        self.val_dict['lbl_inst_freq'] = [0,0,0]
-        self.val_dict['positive_pairs_duped'] = [0,0,0]
-        self.val_dict['negative_pairs_duped'] = [1,1,1]
+        self.val_dict['lbl_inst_freq'] = [0,0]
+        self.val_dict['positive_pairs'] = [0,0]
+        self.val_dict['negative_pairs'] = [1,1]
 
 
     @staticmethod
@@ -421,6 +421,13 @@ class PVRCNN_SSL(Detector3DTemplate):
         labels_wa =labels_wa[sorted_wa]
         shared_ft_sa = shared_ft_sa[sorted_sa]
         shared_ft_wa = shared_ft_wa[sorted_wa]
+
+        pedcyc_idx = labels_sa!=1  #only ped and cyc indices considered
+        labels_sa = labels_sa[pedcyc_idx]
+        labels_wa =labels_wa[pedcyc_idx]
+        shared_ft_sa = shared_ft_sa[pedcyc_idx]
+        shared_ft_wa = shared_ft_wa[pedcyc_idx]
+
         return labels_sa,labels_wa,instance_idx_sa,instance_idx_wa,shared_ft_sa, shared_ft_wa
 
 
@@ -449,10 +456,10 @@ class PVRCNN_SSL(Detector3DTemplate):
         assert torch.equal(instance_idx_sa, instance_idx_wa)
         assert torch.equal(labels_sa, labels_wa)   # Problem : Fails for Ulb! Same instance id , diff label for strong and weak aug ulb 
         # Record stats
-        batch_dict['lbl_inst_freq'] =  torch.bincount(labels_sa.view(-1).int().detach(),minlength = 4).tolist()[1:]       #Record freq of each class in batch
-        batch_dict['positive_pairs_duped'] = [(2*n-1) * 2*n for n in batch_dict['lbl_inst_freq']]
-        batch_dict['negative_pairs_duped'] = [sum(batch_dict['lbl_inst_freq']) - k  for k in batch_dict['lbl_inst_freq']]
-        batch_dict['negative_pairs_duped'] = [4*k*i for k,i in zip(batch_dict['negative_pairs_duped'],batch_dict['lbl_inst_freq'])]
+        batch_dict['lbl_inst_freq'] =  torch.bincount(labels_sa.view(-1).int().detach(),minlength = 2).tolist()[1:]       #Record freq of each class in batch
+        batch_dict['positive_pairs'] = [(2*n-1) * 2*n for n in batch_dict['lbl_inst_freq']]
+        batch_dict['negative_pairs'] = [sum(batch_dict['lbl_inst_freq']) - k  for k in batch_dict['lbl_inst_freq']]
+        batch_dict['negative_pairs'] = [4*k*i for k,i in zip(batch_dict['negative_pairs'],batch_dict['lbl_inst_freq'])]
 
 
         combined_shared_features = torch.cat([shared_ft_sa.unsqueeze(1), shared_ft_wa.unsqueeze(1)], dim=1) # B*N,num_pairs,channel_dim
@@ -472,6 +479,10 @@ class PVRCNN_SSL(Detector3DTemplate):
         plt.savefig("mask.png")
         plt.clf()
         '''
+        # labels_copy =
+        # for i in range(3):  # Assuming you have 3 classes, modify accordingly
+        #     class_indices = (labels_sa == i)
+        
         contrast_feature = torch.cat(torch.unbind(combined_shared_features, dim=1), dim=0) 
         contrast_feature = F.normalize(contrast_feature.view(-1,combined_shared_features.shape[-1])) # normalized features before masking. original code does it earlier : https://github.com/HobbitLong/SupContrast/blob/ae5da977b0abd4bdc1a6fd4ec4ba2c3655a1879f/networks/resnet_big.py#L185C51-L185C51
         # compute logits
@@ -618,9 +629,16 @@ class PVRCNN_SSL(Detector3DTemplate):
                     bincount_values = batch_dict['lbl_inst_freq']
                     # cumu_values = [a + b for a, b in zip(self.val_dict['lbl_inst_freq'][-3:], bincount_values)]
                     self.val_dict['lbl_inst_freq'].extend(bincount_values)
-                    self.val_dict['positive_pairs_duped'].extend(batch_dict['positive_pairs_duped'])
-                    self.val_dict['negative_pairs_duped'].extend(batch_dict['negative_pairs_duped'])
-
+                    self.val_dict['positive_pairs'].extend(batch_dict['positive_pairs'])
+                    self.val_dict['negative_pairs'].extend(batch_dict['negative_pairs'])
+                    
+                    # self.val_dict['pos_pairs_car'] = [self.val_dict['positive_pairs'][i] for i in range(len(self.val_dict['positive_pairs'])) if i%3==0]
+                    self.val_dict['pos_pairs_ped'] = [self.val_dict['positive_pairs'][i] for i in range(len(self.val_dict['positive_pairs'])) if i%3==1]
+                    self.val_dict['pos_pairs_cyc'] = [self.val_dict['positive_pairs'][i] for i in range(len(self.val_dict['positive_pairs'])) if i%3==2]
+                    
+                    # self.val_dict['neg_pairs_car'] = [self.val_dict['negative_pairs'][i] for i in range(len(self.val_dict['negative_pairs'])) if i%3==0]
+                    self.val_dict['neg_pairs_ped'] = [self.val_dict['negative_pairs'][i] for i in range(len(self.val_dict['negative_pairs'])) if i%3==1]
+                    self.val_dict['neg_pairs_cyc'] = [self.val_dict['negative_pairs'][i] for i in range(len(self.val_dict['negative_pairs'])) if i%3==2]
 
         # replace old pickle data (if exists) with updated one
         output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
