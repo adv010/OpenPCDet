@@ -20,7 +20,7 @@ class PVRCNNHead(RoIHeadTemplate):
 
         GRID_SIZE = self.model_cfg.ROI_GRID_POOL.GRID_SIZE
         pre_channel = GRID_SIZE * GRID_SIZE * GRID_SIZE * num_c_out
-
+        pre_channel2 = GRID_SIZE * GRID_SIZE * GRID_SIZE * num_c_out
         shared_fc_list = []
         for k in range(0, self.model_cfg.SHARED_FC.__len__()):
             shared_fc_list.extend([
@@ -34,6 +34,18 @@ class PVRCNNHead(RoIHeadTemplate):
                 shared_fc_list.append(nn.Dropout(self.model_cfg.DP_RATIO))
 
         self.shared_fc_layer = nn.Sequential(*shared_fc_list)
+
+        projected_fc_list = []
+        for k in range(0, self.model_cfg.PROJECTED_FC.__len__()):
+            projected_fc_list.extend([
+                nn.Conv1d(pre_channel2, self.model_cfg.PROJECTED_FC[k], kernel_size=1, bias=False),
+                nn.BatchNorm1d(self.model_cfg.PROJECTED_FC[k]),
+                nn.ReLU()
+            ])
+            pre_channel2 = self.model_cfg.PROJECTED_FC[k]
+            if k != self.model_cfg.PROJECTED_FC.__len__() - 1 and self.model_cfg.DP_RATIO > 0:
+                projected_fc_list.append(nn.Dropout(self.model_cfg.DP_RATIO))
+        self.projector_fc_layer = nn.Sequential(*projected_fc_list) # Using this layer's projections to calculate instance wise contrastive loss on
 
         self.cls_layers = self.make_fc_layers(
             input_channels=pre_channel, output_channels=self.num_class, fc_list=self.model_cfg.CLS_FC

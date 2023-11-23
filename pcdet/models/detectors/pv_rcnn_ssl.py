@@ -67,7 +67,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             metrics_registry.register(tag=metrics_configs["NAME"], dataset=self.dataset, **metrics_configs)
 
         vals_to_store = ['iou_roi_pl', 'iou_roi_gt', 'pred_scores', 'teacher_pred_scores',
-                         'weights', 'roi_scores', 'num_points_in_roi', 'class_labels', 'iteration','lbl_inst_freq', 'positive_pairs', 'negative_pairs']
+                         'weights', 'roi_scores', 'num_points_in_roi', 'class_labels', 'iteration','lbl_inst_freq', 'positive_pairs', 'negative_pairs','positive_pairs_duped','negative_pairs_duped','pos_pairs_ped','pos_pairs_cyc','neg_pairs_ped', 'neg_pairs_cyc']
         
         self.val_dict = {val: [] for val in vals_to_store}
         self.val_dict['lbl_inst_freq'] = [0,0]
@@ -661,14 +661,14 @@ class PVRCNN_SSL(Detector3DTemplate):
                     bincount_values = batch_dict['lbl_inst_freq']
                     # cumu_values = [a + b for a, b in zip(self.val_dict['lbl_inst_freq'][-3:], bincount_values)]
                     self.val_dict['lbl_inst_freq'].extend(bincount_values)
-                    self.val_dict['positive_pairs_duped'].extend(batch_dict['positive_pairs_duped'])
-                    self.val_dict['negative_pairs_duped'].extend(batch_dict['negative_pairs_duped'])
+                    # self.val_dict['positive_pairs_duped'].extend(batch_dict['positive_pairs_duped'])
+                    # self.val_dict['negative_pairs_duped'].extend(batch_dict['negative_pairs_duped'])
 
-                    self.val_dict['pos_pairs_ped'] = [self.val_dict['positive_pairs'][i] for i in range(len(self.val_dict['positive_pairs'])) if i%3==1]
-                    self.val_dict['pos_pairs_cyc'] = [self.val_dict['positive_pairs'][i] for i in range(len(self.val_dict['positive_pairs'])) if i%3==2]
+                    # self.val_dict['pos_pairs_ped'] = [self.val_dict['positive_pairs'][i] for i in range(len(self.val_dict['positive_pairs'])) if i%3==1]
+                    # self.val_dict['pos_pairs_cyc'] = [self.val_dict['positive_pairs'][i] for i in range(len(self.val_dict['positive_pairs'])) if i%3==2]
 
-                    self.val_dict['neg_pairs_ped'] = [self.val_dict['negative_pairs'][i] for i in range(len(self.val_dict['negative_pairs'])) if i%3==1]
-                    self.val_dict['neg_pairs_cyc'] = [self.val_dict['negative_pairs'][i] for i in range(len(self.val_dict['negative_pairs'])) if i%3==2]
+                    # self.val_dict['neg_pairs_ped'] = [self.val_dict['negative_pairs'][i] for i in range(len(self.val_dict['negative_pairs'])) if i%3==1]
+                    # self.val_dict['neg_pairs_cyc'] = [self.val_dict['negative_pairs'][i] for i in range(len(self.val_dict['negative_pairs'])) if i%3==2]
 
                     # self.val_dict['unscaled_instloss_car'].extend(batch_dict['unscaled_instloss_car'])
                     # self.val_dict['unscaled_instloss_ped'].extend(batch_dict['unscaled_instloss_ped'])
