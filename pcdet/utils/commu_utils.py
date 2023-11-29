@@ -37,6 +37,7 @@ def synchronize():
     Helper function to synchronize (barrier) among all processes when
     using distributed training
     """
+    print("utils/synchronize called")
     if not dist.is_available():
         return
     if not dist.is_initialized():
@@ -66,17 +67,27 @@ def all_gather(data):
         storage = torch.ByteStorage.from_buffer(buffer)
         tensor = torch.ByteTensor(storage).to("cuda")
     else:
+        print("new data")
         origin_size = data.size()
+        # print("L70origin_size", origin_size)
         tensor = data.reshape(-1)
+        # print("L72tensor_shape",tensor.shape)
 
     tensor_type = tensor.dtype
+    print("L74tensor_type",tensor_type)
 
     # obtain Tensor size of each rank
-    local_size = torch.LongTensor([tensor.numel()]).to("cuda")
-    size_list = [torch.LongTensor([0]).to("cuda") for _ in range(world_size)]
+    local_size = torch.tensor([tensor.numel()]).to("cuda")
+    # print("local_size",local_size)
+    size_list = [torch.tensor([0]).to("cuda") for _ in range(world_size)]
+    synchronize()
     dist.all_gather(size_list, local_size)
+    synchronize()
+    print("Gathered Size_list", size_list)
     size_list = [int(size.item()) for size in size_list]
+    print("Size_list", size_list)
     max_size = max(size_list)
+    # print("max_size",max_size)
 
     # receiving Tensor from all ranks
     # we pad the tensor because torch all_gather does not support
@@ -87,7 +98,7 @@ def all_gather(data):
     if local_size != max_size:
         padding = torch.FloatTensor(size=(max_size - local_size,)).cuda().to(tensor_type)
         tensor = torch.cat((tensor, padding), dim=0)
-    dist.all_gather(tensor_list, tensor)
+
 
     data_list = []
     for size, tensor in zip(size_list, tensor_list):
@@ -167,6 +178,56 @@ def all_reduce(data, op="sum", average=False):
             return reduced_data
     return data
 
+
+# def gather_tensors(tensor,labels=False):
+#     """
+#     Returns the gathered tensor to all GPUs in DDP else returns the tensor as such
+#     dist.gather_all needs the gathered tensors to be of same size.
+#     We get the sizes of the tensors first, zero pad them to match the size
+#     Then gather and filter the padding
+
+#     Args:
+#         tensor: tensor to be gathered
+#         labels: bool True if the tensor represents label information TODO:Deepika Remove this arg and make function tensor agnostic 
+#     """
+#     if labels:
+#         assert tensor.ndim == 1,"labels should be of shape 1"
+#     else:
+#         assert tensor.ndim == 3,"features should be of shape N,1,256"
+
+#     if dist.is_initialized(): # check if dist mode is initialized
+#         # Determine sizes first
+#         local_size = torch.tensor(tensor.size(), device=tensor.device)
+#         WORLD_SIZE = dist.get_world_size()
+#         all_sizes = [torch.zeros_like(local_size) for _ in range(WORLD_SIZE)]
+#         dist.barrier() 
+#         dist.all_gather(all_sizes,local_size)
+#         dist.barrier()
+        
+#         # make zero-padded version https://stackoverflow.com/questions/71433507/pytorch-python-distributed-multiprocessing-gather-concatenate-tensor-arrays-of
+#         max_length = max([size[0] for size in all_sizes])
+#         if max_length != local_size[0].item():
+#             diff = max_length - local_size[0].item()
+#             pad_size =[diff.item()] #pad with zeros 
+#             if local_size.ndim >= 1:
+#                 pad_size.extend(dimension.item() for dimension in local_size[1:])
+#             padding = torch.zeros(pad_size, device=tensor.device, dtype=tensor.dtype)
+#             tensor = torch.cat((tensor,padding))
+        
+#         all_tensors_padded = [torch.zeros_like(tensor) for _ in range(WORLD_SIZE)]
+#         dist.barrier()
+#         dist.all_gather(all_tensors_padded,tensor)
+#         dist.barrier()
+#         gathered_tensor = torch.cat(all_tensors_padded)
+#         if gathered_tensor.ndim == 1: # diff filtering mechanism for labels TODO:Deepika make this tensor agnostic
+#             assert gathered_tensor.ndim == 1, "Label dimension should be N"
+#             non_zero_mask = gathered_tensor > 0
+#         else:
+#             non_zero_mask = torch.any(gathered_tensor!=0,dim=-1).squeeze()
+#         gathered_tensor = gathered_tensor[non_zero_mask]
+#         return gathered_tensor
+#     else:
+#         return tensor
 
 @torch.no_grad()
 def concat_all_gather(tensor):

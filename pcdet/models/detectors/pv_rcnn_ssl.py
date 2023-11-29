@@ -16,7 +16,8 @@ from pcdet.utils.prototype_utils import feature_bank_registry
 # from tools.visual_utils import open3d_vis_utils as V
 from collections import defaultdict
 from pcdet.utils.weighting_methods import build_thresholding_method
-
+import torch.distributed as dist
+from pcdet.utils.commu_utils import all_gather,gather_tensors,synchronize,get_rank
 class DynamicThreshRegistry(object):
     def __init__(self, **kwargs):
         self._tag_metrics = {}
@@ -51,6 +52,8 @@ class PVRCNN_SSL(Detector3DTemplate):
         self.add_module('pv_rcnn', self.pv_rcnn)
         self.add_module('pv_rcnn_ema', self.pv_rcnn_ema)
         self.accumulated_itr = 0
+        self.world_size = self.model_cfg['TOTAL_GPUS']
+
 
         self.thresh = model_cfg.THRESH
         self.sem_thresh = model_cfg.SEM_THRESH
@@ -292,7 +295,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         if self.model_cfg['ROI_HEAD'].get('ENABLE_INSTANCE_SUP_LOSS', False):
             #lbl_inst_cont_loss = self._get_instance_contrastive_loss(batch_dict,batch_dict_wa,lbl_inds,ulb_inds)
             if self.model_cfg.ROI_HEAD.INSTANCE_CONTRASTIVE_LOSS_MODEL=='Teacher':
-                lbl_inst_cont_loss = self._get_instance_contrastive_loss(batch_dict_sa,batch_dict_ema,lbl_inds,ulb_inds)
+                lbl_inst_cont_loss = self._get_instance_contrastive_loss(tb_dict,batch_dict_sa,batch_dict_ema,lbl_inds,ulb_inds)
             elif self.model_cfg.ROI_HEAD.INSTANCE_CONTRASTIVE_LOSS_MODEL =='Student' :
                 lbl_inst_cont_loss, tb_dict = self._get_instance_contrastive_loss(tb_dict,batch_dict,batch_dict_wa,lbl_inds,ulb_inds)
             if lbl_inst_cont_loss is not None:
@@ -337,17 +340,72 @@ class PVRCNN_SSL(Detector3DTemplate):
             return
         return proto_cont_loss.view(B, N)[ulb_inds][ulb_nonzero_mask].mean()
 
+    def test_dist_mode(self, batch_dict):
+        lb = all_gather(batch_dict['labeled_inds'])
+        lb = torch.cat(lb,dim=0)
+        print(lb)
+        print(lb)
+        print(lb)
+        print(lb)
+        print(lb)
+        print(lb)
+        print(lb)
+        return lb
 
     def _align_instance_pairs(self, batch_dict,batch_dict_pair,indices):
-        
+        # if self.world_size>=1:
+        '''
+       Steps: 
+        1. sync data from different gpus
+        2. strip padding off GTs
+        3. find common instances across wa and sa ; align labels,fts accordingly
+        4. Handle edge case of SA inputs having 1 extra idx than WA inputs or vice-versa
+        5. To ensure order preserved, sort GTs
+        6. Filter out car , focus on ped/cyc idxs only(Optional)
+        '''
+        world_size = self.world_size
+        rank0_completed=False
+        indices_gathered = torch.arange(8)  #NOTE- Hardcoding labeled inds - Find better way else
+
+        #if rank==0:
         embed_size = 256 if not self.model_cfg['ROI_HEAD']['PROJECTOR'] else 256 # if possible, 128
-        shared_ft_sa = batch_dict['shared_features_gt'].view(batch_dict['batch_size'],-1,embed_size)[indices]
-        shared_ft_wa = batch_dict_pair['shared_features_gt'].view(batch_dict['batch_size'],-1,embed_size)[indices]
+        batch_size_gathered = batch_dict['batch_size'] * world_size # Inflate the batch_dict back to original size
+
+        labels_sa_gathered = all_gather(batch_dict['gt_boxes'])
+        labels_sa_gathered = torch.cat(labels_sa_gathered,dim=0)
+        print(labels_sa_gathered.shape)
+
+        labels_wa_gathered = all_gather(batch_dict_pair['gt_boxes'])
+        labels_wa_gathered = torch.cat(labels_wa_gathered,dim=0)
+        print(labels_wa_gathered.shape)
+
+        instance_idx_sa_gathered = all_gather(batch_dict['instance_idx'])
+        instance_idx_sa_gathered = torch.cat(instance_idx_sa_gathered,dim=0)
+        print(instance_idx_sa_gathered.shape)
+
+        instance_idx_wa_gathered = all_gather(batch_dict_pair['instance_idx'])
+        instance_idx_wa_gathered = torch.cat(instance_idx_wa_gathered,dim=0)
+        print(instance_idx_wa_gathered.shape)
+
+        shared_ft_sa_gathered = all_gather(batch_dict['shared_features_gt'])
+        print(shared_ft_sa_gathered[0].shape)
+        print(shared_ft_sa_gathered[1].shape)
+        shared_ft_sa_gathered = torch.cat(shared_ft_sa_gathered,dim=0)
+        print(shared_ft_sa_gathered.shape)
+
+        shared_ft_wa_gathered = all_gather(batch_dict_pair['shared_features_gt'])
+        shared_ft_wa_gathered = torch.cat(shared_ft_wa_gathered,dim=0)
+        print(shared_ft_wa_gathered.shape)
+
+
+        print("Data gathered from multi-gpus")
+        shared_ft_sa = shared_ft_sa_gathered.view(batch_size_gathered,-1,embed_size)[indices_gathered]
+        shared_ft_wa = shared_ft_wa_gathered.view(batch_size_gathered,-1,embed_size)[indices_gathered]
         device = shared_ft_sa.device
-        labels_sa = batch_dict['gt_boxes'][:,:,7][indices].view(-1)
-        labels_wa = batch_dict_pair['gt_boxes'][:,:,7][indices].view(-1)
-        instance_idx_sa = batch_dict['instance_idx'][indices].view(-1)
-        instance_idx_wa = batch_dict_pair['instance_idx'][indices].view(-1)
+        labels_sa = labels_sa_gathered[:,:,7][indices_gathered].view(-1)
+        labels_wa = labels_wa_gathered[:,:,7][indices_gathered].view(-1)
+        instance_idx_sa = instance_idx_wa_gathered[indices_gathered].view(-1)
+        instance_idx_wa = instance_idx_sa_gathered[indices_gathered].view(-1)
         shared_ft_sa = shared_ft_sa.view(-1,embed_size)
         shared_ft_wa = shared_ft_wa.view(-1,embed_size)
         
@@ -361,7 +419,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         meta_data = {'to_mask':''}
         valid_instances = np.intersect1d(instance_idx_sa.cpu().numpy(),instance_idx_wa.cpu().numpy()) #
         valid_instances = torch.tensor(valid_instances,device=device)
-       
+    
         '''intersect_mask, to remove instances from A which are not in B and VICE VERSA '''
         # intersect_mask = torch.isin(instance_idx,valid_instances) #small
         # intersect_mask_pair = torch.isin(instance_idx_pair,valid_instances)
@@ -427,8 +485,15 @@ class PVRCNN_SSL(Detector3DTemplate):
         labels_wa =labels_wa[pedcyc_idx]
         shared_ft_sa = shared_ft_sa[pedcyc_idx]
         shared_ft_wa = shared_ft_wa[pedcyc_idx]
-
+        #     rank0_completed=True
+            
+        # else:
+        #     print("Rank1align")
+        #     while not rank0_completed:
+        #         pass  
+              
         return labels_sa,labels_wa,instance_idx_sa,instance_idx_wa,shared_ft_sa, shared_ft_wa
+
 
 
     def _get_instance_contrastive_loss(self, tb_dict,batch_dict,batch_dict_pair,lbl_inds,ulb_inds,temperature=1.0,base_temperature=1.0):
@@ -449,17 +514,28 @@ class PVRCNN_SSL(Detector3DTemplate):
             return
         temperature = self.model_cfg['ROI_HEAD'].get('TEMPERATURE', 1.0)
         
+        print(get_rank())
+        # lb = self.test_dist_mode(batch_dict)
+        # print(lb)
+        # exit()
+
         if  self.model_cfg['ROI_HEAD'].get('INSTANCE_IDX',None)=="Labeled": # Apply SupConLoss over labeled indices
             indices = lbl_inds
         else:
             indices = ulb_inds
+
+        rank = dist.get_rank()
+        print("inst_loss_rank ",rank)
+
         labels_sa, labels_wa, instance_idx_sa, instance_idx_wa, embed_ft_sa, embed_ft_wa = \
-            self._align_instance_pairs(batch_dict, batch_dict_pair,indices)
+        self._align_instance_pairs(batch_dict, batch_dict_pair,indices)
         batch_size_labeled = labels_sa.shape[0]
+        print("batch_size_labeled",batch_size_labeled)
+        assert torch.equal(instance_idx_sa, instance_idx_wa)
+        exit()
         device = embed_ft_sa.device
         labels = torch.cat((labels_sa,labels_sa), dim=0)
 
-        assert torch.equal(instance_idx_sa, instance_idx_wa)
         assert torch.equal(labels_sa, labels_wa)   # Problem : Fails for Ulb! Same instance id , diff label for strong and weak aug ulb 
         # Record stats
         batch_dict['lbl_inst_freq'] =  torch.bincount(labels_sa.view(-1).int().detach(),minlength = 2).tolist()[1:]       #Record freq of each class in batch
@@ -533,6 +609,9 @@ class PVRCNN_SSL(Detector3DTemplate):
         instance_loss = instance_loss.mean()
         return instance_loss, tb_dict
 
+        # else: #Multi-gpu setting, slave GPU no loss
+        #     return None
+        
 
     @staticmethod
     def _prep_tb_dict(tb_dict, lbl_inds, ulb_inds, reduce_loss_fn):
@@ -918,22 +997,3 @@ class PVRCNN_SSL(Detector3DTemplate):
                 metrics_input['pseudo_score'].append(pseudo_score)
                 metrics_input['pseudo_sem_score'].append(pseudo_sem_score)
         self.thresh_registry.get(tag).update(**metrics_input)
-
-
-
-#gt_cls_count = torch.bincount(batch_dict['ori_unlabeled_boxes'][...,-1].view(-1).int().detach()).tolist()[1:]
-#labels
-#
-
-
-        # pl_count_dict = {
-        #     f'pl_iter_count_{cls}': {
-        #         'gt': gt_cls_count[cind],
-        #         'pl_pre_filter': pl_cls_count_pre_filter[cind],
-        #         'pl_post_filter': pl_cls_count_post_filter[cind],
-        #     }
-        #     for cind, cls in enumerate(self.class_names)
-        # }
-
-        # tb_dict_ = self._prep_tb_dict(tb_dict, lbl_inds, ulb_inds, reduce_loss_fn)
-        # tb_dict_.update(**pl_count_dict)
