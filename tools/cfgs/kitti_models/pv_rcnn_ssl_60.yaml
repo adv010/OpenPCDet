@@ -13,7 +13,7 @@ DATA_CONFIG:
                  filter_by_min_points: ['Car:5', 'Pedestrian:5', 'Cyclist:5'],
                  filter_by_difficulty: [-1],
               }
-
+ 
               SAMPLE_GROUPS: ['Car:15','Pedestrian:10', 'Cyclist:10']
               NUM_POINT_FEATURES: 4
               DATABASE_WITH_FAKELIDAR: False
@@ -295,7 +295,7 @@ MODEL:
         FIXED_THRESH: 0.7
         MOMENTUM: 0.9
         SEM_FG_THRESH: 0.5  # [0.65, 0.40, 0.45]
-        RESET_STATE_INTERVAL: 32
+        RESET_STATE_INTERVAL: 2 #32
         ENABLE_PLOTS: True
         GMM_POLICY: high
         MU1: 0.1
