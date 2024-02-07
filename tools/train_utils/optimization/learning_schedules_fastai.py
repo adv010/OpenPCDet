@@ -41,10 +41,13 @@ class LRSchedulerStep(object):
                 self.mom_phases.append((int(start * total_step), total_step, lambda_func))
         assert self.mom_phases[0][0] == 0
 
-    def step(self, step):
+    def step(self, step,batch_size):
         for start, end, func in self.lr_phases:
             if step >= start:
-                self.optimizer.lr = func((step - start) / (end - start))
+                if 0<=step%int(batch_size/2)<=int((batch_size/2 -1)):
+                    self.optimizer.lr = func((step - start) / (end - start)) *0.1
+                else:
+                    self.optimizer.lr = func((step - start) / (end - start))
         for start, end, func in self.mom_phases:
             if step >= start:
                 self.optimizer.mom = func((step - start) / (end - start))

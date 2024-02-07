@@ -67,11 +67,12 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
         # adding iteration, epoch number in batch dict
         batch['cur_iteration'], batch['cur_epoch'] = accumulated_iter, cur_epoch
         batch['ckpt_save_dir'] = ckpt_save_dir
+        batch_size = batch['batch_size']
 
         data_timer = time.time()
         cur_data_time = data_timer - end
 
-        lr_scheduler.step(accumulated_iter)
+        lr_scheduler.step(accumulated_iter,batch_size)
 
         try:
             cur_lr = float(optimizer.lr)
