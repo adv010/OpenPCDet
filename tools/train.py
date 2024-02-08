@@ -148,6 +148,7 @@ def main():
         os.system('cp %s %s' % (args.cfg_file, output_dir))
 
     tb_log = SummaryWriter(log_dir=str(output_dir / 'tensorboard')) if cfg.LOCAL_RANK == 0 else None
+    tb_log.add_text(args.extra_tag,"",0)
 
     # -----------------------create dataloader & network & optimizer---------------------------
     train_set, train_loader, train_sampler = build_dataloader(
@@ -228,6 +229,7 @@ def main():
         rank=cfg.LOCAL_RANK,
         tb_log=tb_log,
         ckpt_save_dir=ckpt_dir,
+        extra_tag = args.extra_tag,
         train_sampler=train_sampler,
         lr_warmup_scheduler=lr_warmup_scheduler,
         ckpt_save_interval=args.ckpt_save_interval,
