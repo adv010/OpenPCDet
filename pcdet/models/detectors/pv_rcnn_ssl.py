@@ -187,9 +187,15 @@ class PVRCNN_SSL(Detector3DTemplate):
         batch_dict_ema = self._split_batch(batch_dict, tag='ema')
         self._gen_pseudo_labels(batch_dict_ema)
         pls_teacher_wa, _ = self.pv_rcnn_ema.post_processing(batch_dict_ema, no_recall_dict=True)
+        unfiltered_pls = []
+        for i in ulb_inds:
+            unfiltered_pls.append(pls_teacher_wa[i]['pred_labels'])
+        unfiltered_pred_labels = torch.cat([i for i in unfiltered_pls]).int().detach()
+        pl_cls_count_pre_conf_filter = torch.bincount(unfiltered_pred_labels, minlength=4)[1:]
+
         pseudo_boxes, pseudo_scores, pseudo_sem_scores, pseudo_sem_logits = self._filter_pls_conf_scores(pls_teacher_wa, ulb_inds)
         ulb_pred_labels = torch.cat([pb[:, -1] for pb in pseudo_boxes]).int().detach()
-        pl_cls_count_pre_filter = torch.bincount(ulb_pred_labels, minlength=4)[1:]
+        pl_cls_count_pre_sem_filter = torch.bincount(ulb_pred_labels, minlength=4)[1:]
 
         # Semantic Filtering
         filtering_masks, ps_sem_scores_rect = self._filter_pls_sem_scores(pseudo_sem_logits)
@@ -205,7 +211,8 @@ class PVRCNN_SSL(Detector3DTemplate):
         gt_cls_count = torch.bincount(batch_dict['ori_unlabeled_boxes'][...,-1].view(-1).int().detach(), minlength=4)[1:]
 
         pl_count_dict = {'avg_num_gts_per_sample': self._arr2dict(gt_cls_count / len(ulb_inds)),  # backward compatibility. Added to stats_utils. Will be removed later.
-                         'avg_num_pls_pre_filter_per_sample': self._arr2dict(pl_cls_count_pre_filter / len(ulb_inds)),
+                         'avg_num_pls_pre_conf_filter_per_sample': self._arr2dict(pl_cls_count_pre_conf_filter / len(ulb_inds)),
+                         'avg_num_pls_pre_sem_filter_per_sample': self._arr2dict(pl_cls_count_pre_sem_filter / len(ulb_inds)),
                          # backward compatibility. Added to stats_utils. Will be removed later.
                          'avg_num_pls_post_filter_per_sample': self._arr2dict(pl_cls_count_post_filter / len(ulb_inds))}
 
