@@ -219,7 +219,9 @@ MODEL:
 
         LOSS_CONFIG:
             UL_RCNN_CLS_WEIGHT_TYPE: 'rev_uc-bg'
-            CLS_LOSS: BinaryCrossEntropy
+            CLS_LOSS: 
+                NAME: BinaryCrossEntropy
+                CLASSWISE_DEBIAS: False
             REG_LOSS: smooth-l1
             CORNER_LOSS_REGULARIZATION: True
             LOSS_WEIGHTS: {

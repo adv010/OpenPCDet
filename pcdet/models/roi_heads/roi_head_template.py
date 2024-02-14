@@ -67,7 +67,13 @@ class RoIHeadTemplate(nn.Module):
         self.forward_ret_dict = None
         self.mean_p_model_sa = None
         self.mean_p_cls = None
+        self.mean_p_car_cls = None
+        self.mean_p_ped_cls = None
+        self.mean_p_cyc_cls = None
         self.mean_cls_labels = None
+        self.mean_cls_labels_car = None
+        self.mean_cls_labels_ped = None
+        self.mean_cls_labels_cyc = None
         self.target_dist = torch.tensor([0.82, 0.13, 0.05])
         self.momentum = 0.9
         self.predict_boxes_when_training = predict_boxes_when_training
@@ -324,7 +330,7 @@ class RoIHeadTemplate(nn.Module):
         loss_cfgs = self.model_cfg.LOSS_CONFIG
         rcnn_cls = forward_ret_dict['rcnn_cls']
         rcnn_cls_labels = forward_ret_dict['rcnn_cls_labels'].view(-1)
-        if loss_cfgs.CLS_LOSS == 'BinaryCrossEntropy':
+        if loss_cfgs.CLS_LOSS.NAME == 'BinaryCrossEntropy':
             rcnn_cls_flat = rcnn_cls.view(-1)
             batch_loss_cls = F.binary_cross_entropy(torch.sigmoid(rcnn_cls_flat), rcnn_cls_labels.float(), reduction='none')
             cls_valid_mask = (rcnn_cls_labels >= 0).float()
@@ -340,7 +346,7 @@ class RoIHeadTemplate(nn.Module):
                     rcnn_loss_cls = (batch_loss_cls * cls_valid_mask * rcnn_cls_weights).sum(-1) / torch.clamp(rcnn_loss_cls_norm, min=1.0)
                 else:
                     rcnn_loss_cls = (batch_loss_cls * cls_valid_mask).sum(-1) / torch.clamp(cls_valid_mask.sum(-1), min=1.0)
-        elif loss_cfgs.CLS_LOSS == 'CrossEntropy':
+        elif loss_cfgs.CLS_LOSS.NAME == 'CrossEntropy':
             batch_loss_cls = F.cross_entropy(rcnn_cls, rcnn_cls_labels, reduction='none', ignore_index=-1)
             cls_valid_mask = (rcnn_cls_labels >= 0).float()
             if scalar:
@@ -350,7 +356,7 @@ class RoIHeadTemplate(nn.Module):
                 batch_loss_cls = batch_loss_cls.reshape(batch_size, -1)
                 cls_valid_mask = cls_valid_mask.reshape(batch_size, -1)
                 rcnn_loss_cls = (batch_loss_cls * cls_valid_mask).sum(-1) / torch.clamp(cls_valid_mask.sum(-1), min=1.0)
-        elif loss_cfgs.CLS_LOSS == 'UnbiasedCrossEntropy':
+        elif loss_cfgs.CLS_LOSS.NAME == 'UnbiasedCrossEntropy':
 
             tau = self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS.get('unbiased_ce_tau', 1.0)
             batch_size = forward_ret_dict['rcnn_cls_labels'].shape[0]
@@ -360,21 +366,81 @@ class RoIHeadTemplate(nn.Module):
             cls_valid_mask = (rcnn_cls_labels >= 0).float()
 
             conf_scores = torch.sigmoid(rcnn_cls_logits.detach())
+            sem_labels =  forward_ret_dict['roi_labels']
+            #Using classwise priors to generate offsets
+            car_mask = sem_labels ==1
+            conf_scores_car = conf_scores * car_mask
+            rcnn_cls_labels_car  = rcnn_cls_labels * car_mask
+            rcnn_cls_logits_car = rcnn_cls_logits * car_mask
+
+            ped_mask = sem_labels ==2
+            conf_scores_ped = conf_scores * ped_mask
+            rcnn_cls_labels_ped  = rcnn_cls_labels * ped_mask
+            rcnn_cls_logits_ped = rcnn_cls_logits * ped_mask
+
+            cyc_mask = sem_labels ==3
+            conf_scores_cyc = conf_scores * cyc_mask
+            rcnn_cls_labels_cyc  = rcnn_cls_labels * cyc_mask
+            rcnn_cls_logits_cyc = rcnn_cls_logits * cyc_mask
+
             mean_conf_scores = conf_scores.reshape(2, -1).mean(keepdim=True, dim=-1)
+            mean_conf_car_scores = conf_scores_car.reshape(2, -1).mean(keepdim=True, dim=-1)
+            mean_conf_ped_scores = conf_scores_ped.reshape(2, -1).mean(keepdim=True, dim=-1)
+            mean_conf_cyc_scores = conf_scores_cyc.reshape(2, -1).mean(keepdim=True, dim=-1)
+
             mean_cls_labels = rcnn_cls_labels.reshape(2, -1).mean(keepdim=True, dim=-1)
+            mean_cls_labels_car = rcnn_cls_labels_car.reshape(2, -1).mean(keepdim=True, dim=-1)
+            mean_cls_labels_ped = rcnn_cls_labels_ped.reshape(2, -1).mean(keepdim=True, dim=-1)
+            mean_cls_labels_cyc = rcnn_cls_labels_cyc.reshape(2, -1).mean(keepdim=True, dim=-1)
 
             self._ema_update_p('mean_p_cls', mean_conf_scores)
             self._ema_update_p('mean_cls_labels', mean_cls_labels)
+
+            self._ema_update_p('mean_p_car_cls', mean_conf_car_scores)
+            self._ema_update_p('mean_cls_labels_car', mean_cls_labels_car)
+
+            self._ema_update_p('mean_p_ped_cls', mean_conf_ped_scores)
+            self._ema_update_p('mean_cls_labels_ped', mean_cls_labels_ped)
+
+            self._ema_update_p('mean_p_cyc_cls', mean_conf_cyc_scores)
+            self._ema_update_p('mean_cls_labels_cyc', mean_cls_labels_cyc)
+
             mean_p_cls_lbl = self.mean_p_cls.split(1)[0].repeat(batch_size//2, num_rois)
             mean_p_cls_ulb = self.mean_p_cls.split(1)[1].repeat(batch_size//2, num_rois)
             mean_p_cls = torch.cat([mean_p_cls_lbl, mean_p_cls_ulb], dim=0)
+
+            mean_p_cls_car_lbl = self.mean_p_car_cls.split(1)[0].repeat(batch_size//2, num_rois)
+            mean_p_cls_car_ulb = self.mean_p_car_cls.split(1)[1].repeat(batch_size//2, num_rois)
+            mean_p_cls_car = torch.cat([mean_p_cls_car_lbl, mean_p_cls_car_ulb], dim=0)
+
+            mean_p_cls_ped_lbl = self.mean_p_ped_cls.split(1)[0].repeat(batch_size//2, num_rois)
+            mean_p_cls_ped_ulb = self.mean_p_ped_cls.split(1)[1].repeat(batch_size//2, num_rois)
+            mean_p_cls_ped = torch.cat([mean_p_cls_ped_lbl, mean_p_cls_ped_ulb], dim=0)
+
+            mean_p_cls_cyc_lbl = self.mean_p_cyc_cls.split(1)[0].repeat(batch_size//2, num_rois)
+            mean_p_cls_cyc_ulb = self.mean_p_cyc_cls.split(1)[1].repeat(batch_size//2, num_rois)
+            mean_p_cls_cyc = torch.cat([mean_p_cls_cyc_lbl, mean_p_cls_cyc_ulb], dim=0)
+            
+
             unbiased_logits = rcnn_cls_logits + tau * torch.log(mean_p_cls + 1e-6) * rcnn_cls_labels
+            unbiased_logits_car = rcnn_cls_logits_car + tau * torch.log(mean_p_cls_car + 1e-6) * rcnn_cls_labels_car
+            unbiased_logits_ped = rcnn_cls_logits_ped + tau * torch.log(mean_p_cls_ped + 1e-6) * rcnn_cls_labels_ped
+            unbiased_logits_cyc = rcnn_cls_logits_cyc + tau * torch.log(mean_p_cls_cyc + 1e-6) * rcnn_cls_labels_cyc
+
+            unbiased_classwise_logits =  unbiased_logits_car + unbiased_logits_ped + unbiased_logits_cyc
+            batch_loss_classwise_cls = F.binary_cross_entropy_with_logits(unbiased_classwise_logits, rcnn_cls_labels, reduction='none')
+            rcnn_loss_classwise_cls = (batch_loss_classwise_cls * cls_valid_mask).sum(-1) / torch.clamp(cls_valid_mask.sum(-1), min=1.0)
+
             batch_loss_cls = F.binary_cross_entropy_with_logits(unbiased_logits, rcnn_cls_labels, reduction='none')
             rcnn_loss_cls = (batch_loss_cls * cls_valid_mask).sum(-1) / torch.clamp(cls_valid_mask.sum(-1), min=1.0)
         else:
             raise NotImplementedError
 
-        rcnn_loss_cls = rcnn_loss_cls * loss_cfgs.LOSS_WEIGHTS['rcnn_cls_weight']
+        
+        if loss_cfgs.CLS_LOSS.CLASSWISE_DEBIAS:
+            rcnn_loss_cls = rcnn_loss_classwise_cls * loss_cfgs.LOSS_WEIGHTS['rcnn_cls_weight']
+        else:
+            rcnn_loss_cls = rcnn_loss_cls * loss_cfgs.LOSS_WEIGHTS['rcnn_cls_weight']
         tb_dict = {
             'rcnn_loss_cls': rcnn_loss_cls.item() if scalar else rcnn_loss_cls
         }
