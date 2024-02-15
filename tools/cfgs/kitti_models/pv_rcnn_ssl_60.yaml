@@ -303,6 +303,7 @@ MODEL:
         SEM_FG_THRESH: 0.5  # [0.65, 0.40, 0.45]
         RESET_STATE_INTERVAL: 8  # with bs=4, this is less noisy than 1
         ENABLE_PLOTS: False
+        CLASSWISE_THRESH : False
 
 OPTIMIZATION:
     BATCH_SIZE_PER_GPU: 1 #2

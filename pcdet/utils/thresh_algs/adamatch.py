@@ -56,7 +56,7 @@ class AdaMatch(Metric):
         self.temperature = configs.get('TEMPERATURE', 1)  # TODO: Both temperatures should be tuned
         self.temperature_sa = configs.get('TEMPERATURE_SA', 1)
         self.ulb_ratio = configs.get('ULB_RATIO', 0.5)
-
+        self.classwise_ulb_thresh = configs.get('CLASSWISE_THRESH', False)
         self.enable_ulb_cls_dist_loss = configs.get('ENABLE_ULB_CLS_DIST_LOSS', False)
         self.states_name = ['sem_scores_wa', 'conf_scores_wa', 'gt_labels_wa']
         self.class_names = ['Car', 'Pedestrian', 'Cyclist']
@@ -70,6 +70,8 @@ class AdaMatch(Metric):
         self.mean_p_model = {s_name: None for s_name in self.states_name}
         self.fg_mean_p_model_sa = None
         self.mean_p_max_model = {s_name: None for s_name in self.states_name}
+        self.mean_p_max_model_classwise_lbl = {s_name: None for s_name in self.states_name}
+        self.mean_p_max_model_classwise_ulb = {s_name: None for s_name in self.states_name}
         self.labels_hist = {s_name: None for s_name in self.states_name}
         self.ratio = {'AdaMatch': None}
 
@@ -150,6 +152,8 @@ class AdaMatch(Metric):
             self._update_ema('mean_p_max_model', mean_p_max_model, sname)
             self._update_ema('labels_hist', labels_hist, sname)
             self._update_ema('mean_p_model', mean_p_model, sname)
+            self._update_ema('mean_p_max_model_classwise_lbl', _lbl(mean_p_max_model_classwise), sname)
+            self._update_ema('mean_p_max_model_classwise_ulb',_ulb(mean_p_max_model_classwise), sname)
 
             results[f'mean_p_max_model_classwise_lbl/{sname}'] = self._arr2dict(_lbl(mean_p_max_model_classwise), ignore_zeros=True)
             results[f'mean_p_max_model_classwise_ulb/{sname}'] = self._arr2dict(_ulb(mean_p_max_model_classwise), ignore_zeros=True)
@@ -171,7 +175,10 @@ class AdaMatch(Metric):
         # results['labels_hist_lbl/gts_pre_gt_wa'] = self._arr2dict(_get_cls_dist(_lbl(acc_metrics['gt_labels_pre_gt_wa'].view(-1))))
         # results['labels_hist_ulb/gts_pre_gt_wa'] = self._arr2dict(_get_cls_dist(_ulb(acc_metrics['gt_labels_pre_gt_wa'].view(-1))))
         if self.thresh_method == 'AdaMatch':
-            results[f'threshold/AdaMatch'] = self._get_threshold(tag=self.lab_thresh_tag)
+            thresh = self._get_threshold(tag=self.lab_thresh_tag)
+            if len(thresh.size()):
+                thresh = thresh.mean()
+            results[f'threshold/AdaMatch'] = thresh
         elif self.thresh_method == 'FreeMatch':
             results[f'threshold/FreeMatch'] = self._arr2dict(self._get_threshold())
 
@@ -245,7 +252,23 @@ class AdaMatch(Metric):
             scores = torch.softmax(logits / self.temperature, dim=-1)
             scores = self.rectify_sem_scores(scores)
             max_scores, labels = torch.max(scores, dim=-1)
-            return max_scores > self._get_threshold(tag=self.lab_thresh_tag), scores
+            thresh = self._get_threshold(tag=self.lab_thresh_tag)
+
+            if len(thresh.size()):
+                car_mask = labels == 0
+                max_scores_car = max_scores * car_mask
+                max_scores_car = max_scores_car > thresh[0]
+                ped_mask = labels == 1
+                max_scores_ped = max_scores * ped_mask
+                max_scores_ped = max_scores_ped > thresh[1]
+                cyc_mask = labels == 2
+                max_scores_cyc = max_scores * cyc_mask
+                max_scores_cyc = max_scores_cyc > thresh[2]
+                max_scores = max_scores_car + max_scores_cyc + max_scores_ped
+                return max_scores, scores
+            else:
+                max_scores = max_scores > thresh    
+            return max_scores, scores
 
         elif self.thresh_method == 'FreeMatch':
             scores = torch.softmax(logits / self.temperature, dim=-1)
@@ -268,7 +291,11 @@ class AdaMatch(Metric):
 
     def _get_threshold(self, tag='sem_scores_wa'):
         if self.thresh_method == 'AdaMatch':
-            return _ulb(self.mean_p_max_model[tag]) * self.fixed_thresh
+            if self.classwise_ulb_thresh:
+                return self.mean_p_max_model_classwise_ulb[tag] * self.fixed_thresh
+            else:
+                return _ulb(self.mean_p_max_model[tag]) * self.fixed_thresh
+            # return _ulb(self.mean_p_max_model[tag]) * self.fixed_thresh
 
         elif self.thresh_method == 'FreeMatch':
             normalized_p_model = torch.div(_ulb(self.mean_p_model[tag]), _ulb(self.mean_p_model[tag]).max())
