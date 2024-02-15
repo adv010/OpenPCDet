@@ -149,6 +149,10 @@ def main():
 
     tb_log = SummaryWriter(log_dir=str(output_dir / 'tensorboard')) if cfg.LOCAL_RANK == 0 else None
     tb_log.add_text(args.extra_tag,"",0)
+    tb_log.add_text(f"batch size: {args.batch_size}","",0)
+    tb_log.add_text(f"epochs: {args.epochs}","",0)
+    tb_log.add_text(f"conf_thresh: {args.conf_thresh}","",0)
+    tb_log.add_text(f"sem_thresh: {args.sem_thresh}","",0)
     # -----------------------create dataloader & network & optimizer---------------------------
     train_set, train_loader, train_sampler = build_dataloader(
         dataset_cfg=cfg.DATA_CONFIG,
