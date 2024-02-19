@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch
 from ...ops.pointnet2.pointnet2_stack import pointnet2_modules as pointnet2_stack_modules
 from ...utils import common_utils
 from .roi_head_template import RoIHeadTemplate
@@ -205,15 +206,16 @@ class PVRCNNHead(RoIHeadTemplate):
         rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
         rcnn_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
 
-        if (self.training or self.print_loss_when_eval) and not test_only:
+        # if (self.training or self.print_loss_when_eval) and not test_only:
             # RoI-level similarity.
             # calculate cosine similarity between unlabeled augmented RoI features and labeled augmented prototypes.
-            roi_features = pooled_features.clone().detach().view(batch_size_rcnn, -1)
-            roi_scores_shape = batch_dict['roi_scores'].shape  # (B, N)
-            bank = feature_bank_registry.get('gt_aug_lbl_prototypes')
-            sim_scores = bank.get_sim_scores(roi_features)
-            targets_dict['roi_sim_scores'] = sim_scores.view(*roi_scores_shape, -1)
-
+        roi_features = shared_features.clone().detach().view(batch_size_rcnn, -1)
+        roi_scores_shape = batch_dict['roi_scores'].shape  # (B, N)
+        bank = feature_bank_registry.get('gt_aug_lbl_prototypes')
+        sim_scores = bank.get_sim_scores(roi_features,return_raw_scores=True) if bank.initialized else torch.full((*roi_scores_shape,3), -1, device=rcnn_cls.device)
+        targets_dict['roi_sim_scores'] = sim_scores.view(*roi_scores_shape, -1)
+        targets_dict['roi_instance_sim_scores'] =  bank.get_sim_scores(roi_features,use_classwise_prototypes=False).view(*roi_scores_shape, -1) if bank.initialized else torch.full((*roi_scores_shape,3), -1, device=rcnn_cls.device)
+        assert targets_dict['roi_sim_scores'].shape == targets_dict['roi_instance_sim_scores'].shape
         if not self.training or self.predict_boxes_when_training:
             batch_cls_preds, batch_box_preds = self.generate_predicted_boxes(
                 batch_size=batch_dict['batch_size'], rois=batch_dict['rois'], cls_preds=rcnn_cls, box_preds=rcnn_reg

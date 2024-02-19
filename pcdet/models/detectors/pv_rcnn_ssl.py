@@ -3,7 +3,6 @@ import os
 import pickle
 import numpy as np
 import torch
-import torch.nn.functional as F
 from pcdet.datasets.augmentor import augmentor_utils
 from pcdet.ops.iou3d_nms import iou3d_nms_utils
 from pcdet.ops.roiaware_pool3d import roiaware_pool3d_utils
@@ -16,7 +15,7 @@ from pcdet.utils.prototype_utils import feature_bank_registry
 # from tools.visual_utils import open3d_vis_utils as V
 from collections import defaultdict
 from pcdet.utils.weighting_methods import build_thresholding_method
-
+from pcdet.ops.iou3d_nms import iou3d_nms_utils
 class DynamicThreshRegistry(object):
     def __init__(self, **kwargs):
         self._tag_metrics = {}
@@ -54,6 +53,7 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         self.thresh = model_cfg.THRESH
         self.sem_thresh = model_cfg.SEM_THRESH
+        self.hybrid_thresh = model_cfg.HYBRID_THRESH
         self.unlabeled_supervise_cls = model_cfg.UNLABELED_SUPERVISE_CLS
         self.unlabeled_supervise_refine = model_cfg.UNLABELED_SUPERVISE_REFINE
         self.unlabeled_weight = model_cfg.UNLABELED_WEIGHT
@@ -64,18 +64,20 @@ class PVRCNN_SSL(Detector3DTemplate):
             feature_bank_registry.register(tag=bank_configs["NAME"], **bank_configs)
 
         for metrics_configs in model_cfg.get("METRICS_BANK_LIST", []):
-            metrics_registry.register(tag=metrics_configs["NAME"], dataset=self.dataset, **metrics_configs)
+            for name in metrics_configs['NAME']:
+                metrics_configs['tag'] = name
+                metrics_registry.register(dataset=self.dataset, **metrics_configs)
 
-        vals_to_store = ['iou_roi_pl', 'iou_roi_gt', 'pred_scores', 'teacher_pred_scores',
-                         'weights', 'roi_scores', 'num_points_in_roi', 'class_labels', 'iteration','lbl_inst_freq', 'positive_pairs_duped', 'negative_pairs_duped',
-                         'unscaled_instloss_car','unscaled_instloss_ped','unscaled_instloss_cyc','instloss_car','instloss_ped','instloss_cyc']
-
+        vals_to_store = ['instloss_car', 'unscaled_instloss_cyc', 'positive_pairs_duped', 'iteration', 'pseudo_instance_sim_scores_pl', 'rcnn_scores_pl', 'pred_scores', 'negative_pairs_duped', 'assigned_gt_pl_labels', 'weights', 'instloss_cyc', 'num_points_in_roi', 'pseudo_sem_scores_pl', 'unscaled_instloss_car', 'iou_pl_gt', 'ri_sim_scores', 'roi_instance_sim_scores', 'roi_scores', 'lbl_inst_freq', 'iou_roi_pl', 'unscaled_instloss_ped', 'pseudo_sim_scores_pl', 'class_labels', 'pl_iteration', 'iou_roi_gt', 'teacher_pred_scores', 'instloss_ped']
         self.val_dict = {val: [] for val in vals_to_store}
         self.val_dict['lbl_inst_freq'] = [0,0,0]
         self.val_dict['positive_pairs_duped'] = [0,0,0]
         self.val_dict['negative_pairs_duped'] = [1,1,1]
-
-
+        loss_dict_keys = {'cos_sim_pl_wa','cos_sim_pl_sa','pl_labels','proto_labels'}
+        self.loss_dict = {key: [] for key in loss_dict_keys}
+        mcont_dict = {'logits','iteration'}
+        self.mcont_dict = {key: [] for key in mcont_dict}
+        
     @staticmethod
     def _clone_gt_boxes_and_feats(batch_dict):
         return {
@@ -89,9 +91,10 @@ class PVRCNN_SSL(Detector3DTemplate):
     def _prep_bank_inputs(self, batch_dict, inds, num_points_threshold=20):
         selected_batch_dict = self._clone_gt_boxes_and_feats(batch_dict)
         with torch.no_grad():
-            batch_gt_feats = self.pv_rcnn.roi_head.pool_features(selected_batch_dict, use_gtboxes=True)
-
-        batch_gt_feats = batch_gt_feats.view(*batch_dict['gt_boxes'].shape[:2], -1)
+            batch_gt_feats = self.pv_rcnn_ema.roi_head.pool_features(selected_batch_dict, use_gtboxes=True)
+            batch_size_rcnn = batch_gt_feats.shape[0]
+            shared_features = self.pv_rcnn_ema.roi_head.shared_fc_layer(batch_gt_feats.view(batch_size_rcnn, -1, 1))
+        batch_gt_feats = shared_features.view(*batch_dict['gt_boxes'].shape[:2], -1)
         bank_inputs = defaultdict(list)
         for ix in inds:
             gt_boxes = selected_batch_dict['gt_boxes'][ix]
@@ -183,7 +186,7 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         pseudo_labels, _ = self.pv_rcnn_ema.post_processing(batch_dict_ema, no_recall_dict=True)
 
-        return pseudo_labels, batch_dict_sa
+        return batch_dict_ema,pseudo_labels,batch_dict_sa #TODO(Advait): returning too many batch_dicts, redo
 
     @staticmethod
     def _split_ema_batch(batch_dict):
@@ -206,20 +209,24 @@ class PVRCNN_SSL(Detector3DTemplate):
         batch_dict['unlabeled_inds'] = unlabeled_inds
         batch_dict['labeled_inds'] = labeled_inds
         batch_dict['ori_unlabeled_boxes'] = batch_dict['gt_boxes'][unlabeled_inds, ...].clone().detach()
+        batch_dict['ori_unlabeled_boxes_ema'] = batch_dict['gt_boxes_ema'][unlabeled_inds, ...].clone().detach()
         return labeled_inds, unlabeled_inds
 
     def _forward_training(self, batch_dict):
         lbl_inds, ulb_inds = self._prep_batch_dict(batch_dict)
         batch_dict_ema = self._split_ema_batch(batch_dict)
         batch_dict_wa = copy.deepcopy(batch_dict_ema)
+        
+        batch_dict_ema,pseudo_labels, batch_dict_sa = self._gen_pseudo_labels(batch_dict_ema, ulb_inds,lbl_inds)
 
-        pseudo_labels, batch_dict_sa = self._gen_pseudo_labels(batch_dict_ema, ulb_inds,lbl_inds)
-        pseudo_boxes, pseudo_scores, pseudo_sem_scores = self._filter_pseudo_labels(pseudo_labels, ulb_inds)
-
-        self._fill_with_pseudo_labels(batch_dict, pseudo_boxes, ulb_inds, lbl_inds)
+        batch_dict_prefilter = copy.deepcopy(batch_dict_ema) #deepika's block
+        dump_stats_prefilter = self.update_metrics_pred(targets_dict=batch_dict_prefilter,pseudo_labels=pseudo_labels)  #deepika's block
+        pseudo_boxes, pseudo_scores, pseudo_sem_scores,pseudo_sem_scores_multiclass,pseudo_sim_scores,pseudo_instance_sim_scores = self._filter_pseudo_labels(pseudo_labels, ulb_inds)
+        self._fill_with_pseudo_labels(batch_dict, pseudo_boxes, pseudo_scores, pseudo_sem_scores_multiclass, pseudo_sim_scores,pseudo_instance_sim_scores, ulb_inds, lbl_inds)
 
         # apply student's augs on teacher's pseudo-labels (filtered) only (not points)
         batch_dict = self.apply_augmentation(batch_dict, batch_dict, ulb_inds, key='gt_boxes')
+        self.update_metrics_pl(targets_dict=batch_dict)
 
         for cur_module in self.pv_rcnn.module_list:
             batch_dict = cur_module(batch_dict)
@@ -252,16 +259,13 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         # Update the bank with student's features from augmented labeled data
         bank = feature_bank_registry.get('gt_aug_lbl_prototypes')
-        sa_gt_lbl_inputs = self._prep_bank_inputs(batch_dict, lbl_inds, bank.num_points_thresh)
+        bank.output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
+        sa_gt_lbl_inputs = self._prep_bank_inputs(batch_dict_ema, lbl_inds, bank.num_points_thresh)
         bank.update(**sa_gt_lbl_inputs, iteration=batch_dict['cur_iteration'])
 
         # For metrics calculation
         self.pv_rcnn.roi_head.forward_ret_dict['unlabeled_inds'] = ulb_inds
-
-        if self.model_cfg['ROI_HEAD'].get('ENABLE_SOFT_TEACHER', False):
-            # using teacher to evaluate student's bg/fg proposals through its rcnn head
-            with torch.no_grad():
-                self._add_teacher_scores(batch_dict, batch_dict_ema, ulb_inds)
+        
 
         disp_dict = {}
         loss_rpn_cls, loss_rpn_box, tb_dict = self.pv_rcnn.dense_head.get_loss(scalar=False)
@@ -285,6 +289,77 @@ class PVRCNN_SSL(Detector3DTemplate):
             loss += reduce_loss_fn(loss_rcnn_box[ulb_inds, ...]) * self.unlabeled_weight
         if self.model_cfg['ROI_HEAD'].get('ENABLE_ULB_CLS_DIST_LOSS', False):
             loss += ulb_loss_cls_dist
+        if self.model_cfg['ROI_HEAD'].get('ENABLE_INSTANCE_CONTRASTIVE_LOSS', False): 
+            instance_cont_loss,classwise_instance_cont_loss = self._get_sim_instance_contrastive_loss(batch_dict,batch_dict_ema, bank, ulb_inds)
+            if instance_cont_loss is not None:
+                loss += instance_cont_loss * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT']
+                tb_dict['instance_cont_loss'] = instance_cont_loss.item() * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT']
+                for cind,class_name in enumerate(['Car','Pedestrian','Cyclist']):
+                    tb_dict[f'classwise_instance_cont_loss_{class_name}'] = classwise_instance_cont_loss[f'{class_name}_Pl']
+        if self.model_cfg['ROI_HEAD'].get('ENABLE_MEAN_INSTANCE_CONTRASTIVE_LOSS', False): 
+            instance_cont_loss,classwise_instance_cont_loss = self._get_sim_instance_contrastive_loss(batch_dict,batch_dict_ema, bank, ulb_inds,mean_instance=True)
+            if instance_cont_loss is not None:
+                loss += instance_cont_loss * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT']
+                tb_dict['instance_cont_loss'] = instance_cont_loss.item() * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT']
+                for cind,class_name in enumerate(['Car','Pedestrian','Cyclist']):
+                    tb_dict[f'classwise_instance_cont_loss_{class_name}'] = classwise_instance_cont_loss[f'{class_name}_Pl']   
+
+        if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTO_SIM_LOSS', False):
+            proto_sim_loss,classwise_proto_sim = self._get_sim_instance_contrastive_loss(batch_dict,batch_dict_ema, bank, ulb_inds,proto_sim=True)
+            if proto_sim_loss is not None:
+                loss += proto_sim_loss * self.model_cfg['ROI_HEAD']['PROTO_SIM_LOSS_WEIGHT']
+                tb_dict['proto_sim_loss'] = proto_sim_loss.item()
+                for cind,class_name in enumerate(['Car','Pedestrian','Cyclist']):
+                    tb_dict[f'classwise_proto_sim_loss_{class_name}'] = classwise_proto_sim[f'{class_name}_Pl']  
+
+        if self.model_cfg['ROI_HEAD'].get('ENABLE_MCONT_LOSS', False):
+            mCont_labeled = bank._get_multi_cont_loss()
+            if mCont_labeled is not None:
+                loss += mCont_labeled['total_loss'] * self.model_cfg['ROI_HEAD']['MCONT_LOSS_WEIGHT'] 
+                tb_dict['mCont_loss'] = mCont_labeled['total_loss'].item()
+                for cind,class_name in enumerate(['Car','Pedestrian','Cyclist']):
+                    tb_dict[f'mCont_{class_name}_proto'] = mCont_labeled['classwise_loss'][cind].item()
+                if self.model_cfg.get('STORE_RAW_SIM_IN_PKL', False):
+                    self.mcont_dict['logits'].append(mCont_labeled['raw_logits'].tolist())
+                    self.mcont_dict['iteration'].append(batch_dict['cur_iteration'])
+                    output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
+                    file_path = os.path.join(output_dir, 'mcont_raw_logits.pkl')
+                    pickle.dump(self.mcont_dict, open(file_path, 'wb'))
+
+        if self.model_cfg['ROI_HEAD'].get('ENABLE_BATCH_MCONT', False):
+            selected_batch_dict = self._clone_gt_boxes_and_feats(batch_dict)
+            with torch.no_grad():
+                batch_gt_feats = self.pv_rcnn_ema.roi_head.pool_features(selected_batch_dict, use_gtboxes=True)
+                batch_size_rcnn = batch_gt_feats.shape[0]
+                shared_features = self.pv_rcnn_ema.roi_head.shared_fc_layer(batch_gt_feats.view(batch_size_rcnn, -1, 1))
+            batch_gt_feats = shared_features.view(*batch_dict['gt_boxes'].shape[:2], -1)
+            batch_gt_feats_lb = batch_gt_feats[batch_dict['labeled_mask'].bool()]  
+            batch_gt_labels_lb = batch_dict['gt_boxes'][batch_dict['labeled_mask'].bool()][:,:,-1].long()
+            batch_gt_feats_lb = torch.cat([batch_gt_feats_lb,batch_gt_labels_lb.unsqueeze(-1)],dim=-1)
+            gathered_tensor = self.gather_tensors(batch_gt_feats_lb)
+            gathered_labels = gathered_tensor[:,-1].long()
+            non_zero_mask = gathered_labels != 0
+            gathered_feats = gathered_tensor[:,:-1][non_zero_mask]
+            gathered_labels = gathered_labels[non_zero_mask]
+            mCont_labeled_features = bank._get_multi_cont_loss_lb_instances(gathered_feats,gathered_labels)
+            mCont_labeled_loss =  (mCont_labeled_features['total_loss'] * self.model_cfg['ROI_HEAD']['MCONT_LOSS_WEIGHT'])
+
+            if dist.is_initialized():
+                loss+= (mCont_labeled_loss/2)
+                tb_dict['mCont_loss_instance'] = (mCont_labeled_features['total_loss'].item())     
+            else:
+                loss+= mCont_labeled_loss
+                tb_dict['mCont_loss_instance'] = (mCont_labeled_features['total_loss'].item()/2) 
+
+            for cind,class_name in enumerate(['Car','Pedestrian','Cyclist']):
+                tb_dict[f'mCont_{class_name}_lb_inst'] = mCont_labeled_features['classwise_loss'][cind].item()
+                if self.model_cfg.get('STORE_RAW_SIM_IN_PKL', False):
+                    self.mcont_dict['logits'].append(mCont_labeled_features['raw_logits'].tolist())
+                    self.mcont_dict['iteration'].append(batch_dict['cur_iteration'])
+                    output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
+                    file_path = os.path.join(output_dir, 'mcont_lb_instances_logits.pkl')
+                    pickle.dump(self.mcont_dict, open(file_path, 'wb'))
+
         if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTO_CONTRASTIVE_LOSS', False):
             proto_cont_loss = self._get_proto_contrastive_loss(batch_dict, bank, ulb_inds)
             if proto_cont_loss is not None:
@@ -301,7 +376,9 @@ class PVRCNN_SSL(Detector3DTemplate):
         tb_dict_ = self._prep_tb_dict(tb_dict, lbl_inds, lbl_inds, reduce_loss_fn)
 
         if self.model_cfg.get('STORE_SCORES_IN_PKL', False):
-            self.dump_statistics(batch_dict, ulb_inds,lbl_inds)
+            batch_dict['roi_sim_scores'] = self.pv_rcnn.roi_head.forward_ret_dict['roi_sim_scores']
+            batch_dict_ema['prefilter_pls'] = dump_stats_prefilter
+            self.dump_statistics(batch_dict, batch_dict_ema, ulb_inds,lbl_inds)
 
         for tag in feature_bank_registry.tags():
             feature_bank_registry.get(tag).compute()
@@ -327,17 +404,242 @@ class PVRCNN_SSL(Detector3DTemplate):
         gt_boxes = batch_dict['gt_boxes']
         B, N = gt_boxes.shape[:2]
         sa_pl_feats = self.pv_rcnn.roi_head.pool_features(batch_dict, use_gtboxes=True).view(B * N, -1)
+        batch_size_rcnn = sa_pl_feats.shape[0]
+        shared_features = self.pv_rcnn.roi_head.shared_fc_layer(sa_pl_feats.view(batch_size_rcnn, -1, 1)) 
+        shared_features = shared_features.squeeze(-1)     
         pl_labels = batch_dict['gt_boxes'][..., -1].view(-1).long() - 1
-        proto_cont_loss = bank.get_proto_contrastive_loss(sa_pl_feats, pl_labels)
+        proto_cont_loss = bank.get_proto_contrastive_loss(shared_features, pl_labels)
         if proto_cont_loss is None:
             return
         nonzero_mask = torch.logical_not(torch.eq(gt_boxes, 0).all(dim=-1))
         ulb_nonzero_mask = nonzero_mask[ulb_inds]
-        if ulb_nonzero_mask.sum() == 0:
-            print(f"No pl instances predicted for strongly augmented frame(s) {batch_dict['frame_id'][ulb_inds]}")
+        filter_thresh = self.model_cfg['ROI_HEAD']['PL_PROTO_CONTRASTIVE_THRESH']
+        valid_pl = gt_boxes[...,-1][ulb_inds][ulb_nonzero_mask].long().unsqueeze(-1) - 1
+        clswise_filter_thresh = torch.tensor(filter_thresh,device=valid_pl.device).unsqueeze(0).repeat(valid_pl.shape[0],1).gather(index=(valid_pl),dim=1).squeeze(-1)
+        valid_filtered_pls = (batch_dict['pseudo_scores'][ulb_inds][ulb_nonzero_mask] >= clswise_filter_thresh)
+                
+        if ulb_nonzero_mask.sum() == 0 or valid_filtered_pls.sum() == 0:
+            print(f"No pl instances predicted for strongly augmented frame(s) {batch_dict['frame_id'][ulb_inds.cpu().numpy()]}")
             return
-        return proto_cont_loss.view(B, N)[ulb_inds][ulb_nonzero_mask].mean()
+        return proto_cont_loss.view(B, N)[ulb_inds][ulb_nonzero_mask][valid_filtered_pls].mean()
 
+
+    def _get_sim_instance_contrastive_loss(self,batch_dict,batch_dict_ema,bank,ulb_inds,mean_instance=False,proto_sim=False): #TODO: Deepika: Refactor this function
+            """
+            Contains the implementation of instance level contrastive losses like proto_sim, simmatch, mean_simmatch, mcont, proto_cont
+
+            Credits: 
+
+            Simmatch: https://arxiv.org/abs/2308.06692
+            Protocon: https://arxiv.org/pdf/2303.13556.pdf
+            Mcont: https://arxiv.org/pdf/2303.13556.pdf
+
+            Args: 
+                    batch_dict: dict containing  WA GTs
+                    batch_dict_ema: dict containing SA GTs
+                    bank: feature bank object
+                    ulb_inds: unlabeled indices
+                    mean_instance: bool, if True, mean instance simmatch loss is calculated
+                    proto_sim: bool, if True, proto_sim loss is calculated
+                Returns:
+                    instance_cont_loss: instance contrastive loss
+                    classwise_loss: dict containing classwise instance contrastive loss for metrics
+                """
+            # prepare batch_dict with gt boxes and teacher features
+            batch_dict_wa_gt = {'unlabeled_inds': batch_dict['unlabeled_inds'],
+                            'labeled_inds': batch_dict['labeled_inds'],
+                            'rois': batch_dict['rois'].data.clone(),
+                            'roi_scores': batch_dict['roi_scores'].data.clone(),
+                            'roi_labels': batch_dict['roi_labels'].data.clone(),
+                            'has_class_labels': batch_dict['has_class_labels'],
+                            'batch_size': batch_dict['batch_size'],
+                            'gt_boxes': batch_dict['gt_boxes'].data.clone(),
+                            # using teacher features
+                            'point_features': batch_dict_ema['point_features'].data.clone(),
+                            'point_coords': batch_dict_ema['point_coords'].data.clone(),
+                            'point_cls_scores': batch_dict_ema['point_cls_scores'].data.clone(),
+                            
+            }
+            # reverse the augmentation --> Strong Augmentation to Weak Augmentation
+            batch_dict_wa_gt = self.reverse_augmentation(batch_dict_wa_gt, batch_dict, ulb_inds,key='gt_boxes')
+            gt_boxes = batch_dict['gt_boxes']
+            B, N = gt_boxes.shape[:2]
+            gt_labels = gt_boxes[..., -1].view(B,N).long() - 1
+            # obtain teacher features on the student generated PLs
+            with torch.no_grad():
+                batch_gt_feats_wa = self.pv_rcnn_ema.roi_head.pool_features(batch_dict_wa_gt, use_gtboxes=True)
+                batch_size_rcnn = batch_gt_feats_wa.shape[0]
+                shared_features_wa = self.pv_rcnn_ema.roi_head.shared_fc_layer(batch_gt_feats_wa.view(batch_size_rcnn, -1, 1)).squeeze(-1)
+                shared_features_wa = shared_features_wa.view(*batch_dict['gt_boxes'].shape[:2], -1)
+            # obtain student features on the student generated PLs
+            batch_gt_feats_sa = self.pv_rcnn.roi_head.pool_features(batch_dict, use_gtboxes=True)
+            batch_size_rcnn = batch_gt_feats_sa.shape[0]
+            shared_features_sa = self.pv_rcnn.roi_head.shared_fc_layer(batch_gt_feats_sa.view(batch_size_rcnn, -1, 1)).squeeze(-1)
+            shared_features_sa = shared_features_sa.view(*batch_dict['gt_boxes'].shape[:2], -1)
+
+            assert batch_gt_feats_sa.shape[0] == batch_gt_feats_wa.shape[0], "batch_dict gt features shape mismatch"
+            # proto_sim loss
+            if proto_sim == True:
+                shared_features_wa_ulb = shared_features_wa[ulb_inds]
+                shared_features_sa_ulb = shared_features_sa[ulb_inds]
+                proto_sim_loss = bank.get_proto_sim_loss(shared_features_wa_ulb,shared_features_sa_ulb)
+                if proto_sim_loss is None:
+                    return None,None
+                ulb_nonzero_mask = torch.logical_not(torch.eq(gt_boxes[ulb_inds], 0).all(dim=-1))
+
+                pseudo_scores = batch_dict['pseudo_scores'][ulb_inds][ulb_nonzero_mask]
+                pseudo_conf_thresh = self.model_cfg['ROI_HEAD']['PL_PROTO_SIM_THRESH']
+                valid_pl = gt_boxes[ulb_inds][ulb_nonzero_mask][:,-1].long().unsqueeze(-1) 
+                clswise_pseudo_thresh = torch.tensor(pseudo_conf_thresh,device=valid_pl.device).unsqueeze(0).repeat(valid_pl.shape[0],1).gather(index=(valid_pl-1),dim=1).squeeze(-1)
+                valid_pls = (pseudo_scores >= clswise_pseudo_thresh)
+                if ulb_nonzero_mask.sum() == 0 or valid_pls.sum() == 0:
+                    print(f"No pl instances predicted for strongly augmented frame(s) {batch_dict['frame_id'][ulb_inds.cpu().numpy()]}")
+                    return None,None
+                proto_sim_loss_total = proto_sim_loss['total_loss'].view(shared_features_sa_ulb.shape[0], N,3)
+                proto_loss = proto_sim_loss_total[ulb_nonzero_mask][valid_pls].sum(-1).mean()
+                
+                Car_instance_proto_loss =  (proto_sim_loss_total[:,:,0])[ulb_nonzero_mask] 
+                Ped_instance_proto_loss =  (proto_sim_loss_total[:,:,1])[ulb_nonzero_mask]
+                Cyc_instance_proto_loss =  (proto_sim_loss_total[:,:,2])[ulb_nonzero_mask]
+                classwise_loss = {'Car_Pl':{},'Pedestrian_Pl':{},'Cyclist_Pl':{}}
+                for cind,class_name in enumerate(['Car','Pedestrian','Cyclist']):
+                    classwise_loss[f'{class_name}_Pl'] = { 
+                            'Car_proto': Car_instance_proto_loss[gt_labels[ulb_inds][ulb_nonzero_mask]==cind].mean().item() * self.model_cfg['ROI_HEAD']['PROTO_SIM_LOSS_WEIGHT'],
+                            'Ped_proto': Ped_instance_proto_loss[gt_labels[ulb_inds][ulb_nonzero_mask]==cind].mean().item() * self.model_cfg['ROI_HEAD']['PROTO_SIM_LOSS_WEIGHT'],
+                            'Cyc_proto': Cyc_instance_proto_loss[gt_labels[ulb_inds][ulb_nonzero_mask]==cind].mean().item() * self.model_cfg['ROI_HEAD']['PROTO_SIM_LOSS_WEIGHT'],
+                    }
+                self.loss_dict['cos_sim_pl_wa'].append(proto_sim_loss['cos_sim_wa'].tolist())
+                self.loss_dict['cos_sim_pl_sa'].append(proto_sim_loss['cos_sim_sa'].tolist())
+                self.loss_dict['pl_labels'].append(gt_labels[ulb_inds][ulb_nonzero_mask].tolist())
+                if self.model_cfg.get('STORE_RAW_SIM_IN_PKL', False):
+                    output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
+                    file_path = os.path.join(output_dir, 'cos_sim.pkl')
+                    pickle.dump(self.loss_dict, open(file_path, 'wb'))
+
+                return proto_loss,classwise_loss
+
+            # simmatch loss: https://arxiv.org/abs/2308.06692
+            if mean_instance == False:
+                instance_cont_tuple = bank.get_simmatch_loss(shared_features_wa,shared_features_sa,ulb_inds) # normal_simmatch_loss
+                
+                if instance_cont_tuple is None:
+                    return None,None
+                nonzero_mask = torch.logical_not(torch.eq(gt_boxes, 0).all(dim=-1))
+                ulb_nonzero_mask = nonzero_mask[ulb_inds]
+                if ulb_nonzero_mask.sum() == 0:
+                    print(f"No pl instances predicted for strongly augmented frame(s) {batch_dict['frame_id'][ulb_inds.cpu().numpy()]}")
+                    return None,None
+                loss_labels = instance_cont_tuple[1]
+                instance_cont_tuple[0] = instance_cont_tuple[0].view(B, N, -1)
+                instance_cont_sum = instance_cont_tuple[0].sum(-1)# calculates sum of all terms of CE for a particular instance
+                instance_cont_loss = instance_cont_sum[ulb_inds][ulb_nonzero_mask].mean()# mean of all instances           
+                cos_sim_wa = instance_cont_tuple[2].view(B, N, -1)
+                cos_sim_sa = instance_cont_tuple[3].view(B, N, -1)
+                # metrics update
+                Car_instance_proto_loss = instance_cont_tuple[0][:,:,loss_labels==0][ulb_inds][ulb_nonzero_mask].sum(-1)
+                Ped_instance_proto_loss =  instance_cont_tuple[0][:,:,loss_labels==1][ulb_inds][ulb_nonzero_mask].sum(-1)
+                Cyc_instance_proto_loss = instance_cont_tuple[0][:,:,loss_labels==2][ulb_inds][ulb_nonzero_mask].sum(-1)
+                classwise_loss = {'Car_Pl':{},'Pedestrian_Pl':{},'Cyclist_Pl':{}}
+                for cind,class_name in enumerate(['Car','Pedestrian','Cyclist']):
+                    classwise_loss[f'{class_name}_Pl'] = {
+                            'Car_proto': Car_instance_proto_loss[gt_labels[ulb_inds][ulb_nonzero_mask]==cind].mean().item() * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT'],
+                            'Ped_proto': Ped_instance_proto_loss[gt_labels[ulb_inds][ulb_nonzero_mask]==cind].mean().item() * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT'],
+                            'Cyc_proto': Cyc_instance_proto_loss[gt_labels[ulb_inds][ulb_nonzero_mask]==cind].mean().item() * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT'],
+                    }
+
+                if self.model_cfg.get('STORE_RAW_SIM_IN_PKL', False):
+                    self.loss_dict['proto_labels'] = loss_labels.tolist()
+                    self.loss_dict['pl_labels'].append(gt_labels[ulb_inds][ulb_nonzero_mask].tolist())
+                    self.loss_dict['cos_sim_pl_wa'].append(cos_sim_wa[ulb_inds][ulb_nonzero_mask].tolist())
+                    self.loss_dict['cos_sim_pl_sa'].append(cos_sim_sa[ulb_inds][ulb_nonzero_mask].tolist())
+                    output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
+                    file_path = os.path.join(output_dir, 'cos_sim.pkl')
+                    pickle.dump(self.loss_dict, open(file_path, 'wb'))
+                return instance_cont_loss,classwise_loss
+            # mean instance simmatch loss: consistency across classwise prototypes
+            else:
+                instance_cont_tuple = bank.get_simmatch_mean_loss(shared_features_wa,shared_features_sa,ulb_inds) # mean_simmatch_loss, instead of logits for each instance, classwise logits are used. 
+                if instance_cont_tuple is None:
+                    return None,None
+                nonzero_mask = torch.logical_not(torch.eq(gt_boxes, 0).all(dim=-1))
+                ulb_nonzero_mask = nonzero_mask[ulb_inds]
+                if ulb_nonzero_mask.sum() == 0:
+                    print(f"No pl instances predicted for strongly augmented frame(s) {batch_dict['frame_id'][ulb_inds.cpu().numpy()]}")
+                    return None,None
+                
+                loss_labels = instance_cont_tuple[1]
+                instance_cont_tuple[0] = instance_cont_tuple[0].view(B, N, -1)
+                instance_cont_sum = instance_cont_tuple[0].sum(-1) # calculates sum of all terms of CE for a particular instance
+                instance_cont_loss = instance_cont_sum[ulb_inds][ulb_nonzero_mask].mean() # mean of all instances
+                
+                # metrics update
+                Car_instance_proto_loss = instance_cont_tuple[0][:,:,0][ulb_inds][ulb_nonzero_mask].mean(-1) 
+                Ped_instance_proto_loss =  instance_cont_tuple[0][:,:,1][ulb_inds][ulb_nonzero_mask].mean(-1)
+                Cyc_instance_proto_loss = instance_cont_tuple[0][:,:,2][ulb_inds][ulb_nonzero_mask].mean(-1)
+                classwise_loss = {'Car_Pl':{},'Pedestrian_Pl':{},'Cyclist_Pl':{}}
+                for cind,class_name in enumerate(['Car','Pedestrian','Cyclist']):
+                    classwise_loss[f'{class_name}_Pl'] = {
+                            'Car_proto': Car_instance_proto_loss * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT'],
+                            'Ped_proto': Ped_instance_proto_loss * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT'],
+                            'Cyc_proto': Cyc_instance_proto_loss * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT'],
+                    }
+                self.loss_dict['cos_sim_pl_wa'].append(instance_cont_tuple[2].tolist())
+                self.loss_dict['cos_sim_pl_sa'].append(instance_cont_tuple[3].tolist())
+                if self.model_cfg.get('STORE_RAW_SIM_IN_PKL', False):
+                    output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
+                    file_path = os.path.join(output_dir, 'cos_sim.pkl')
+                    pickle.dump(self.loss_dict, open(file_path, 'wb'))
+                
+                return instance_cont_loss,classwise_loss
+
+    def gather_tensors(self,tensor):
+            """
+            Returns the gathered tensor to all GPUs in DDP else returns the tensor as such
+            dist.gather_all needs the gathered tensors to be of same size.
+            We get the sizes of the tensors first, zero pad them to match the size
+            Then gather and filter the padding
+
+            Args:
+                tensor: tensor to be gathered
+                
+            """
+
+            assert tensor.ndim == 3,"features should be of shape N,1,256"
+            tensor = tensor.view(-1,257)
+            
+            if not dist.is_initialized():
+                return tensor
+                # Determine sizes first
+            WORLD_SIZE = dist.get_world_size()
+            local_size = torch.tensor(tensor.size(), device=tensor.device)
+            all_sizes = [torch.zeros_like(local_size) for _ in range(WORLD_SIZE)]
+            
+            dist.barrier() 
+            dist.all_gather(all_sizes,local_size)
+            dist.barrier()
+
+            print(f'all_sizes {all_sizes}')
+            # make zero-padded version https://stackoverflow.com/questions/71433507/pytorch-python-distributed-multiprocessing-gather-concatenate-tensor-arrays-of
+            max_length = max([size[0] for size in all_sizes])
+            
+            diff = max_length - local_size[0].item()
+            if diff:
+                pad_size =[diff.item()] #pad with zeros 
+                if local_size.ndim >= 1:
+                    pad_size.extend(dimension.item() for dimension in local_size[1:])
+                padding = torch.zeros(pad_size, device=tensor.device, dtype=tensor.dtype)
+                tensor = torch.cat((tensor,padding),)
+
+            all_tensors_padded = [torch.zeros_like(tensor) for _ in range(WORLD_SIZE)]
+
+            dist.barrier()
+            dist.all_gather(all_tensors_padded,tensor)
+            dist.barrier()
+
+            gathered_tensor = torch.cat(all_tensors_padded)
+            non_zero_mask = torch.any(gathered_tensor!=0,dim=-1).squeeze()
+            gathered_tensor = gathered_tensor[non_zero_mask]
+            return gathered_tensor
 
     def _align_instance_pairs(self, batch_dict,batch_dict_pair,indices):
         
@@ -532,11 +834,16 @@ class PVRCNN_SSL(Detector3DTemplate):
     @staticmethod
     def _prep_tb_dict(tb_dict, lbl_inds, ulb_inds, reduce_loss_fn):
         tb_dict_ = {}
+        ignore_keys = ['proto_cont_loss','instance_cont_loss','classwise_instance_cont_loss_Car','classwise_instance_cont_loss_Pedestrian','classwise_instance_cont_loss_Cyclist',
+                        'mCont_loss','mCont_Car_lb','mCont_Pedestrian_lb','mCont_Cyclist_lb','mCont_loss_instance','mCont_Car_lb_inst','mCont_Pedestrian_lb_inst','mCont_Cyclist_lb_inst',
+                        'classwise_proto_sim_loss_Car','classwise_proto_sim_loss_Pedestrian','classwise_proto_sim_loss_Cyclist','proto_sim_loss']
         for key in tb_dict.keys():
             if key == 'proto_cont_loss':
                 tb_dict_[key] = tb_dict[key]
             elif "instloss" in key:
                 tb_dict_[key] = tb_dict[key]
+            elif key in ignore_keys:
+                tb_dict_[key] = tb_dict[key]            
             elif 'loss' in key or 'acc' in key or 'point_pos_num' in key:
                 tb_dict_[f"{key}_labeled"] = reduce_loss_fn(tb_dict[key][lbl_inds, ...])
                 tb_dict_[f"{key}_unlabeled"] = reduce_loss_fn(tb_dict[key][ulb_inds, ...])
@@ -590,7 +897,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         box_labels = box_labels.cpu().numpy()
         V.draw_scenes(points=points, gt_boxes=boxes, gt_labels=box_labels)
 
-    def dump_statistics(self, batch_dict, unlabeled_inds,labeled_inds):
+    def dump_statistics(self, batch_dict, unlabeled_inds):
         # Store different types of scores over all itrs and epochs and dump them in a pickle for offline modeling
         # TODO (shashank) : Can be optimized later to save computational time, currently takes about 0.002sec
         batch_roi_labels = self.pv_rcnn.roi_head.forward_ret_dict['roi_labels'][unlabeled_inds]
@@ -605,6 +912,40 @@ class PVRCNN_SSL(Detector3DTemplate):
         gt_labels = batch_dict['gt_boxes'][:,:,7][labeled_inds].view(-1)
         
 
+        batch_ori_gt_boxes_ema = batch_dict['ori_unlabeled_boxes_ema']
+        batch_ori_gt_boxes_ema = [ori_gt_boxes_ema.clone().detach() for ori_gt_boxes_ema in batch_ori_gt_boxes_ema]
+
+        batch_pls = batch_dict_ema['prefilter_pls']['gt_boxes_ema'][unlabeled_inds]
+        batch_pls = [pls.clone().detach() for pls in batch_pls]
+        for i in range(len(batch_pls)):
+            valid_pl_boxes_mask = torch.logical_not(torch.all(batch_pls[i] == 0, dim=-1))
+            valid_pls = batch_pls[i][valid_pl_boxes_mask]
+            valid_pl_labels = batch_pls[i][valid_pl_boxes_mask][:, -1].int() 
+
+            valid_gt_boxes_pl_mask = torch.logical_not(torch.all(batch_ori_gt_boxes_ema[i] == 0, dim=-1))
+            valid_gt_boxes_pl = batch_ori_gt_boxes_ema[i][valid_gt_boxes_pl_mask]
+            valid_gt_pl_labels = batch_ori_gt_boxes_ema[i][valid_gt_boxes_pl_mask][:, -1].int()
+            num_pls = valid_pl_boxes_mask.sum()
+            num_gt_pls = valid_gt_boxes_pl_mask.sum()
+            cur_unlabeled_ind = unlabeled_inds[i]
+
+            if num_pls > 0 and num_gt_pls > 0:
+                # Find IoU between Student's PL v/s Teacher's GTs
+                overlap = iou3d_nms_utils.boxes_iou3d_gpu(valid_pls[:, 0:7], valid_gt_boxes_pl[:, 0:7])
+                pls_iou_max, assigned_gt_inds = overlap.max(dim=1)
+                self.val_dict['iou_pl_gt'].extend(pls_iou_max.tolist())
+                self.val_dict['assigned_gt_pl_labels'].extend(valid_gt_pl_labels[assigned_gt_inds].tolist())
+
+                assert batch_dict_ema['prefilter_pls']['rcnn_scores_ema_prefilter'][cur_unlabeled_ind].shape[0] == valid_pl_boxes_mask.shape[0]
+                assert batch_dict_ema['prefilter_pls']['pseudo_sem_scores_multiclass'][cur_unlabeled_ind].shape[0] == valid_pl_boxes_mask.shape[0]
+                assert batch_dict_ema['prefilter_pls']['pseudo_sim_scores_emas_prefilter'][cur_unlabeled_ind].shape[0] == valid_pl_boxes_mask.shape[0]
+                
+                self.val_dict['rcnn_scores_pl'].extend((batch_dict_ema['prefilter_pls']['rcnn_scores_ema_prefilter'][cur_unlabeled_ind][valid_pl_boxes_mask]).tolist())
+                self.val_dict['pseudo_sem_scores_pl'].extend((batch_dict_ema['prefilter_pls']['pseudo_sem_scores_multiclass'][cur_unlabeled_ind][valid_pl_boxes_mask]).tolist())
+                self.val_dict['pseudo_sim_scores_pl'].extend((batch_dict_ema['prefilter_pls']['pseudo_sim_scores_emas_prefilter'][cur_unlabeled_ind][valid_pl_boxes_mask]).tolist())
+                self.val_dict['pl_iteration'].extend((torch.ones_like(pls_iou_max) * batch_dict['cur_iteration']).tolist())
+                self.val_dict['pseudo_instance_sim_scores_pl'].extend((batch_dict_ema['prefilter_pls']['pseudo_instance_sim_scores_emas_prefilter'][cur_unlabeled_ind][valid_pl_boxes_mask]).tolist())  
+
         for i in range(len(batch_rois)):
             valid_rois_mask = torch.logical_not(torch.all(batch_rois[i] == 0, dim=-1))
             valid_rois = batch_rois[i][valid_rois_mask]
@@ -614,7 +955,6 @@ class PVRCNN_SSL(Detector3DTemplate):
             valid_gt_boxes_mask = torch.logical_not(torch.all(batch_ori_gt_boxes[i] == 0, dim=-1))
             valid_gt_boxes = batch_ori_gt_boxes[i][valid_gt_boxes_mask]
             valid_gt_boxes[:, -1] -= 1  # Starting class indices from zero
-
             num_gts = valid_gt_boxes_mask.sum()
             num_preds = valid_rois_mask.sum()
 
@@ -631,28 +971,31 @@ class PVRCNN_SSL(Detector3DTemplate):
                 cur_pred_score = torch.sigmoid(batch_dict['batch_cls_preds'][cur_unlabeled_ind]).squeeze()
                 self.val_dict['pred_scores'].extend(cur_pred_score.tolist())
 
-                if 'rcnn_cls_score_teacher' in self.pv_rcnn.roi_head.forward_ret_dict:
-                    cur_teacher_pred_score = self.pv_rcnn.roi_head.forward_ret_dict['rcnn_cls_score_teacher'][
-                        cur_unlabeled_ind]
-                    self.val_dict['teacher_pred_scores'].extend(cur_teacher_pred_score.tolist())
+                # if 'rcnn_cls_score_teacher' in self.pv_rcnn.roi_head.forward_ret_dict:
+                #     cur_teacher_pred_score = self.pv_rcnn.roi_head.forward_ret_dict['rcnn_cls_score_teacher'][
+                #         cur_unlabeled_ind]
+                #     self.val_dict['teacher_pred_scores'].extend(cur_teacher_pred_score.tolist())
 
-                    cur_weight = self.pv_rcnn.roi_head.forward_ret_dict['rcnn_cls_weights'][cur_unlabeled_ind]
-                    self.val_dict['weights'].extend(cur_weight.tolist())
+                #     cur_weight = self.pv_rcnn.roi_head.forward_ret_dict['rcnn_cls_weights'][cur_unlabeled_ind]
+                #     self.val_dict['weights'].extend(cur_weight.tolist())
 
                 cur_roi_score = torch.sigmoid(self.pv_rcnn.roi_head.forward_ret_dict['roi_scores'][cur_unlabeled_ind])
                 self.val_dict['roi_scores'].extend(cur_roi_score.tolist())
-
+                cur_instance_sim_score = self.pv_rcnn.roi_head.forward_ret_dict['roi_instance_sim_scores'][cur_unlabeled_ind]
+                self.val_dict['roi_instance_sim_scores'].extend(cur_instance_sim_score.tolist())
+                
                 # cur_pcv_score = self.pv_rcnn.roi_head.forward_ret_dict['pcv_scores'][cur_unlabeled_ind]
                 # self.val_dict['pcv_scores'].extend(cur_pcv_score.tolist())
 
-                # cur_num_points_roi = self.pv_rcnn.roi_head.forward_ret_dict['num_points_in_roi'][cur_unlabeled_ind]
-                # self.val_dict['num_points_in_roi'].extend(cur_num_points_roi.tolist())
+                # # cur_num_points_roi = self.pv_rcnn.roi_head.forward_ret_dict['num_points_in_roi'][cur_unlabeled_ind]
+                # # self.val_dict['num_points_in_roi'].extend(cur_num_points_roi.tolist())
 
                 cur_roi_label = self.pv_rcnn.roi_head.forward_ret_dict['roi_labels'][cur_unlabeled_ind].squeeze()
                 self.val_dict['class_labels'].extend(cur_roi_label.tolist())
 
                 cur_iteration = torch.ones_like(preds_iou_max) * (batch_dict['cur_iteration'])
                 self.val_dict['iteration'].extend(cur_iteration.tolist())
+
                 start_epoch = self.model_cfg['ROI_HEAD'].get('INSTANCE_CONTRASTIVE_LOSS_START_EPOCH', 0)
                 stop_epoch = self.model_cfg['ROI_HEAD'].get('INSTANCE_CONTRASTIVE_LOSS_STOP_EPOCH', 60)
                 if self.model_cfg['ROI_HEAD']['ENABLE_INSTANCE_SUP_LOSS'] and start_epoch<=batch_dict['cur_epoch']<stop_epoch:
@@ -671,6 +1014,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                     # self.val_dict['instloss_cyc'].extend(batch_dict['instloss_cyc'])
 
         # replace old pickle data (if exists) with updated one
+        # if (batch_dict['cur_epoch']) == batch_dict['total_epochs']:
         output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
         file_path = os.path.join(output_dir, 'scores.pkl')
         pickle.dump(self.val_dict, open(file_path, 'wb'))
@@ -712,11 +1056,17 @@ class PVRCNN_SSL(Detector3DTemplate):
         pseudo_labels = []
         pseudo_boxes_var = []
         pseudo_scores_var = []
+        pseudo_sem_scores_multiclass = []
+        pseudo_sim_scores = []
+        pseudo_instance_sim_scores = []
         for ind in unlabeled_inds:
             pseudo_score = pred_dicts[ind]['pred_scores']
             pseudo_box = pred_dicts[ind]['pred_boxes']
             pseudo_label = pred_dicts[ind]['pred_labels']
             pseudo_sem_score = pred_dicts[ind]['pred_sem_scores']
+            pseudo_sem_score_multiclass = pred_dicts[ind]['pred_sem_scores_multiclass']
+            pseudo_sim_score = pred_dicts[ind]['pred_sim_scores']
+            pseudo_instance_sim_score = pred_dicts[ind]['pred_instance_sim_scores']
             # TODO(farzad) REFACTOR LATER!
             pseudo_box_var = -1 * torch.ones_like(pseudo_box)
             if "pred_boxes_var" in pred_dicts[ind].keys():
@@ -731,6 +1081,9 @@ class PVRCNN_SSL(Detector3DTemplate):
                 pseudo_scores.append(pseudo_label.new_zeros((1,)).float())
                 pseudo_scores_var.append(pseudo_label.new_zeros((1,)).float())
                 pseudo_labels.append(pseudo_label.new_zeros((1,)).float())
+                pseudo_sem_scores_multiclass.append(pseudo_label.new_zeros((1,3)).float())
+                pseudo_sim_scores.append(pseudo_label.new_zeros((1,3)).float())
+                pseudo_instance_sim_scores.append(pseudo_label.new_zeros((1,3)).float())
                 continue
 
             pseudo_boxes.append(pseudo_box)
@@ -739,21 +1092,34 @@ class PVRCNN_SSL(Detector3DTemplate):
             pseudo_scores.append(pseudo_score)
             pseudo_scores_var.append(pseudo_score_var)
             pseudo_labels.append(pseudo_label)
+            pseudo_sem_scores_multiclass.append(pseudo_sem_score_multiclass)
+            pseudo_sim_scores.append(pseudo_sim_score)
+            pseudo_instance_sim_scores.append(pseudo_instance_sim_score)
 
-        return pseudo_boxes, pseudo_labels, pseudo_scores, pseudo_sem_scores, pseudo_boxes_var, pseudo_scores_var
+        return pseudo_boxes, pseudo_labels, pseudo_scores, pseudo_sem_scores, pseudo_boxes_var, pseudo_scores_var, pseudo_sem_scores_multiclass, pseudo_sim_scores,pseudo_instance_sim_scores
 
     # TODO(farzad) refactor and remove this!
     def _filter_pseudo_labels(self, pred_dicts, unlabeled_inds):
         pseudo_boxes = []
         pseudo_scores = []
         pseudo_sem_scores = []
-        for pseudo_box, pseudo_label, pseudo_score, pseudo_sem_score, pseudo_box_var, pseudo_score_var in zip(
+        pseudo_sem_scores_multiclass = []
+        pseudo_sim_scores = []
+        pseudo_instance_sim_scores = []
+        for pseudo_box, pseudo_label, pseudo_score, pseudo_sem_score, pseudo_box_var, pseudo_score_var,pseudo_sem_score_multiclass,pseudo_sim_score,pseudo_instance_sim_score in zip(
                 *self._unpack_predictions(pred_dicts, unlabeled_inds)):
-
-            if pseudo_label[0] == 0:
+            assert isinstance(pseudo_sem_score_multiclass, torch.Tensor), "stupid assert"
+            if pseudo_box.sum() == 0:
                 pseudo_boxes.append(torch.cat([pseudo_box, pseudo_label.view(-1, 1).float()], dim=1))
                 pseudo_sem_scores.append(pseudo_sem_score)
                 pseudo_scores.append(pseudo_score)
+                assert isinstance(pseudo_sem_score_multiclass, torch.Tensor), "stupid assert"
+                pseudo_sem_score_multiclass = torch.zeros((pseudo_box.shape[0], 3), device=pseudo_box.device)
+                pseudo_sim_score = torch.zeros((pseudo_box.shape[0], 3), device=pseudo_box.device)
+                assert pseudo_sem_score_multiclass.shape[-1] == 3, "stupid assert"
+                pseudo_sem_scores_multiclass.append(pseudo_sem_score_multiclass)
+                pseudo_sim_scores.append(pseudo_sim_score)
+                pseudo_instance_sim_scores.append(pseudo_instance_sim_score)
                 continue
 
             pl_thresh = self.thresh
@@ -768,25 +1134,48 @@ class PVRCNN_SSL(Detector3DTemplate):
             sem_conf_thresh = torch.tensor(self.sem_thresh, device=pseudo_label.device).unsqueeze(
                 0).repeat(len(pseudo_label), 1).gather(dim=1, index=(pseudo_label - 1).unsqueeze(-1))
 
-            valid_inds = pseudo_score > conf_thresh.squeeze()
+            if self.model_cfg.ROI_HEAD.HYBRID_THRESHOLDING:
+                if (pseudo_sim_score.sum(-1) <= 0).any(): # until the time we have sim scores for all classes
+                    valid_inds = pseudo_score > conf_thresh.squeeze()
+                   
+                else:
+                    alpha = self.model_cfg.ROI_HEAD.HYBRID_ALPHA
+                    sim_scores = torch.gather(pseudo_sim_score, dim=-1, index=(pseudo_label - 1).unsqueeze(-1)).squeeze(-1)
+                    hybrid_scores = (alpha * sim_scores) + ((1 - alpha) * pseudo_score)  
+                    hybrid_conf_thresh = torch.tensor(self.hybrid_thresh, device=pseudo_label.device).unsqueeze(
+                        0).repeat(len(pseudo_label), 1).gather(dim=1, index=(pseudo_label - 1).unsqueeze(-1))
 
+                    valid_inds = hybrid_scores > hybrid_conf_thresh.squeeze()
+            else:
+                valid_inds = pseudo_score > conf_thresh.squeeze()
+            
             valid_inds = valid_inds & (pseudo_sem_score > sem_conf_thresh.squeeze())
 
             pseudo_sem_score = pseudo_sem_score[valid_inds]
             pseudo_box = pseudo_box[valid_inds]
             pseudo_label = pseudo_label[valid_inds]
             pseudo_score = pseudo_score[valid_inds]
-
+            pseudo_sem_score_multiclass = pseudo_sem_score_multiclass[valid_inds]
+            assert isinstance(pseudo_sem_score_multiclass, torch.Tensor), "stupid assert"
+            pseudo_sim_score = pseudo_sim_score[valid_inds] if pseudo_sim_score is not None else None
+            assert isinstance(pseudo_sim_score, torch.Tensor), "stupid assert"
+            pseudo_instance_sim_score = pseudo_instance_sim_score[valid_inds] if pseudo_instance_sim_score is not None else None
             pseudo_boxes.append(torch.cat([pseudo_box, pseudo_label.view(-1, 1).float()], dim=1))
             pseudo_sem_scores.append(pseudo_sem_score)
             pseudo_scores.append(pseudo_score)
+            pseudo_sem_scores_multiclass.append(pseudo_sem_score_multiclass)
+            pseudo_sim_scores.append(pseudo_sim_score)
+            pseudo_instance_sim_scores.append(pseudo_instance_sim_score)
 
-        return pseudo_boxes, pseudo_scores, pseudo_sem_scores
+        return pseudo_boxes, pseudo_scores, pseudo_sem_scores, pseudo_sem_scores_multiclass, pseudo_sim_scores,pseudo_instance_sim_scores
 
-    def _fill_with_pseudo_labels(self, batch_dict, pseudo_boxes, unlabeled_inds, labeled_inds, key=None):
+    def _fill_with_pseudo_labels(self, batch_dict, pseudo_boxes, pseudo_scores, pseudo_sem_scores_multiclass, pseudo_sim_scores,pseudo_instance_sim_scores, unlabeled_inds, labeled_inds, key=None):
         key = 'gt_boxes' if key is None else key
         max_box_num = batch_dict['gt_boxes'].shape[1]
-
+        batch_dict['pseudo_sem_scores_multiclass'] = torch.zeros((batch_dict['gt_boxes'].shape[0], max_box_num, 3), device=batch_dict['gt_boxes'].device)
+        batch_dict['pseudo_sim_scores'] = torch.zeros((batch_dict['gt_boxes'].shape[0], max_box_num, 3), device=batch_dict['gt_boxes'].device)
+        batch_dict['pseudo_instance_sim_scores'] = torch.zeros((batch_dict['gt_boxes'].shape[0], max_box_num, 3), device=batch_dict['gt_boxes'].device)
+        batch_dict['pseudo_scores'] = torch.zeros((batch_dict['gt_boxes'].shape[0], max_box_num), device=batch_dict['gt_boxes'].device)
         # Ignore the count of pseudo boxes if filled with default values(zeros) when no preds are made
         max_pseudo_box_num = max(
             [torch.logical_not(torch.all(ps_box == 0, dim=-1)).sum().item() for ps_box in pseudo_boxes])
@@ -796,27 +1185,142 @@ class PVRCNN_SSL(Detector3DTemplate):
                 diff = max_box_num - pseudo_box.shape[0]
                 if diff > 0:
                     pseudo_box = torch.cat([pseudo_box, torch.zeros((diff, 8), device=pseudo_box.device)], dim=0)
+                    assert isinstance(pseudo_sem_scores_multiclass[i],torch.Tensor), "stupid assert"
+                    pseudo_sem_score_multiclass = torch.cat([pseudo_sem_scores_multiclass[i], torch.zeros((diff, 3), device=pseudo_box.device)], dim=0)
+                    pseudo_sim_score = torch.cat([pseudo_sim_scores[i], torch.zeros((diff, 3), device=pseudo_box.device)], dim=0) 
+                    pseudo_instance_sim_score = torch.cat([pseudo_instance_sim_scores[i], torch.zeros((diff, 3), device=pseudo_box.device)], dim=0) 
+                    pseudo_score = torch.cat([pseudo_scores[i], torch.zeros((diff,), device=pseudo_box.device)], dim=0)
+                else:
+                    pseudo_sem_score_multiclass = pseudo_sem_scores_multiclass[i]
+                    pseudo_sim_score = pseudo_sim_scores[i]
+                    pseudo_instance_sim_score = pseudo_instance_sim_scores[i]
+                    pseudo_score = pseudo_scores[i]
                 batch_dict[key][unlabeled_inds[i]] = pseudo_box
+                batch_dict['pseudo_sem_scores_multiclass'][unlabeled_inds[i]] = pseudo_sem_score_multiclass
+                batch_dict['pseudo_sim_scores'][unlabeled_inds[i]] = pseudo_sim_score 
+                batch_dict['pseudo_instance_sim_scores'][unlabeled_inds[i]] = pseudo_instance_sim_score
+                batch_dict['pseudo_scores'][unlabeled_inds[i]] = pseudo_score
         else:
             ori_boxes = batch_dict['gt_boxes']
             ori_ins_ids = batch_dict['instance_idx']
             new_boxes = torch.zeros((ori_boxes.shape[0], max_pseudo_box_num, ori_boxes.shape[2]),
                                     device=ori_boxes.device)
             new_ins_idx = torch.full((ori_boxes.shape[0], max_pseudo_box_num), fill_value=-1, device=ori_boxes.device)
+            new_sem_boxes = torch.zeros((ori_boxes.shape[0], max_pseudo_box_num, 3),device=ori_boxes.device)
+            new_sim_boxes = torch.zeros((ori_boxes.shape[0], max_pseudo_box_num, 3),device=ori_boxes.device)
+            new_scores = torch.zeros((ori_boxes.shape[0], max_pseudo_box_num),device=ori_boxes.device)
+            new_instance_sim_boxes = torch.zeros((ori_boxes.shape[0], max_pseudo_box_num, 3),device=ori_boxes.device)
             for idx in labeled_inds:
                 diff = max_pseudo_box_num - ori_boxes[idx].shape[0]
                 new_box = torch.cat([ori_boxes[idx], torch.zeros((diff, 8), device=ori_boxes[idx].device)], dim=0)
                 new_boxes[idx] = new_box
                 new_ins_idx[idx] = torch.cat([ori_ins_ids[idx], -torch.ones((diff,), device=ori_boxes[idx].device)], dim=0)
-            for i, pseudo_box in enumerate(pseudo_boxes):
-
+                new_sem_boxes[idx] = torch.cat([batch_dict['pseudo_sem_scores_multiclass'][idx], torch.zeros((diff, 3), device=ori_boxes[idx].device)], dim=0)
+                new_sim_boxes[idx] = torch.cat([batch_dict['pseudo_sim_scores'][idx], torch.zeros((diff, 3), device=ori_boxes[idx].device)], dim=0) 
+                new_instance_sim_boxes[idx] = torch.cat([batch_dict['pseudo_instance_sim_scores'][idx], torch.zeros((diff, 3), device=ori_boxes[idx].device)], dim=0)
+                new_scores[idx] = torch.cat([batch_dict['pseudo_scores'][idx], torch.zeros((diff,), device=ori_boxes[idx].device)], dim=0)
+            for i, pseudo_box in enumerate(pseudo_boxes):    
                 diff = max_pseudo_box_num - pseudo_box.shape[0]
                 if diff > 0:
                     pseudo_box = torch.cat([pseudo_box, torch.zeros((diff, 8), device=pseudo_box.device)], dim=0)
+                    pseudo_sem_score_multiclass = torch.cat([pseudo_sem_scores_multiclass[i], torch.zeros((diff, 3), device=pseudo_box.device)], dim=0)
+                    pseudo_sim_score = torch.cat([pseudo_sim_scores[i], torch.zeros((diff, 3), device=pseudo_box.device)], dim=0) if batch_dict['pseudo_sim_scores'][idx] is not None else None
+                    pseudo_instance_sim_score = torch.cat([pseudo_instance_sim_scores[i], torch.zeros((diff, 3), device=pseudo_box.device)], dim=0) 
+                    pseudo_score = torch.cat([pseudo_scores[i], torch.zeros((diff,), device=pseudo_box.device)], dim=0)
+                else:
+                    pseudo_sem_score_multiclass = pseudo_sem_scores_multiclass[i]
+                    pseudo_sim_score = pseudo_sim_scores[i]
+                    pseudo_instance_sim_score = pseudo_instance_sim_scores[i]
+                    pseudo_score = pseudo_scores[i]
                 new_boxes[unlabeled_inds[i]] = pseudo_box
+                new_sem_boxes[unlabeled_inds[i]] = pseudo_sem_score_multiclass
+                new_sim_boxes[unlabeled_inds[i]] = pseudo_sim_score
+                new_instance_sim_boxes[unlabeled_inds[i]] = pseudo_instance_sim_score
+                new_scores[unlabeled_inds[i]] = pseudo_score
+
             batch_dict[key] = new_boxes
             batch_dict['instance_idx'] = new_ins_idx
+            batch_dict['pseudo_sem_scores_multiclass'] = new_sem_boxes
+            batch_dict['pseudo_sim_scores'] = new_sim_boxes
+            batch_dict['pseudo_instance_sim_scores'] = new_instance_sim_boxes
+            batch_dict['pseudo_scores'] = new_scores
 
+    def _fill_with_pseudo_labels_prefilter(self, batch_dict, pseudo_boxes, pseudo_sem_scores_multiclass, pseudo_sim_scores, pseudo_scores,pseudo_instance_sim_scores,unlabeled_inds, labeled_inds, key=None):
+            key = 'gt_boxes' if key is None else key
+            max_box_num = batch_dict['gt_boxes'].shape[1]
+            batch_dict['pseudo_sem_scores_multiclass'] = torch.zeros((batch_dict['gt_boxes'].shape[0], max_box_num, 3), device=batch_dict['gt_boxes'].device) #[N,3]
+            batch_dict['pseudo_sim_scores'] = torch.zeros((batch_dict['gt_boxes'].shape[0], max_box_num, 3), device=batch_dict['gt_boxes'].device)
+            batch_dict['pseudo_scores'] = torch.zeros((batch_dict['gt_boxes'].shape[0], max_box_num), device=batch_dict['gt_boxes'].device)
+            batch_dict['pseudo_instance_sim_scores'] = torch.zeros((batch_dict['gt_boxes'].shape[0], max_box_num, 3), device=batch_dict['gt_boxes'].device)
+
+            # Ignore the count of pseudo boxes if filled with default values(zeros) when no preds are made
+            max_pseudo_box_num = max(
+                [torch.logical_not(torch.all(ps_box == 0, dim=-1)).sum().item() for ps_box in pseudo_boxes])
+
+            if max_box_num >= max_pseudo_box_num:
+                for i, pseudo_box in enumerate(pseudo_boxes):
+                    diff = max_box_num - pseudo_box.shape[0]
+                    if diff > 0:
+                        pseudo_box = torch.cat([pseudo_box, torch.zeros((diff, 8), device=pseudo_box.device)], dim=0)
+                        assert isinstance(pseudo_sem_scores_multiclass[i],torch.Tensor), "stupid assert"
+                        pseudo_sem_score_multiclass = torch.cat([pseudo_sem_scores_multiclass[i], torch.zeros((diff, 3), device=pseudo_box.device)], dim=0)
+                        pseudo_sim_score = torch.cat([pseudo_sim_scores[i], torch.zeros((diff, 3), device=pseudo_box.device)], dim=0) 
+                        pseudo_score = torch.cat([pseudo_scores[i], torch.zeros((diff,), device=pseudo_box.device)], dim=0)
+                        pseudo_instance_sim_score = torch.cat([pseudo_instance_sim_scores[i], torch.zeros((diff, 3), device=pseudo_box.device)], dim=0) 
+
+                    else:
+                        pseudo_sem_score_multiclass = pseudo_sem_scores_multiclass[i]
+                        pseudo_sim_score = pseudo_sim_scores[i]
+                        pseudo_score = pseudo_scores[i]
+                        pseudo_instance_sim_score = pseudo_instance_sim_scores[i]
+                    batch_dict[key][unlabeled_inds[i]] = pseudo_box
+                    batch_dict['pseudo_sem_scores_multiclass'][unlabeled_inds[i]] = pseudo_sem_score_multiclass
+                    batch_dict['pseudo_sim_scores'][unlabeled_inds[i]] = pseudo_sim_score 
+                    batch_dict['pseudo_scores'][unlabeled_inds[i]] = pseudo_score
+                    batch_dict['pseudo_instance_sim_scores'][unlabeled_inds[i]] = pseudo_instance_sim_score
+                    
+            else:
+                ori_boxes = batch_dict['gt_boxes']
+                ori_ins_ids = batch_dict['instance_idx']
+                new_boxes = torch.zeros((ori_boxes.shape[0], max_pseudo_box_num, ori_boxes.shape[2]),
+                                        device=ori_boxes.device)
+                new_ins_idx = torch.full((ori_boxes.shape[0], max_pseudo_box_num), fill_value=-1, device=ori_boxes.device)
+                new_sem_boxes = torch.zeros((ori_boxes.shape[0], max_pseudo_box_num, 3),device=ori_boxes.device)
+                new_sim_boxes = torch.zeros((ori_boxes.shape[0], max_pseudo_box_num, 3),device=ori_boxes.device)
+                new_instance_sim_scores = torch.zeros((ori_boxes.shape[0], max_pseudo_box_num, 3),device=ori_boxes.device)
+                new_scores = torch.zeros((ori_boxes.shape[0], max_pseudo_box_num),device=ori_boxes.device)
+                for idx in labeled_inds:
+                    diff = max_pseudo_box_num - ori_boxes[idx].shape[0]
+                    new_box = torch.cat([ori_boxes[idx], torch.zeros((diff, 8), device=ori_boxes[idx].device)], dim=0)
+                    new_boxes[idx] = new_box
+                    new_ins_idx[idx] = torch.cat([ori_ins_ids[idx], -torch.ones((diff,), device=ori_boxes[idx].device)], dim=0)
+                    new_sem_boxes[idx] = torch.cat([batch_dict['pseudo_sem_scores_multiclass'][idx], torch.zeros((diff, 3), device=ori_boxes[idx].device)], dim=0)
+                    new_sim_boxes[idx] = torch.cat([batch_dict['pseudo_sim_scores'][idx], torch.zeros((diff, 3), device=ori_boxes[idx].device)], dim=0) 
+                    new_instance_sim_scores[idx] = torch.cat([batch_dict['pseudo_instance_sim_scores'][idx], torch.zeros((diff, 3), device=ori_boxes[idx].device)], dim=0)               
+                for i, pseudo_box in enumerate(pseudo_boxes):
+                    diff = max_pseudo_box_num - pseudo_box.shape[0]
+                    if diff > 0:
+                        pseudo_box = torch.cat([pseudo_box, torch.zeros((diff, 8), device=pseudo_box.device)], dim=0)
+                        pseudo_sem_score_multiclass = torch.cat([pseudo_sem_scores_multiclass[i], torch.zeros((diff, 3), device=pseudo_box.device)], dim=0)
+                        pseudo_sim_score = torch.cat([pseudo_sim_scores[i], torch.zeros((diff, 3), device=pseudo_box.device)], dim=0) 
+                        pseudo_score = torch.cat([pseudo_scores[i], torch.zeros((diff,), device=pseudo_box.device)], dim=0)
+                        pseudo_instance_sim_score = torch.cat([pseudo_instance_sim_scores[i], torch.zeros((diff, 3), device=pseudo_box.device)], dim=0)
+                    else:
+                        pseudo_sem_score_multiclass = pseudo_sem_scores_multiclass[i]
+                        pseudo_sim_score = pseudo_sim_scores[i]
+                        pseudo_score = pseudo_scores[i]
+                        pseudo_instance_sim_score = pseudo_instance_sim_scores[i]
+                    new_boxes[unlabeled_inds[i]] = pseudo_box
+                    new_sem_boxes[unlabeled_inds[i]] = pseudo_sem_score_multiclass
+                    new_sim_boxes[unlabeled_inds[i]] = pseudo_sim_score
+                    new_scores[unlabeled_inds[i]] = pseudo_score
+                    new_instance_sim_scores[unlabeled_inds[i]] = pseudo_instance_sim_score
+                batch_dict[key] = new_boxes
+                batch_dict['instance_idx'] = new_ins_idx
+                batch_dict['pseudo_sem_scores_multiclass'] = new_sem_boxes
+                batch_dict['pseudo_sim_scores'] = new_sim_boxes
+                batch_dict['pseudo_scores'] = new_scores
+                batch_dict['pseudo_instance_sim_scores'] = new_instance_sim_scores
     @staticmethod
     def apply_augmentation(batch_dict, batch_dict_org, unlabeled_inds, key='rois'):
         batch_dict[key][unlabeled_inds] = augmentor_utils.random_flip_along_x_bbox(
@@ -910,9 +1414,6 @@ class PVRCNN_SSL(Detector3DTemplate):
                 metrics_input['pseudo_score'].append(pseudo_score)
                 metrics_input['pseudo_sem_score'].append(pseudo_sem_score)
         self.thresh_registry.get(tag).update(**metrics_input)
-
-
-
 #gt_cls_count = torch.bincount(batch_dict['ori_unlabeled_boxes'][...,-1].view(-1).int().detach()).tolist()[1:]
 #labels
 #
@@ -929,3 +1430,97 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         # tb_dict_ = self._prep_tb_dict(tb_dict, lbl_inds, ulb_inds, reduce_loss_fn)
         # tb_dict_.update(**pl_count_dict)
+
+    def update_metrics_pred(self, targets_dict,pseudo_labels,mask_type='cls',bank=None):
+        pseudo_boxes, pseudo_labels, pseudo_score, pseudo_sem_score, pseudo_box_var, pseudo_score_var,pseudo_sem_score_multiclass,pseudo_sim_score,pseudo_instance_sim_score = self._unpack_predictions(pseudo_labels, targets_dict['unlabeled_inds'])
+        pseudo_boxes = [torch.cat([pseudo_box, pseudo_label.view(-1, 1).float()], dim=1) \
+                            for (pseudo_box, pseudo_label) in zip(pseudo_boxes, pseudo_labels)] # add label to boxes
+        # pseudo_sem_scores_multiclass = [pseudo_sem_score_multiclass]
+        # pseudo_sim_scores = torch.cat(pseudo_sim_score, dim=0).unsqueeze(0)
+        self._fill_with_pseudo_labels_prefilter(targets_dict, pseudo_boxes, pseudo_sem_score_multiclass, pseudo_sim_score, pseudo_score,pseudo_instance_sim_score,targets_dict['unlabeled_inds'], targets_dict['labeled_inds']) #TODO: check if this is correct
+        targets_dict['gt_boxes_emas_prefilter'] = targets_dict['gt_boxes'].clone()
+        targets_dict['pseudo_sem_scores_multiclass_emas_prefilter'] = targets_dict['pseudo_sem_scores_multiclass'].clone()
+        targets_dict['pseudo_sim_scores_emas_prefilter'] = targets_dict['pseudo_sim_scores'].clone()
+        targets_dict['rcnn_scores_ema_prefilter'] = targets_dict['pseudo_scores'].clone()
+        targets_dict['pseudo_instance_sim_scores_emas_prefilter'] = targets_dict['pseudo_instance_sim_scores'].clone()
+
+        self.apply_augmentation(targets_dict, targets_dict, targets_dict['unlabeled_inds'], key='gt_boxes')
+        metrics_input = defaultdict(list)
+        for i, uind in enumerate(targets_dict['unlabeled_inds']):
+            # mask = (targets_dict['reg_valid_mask'][uind] > 0) if mask_type == 'reg' else (
+            #             targets_dict['rcnn_cls_labels'][uind] >= 0)
+            # if mask.sum() == 0:
+            #     # print(f'Warning: No {mask_type} rois for unlabeled index {uind}')
+            #     continue
+
+            # (Proposals) PLs are passed in as ROIs
+            rois = targets_dict['gt_boxes'][uind].detach().clone()
+            roi_labels = targets_dict['gt_boxes'][...,-1][uind].unsqueeze(-1).clone().detach()
+            roi_scores_multiclass = targets_dict['pseudo_sem_scores_multiclass'][uind].clone().detach()
+            roi_sim_scores_multiclass = targets_dict['pseudo_sim_scores'][uind].clone().detach()
+            roi_instance_sim_scores_multiclass = targets_dict['pseudo_instance_sim_scores'][uind].detach().clone()
+            metrics_input['roi_instance_sim_scores'].append(roi_instance_sim_scores_multiclass)
+            metrics_input['rois'].append(rois)
+            metrics_input['roi_scores'].append(roi_scores_multiclass)
+            metrics_input['roi_sim_scores'].append(roi_sim_scores_multiclass)
+
+            # (Real labels) GT info: Original GTs are passed in as GTs
+            gt_labeled_boxes = targets_dict['ori_unlabeled_boxes'][i]
+            metrics_input['ground_truths'].append(gt_labeled_boxes)
+            metrics_input['roi_weights'] = None
+            metrics_input['roi_iou_wrt_pl'] = None
+            metrics_input['roi_target_scores'] = None
+
+            bs_id = targets_dict['points'][:, 0] == uind
+            points = targets_dict['points'][bs_id, 1:].detach().clone()
+            metrics_input['points'].append(points)
+        if len(metrics_input['rois']) == 0:
+            # print(f'Warning: No {mask_type} rois for any unlabeled index')
+            return
+        tag = f'pl_gt_metrics_before_filtering_{mask_type}'
+        metrics_registry.get(tag).update(**metrics_input)
+        return {
+            'gt_boxes_ema': targets_dict['gt_boxes_emas_prefilter'],
+            'pseudo_sem_scores_multiclass': targets_dict['pseudo_sem_scores_multiclass_emas_prefilter'],
+            'pseudo_sim_scores_emas_prefilter': targets_dict['pseudo_sim_scores_emas_prefilter'],
+            'pseudo_instance_sim_scores_emas_prefilter': targets_dict['pseudo_instance_sim_scores_emas_prefilter'],
+            'rcnn_scores_ema_prefilter' : targets_dict['rcnn_scores_ema_prefilter']
+        }
+
+    def update_metrics_pl(self,targets_dict, mask_type='cls'):
+        metrics_input = defaultdict(list)
+        for i, uind in enumerate(targets_dict['unlabeled_inds']):
+            # mask = (targets_dict['reg_valid_mask'][uind] > 0) if mask_type == 'reg' else (
+            #             targets_dict['rcnn_cls_labels'][uind] >= 0)
+            # if mask.sum() == 0:
+            #     # print(f'Warning: No {mask_type} rois for unlabeled index {uind}')
+            #     continue
+
+            # (Proposals) ROI info
+            rois = targets_dict['gt_boxes'][uind].detach().clone()
+            roi_labels = targets_dict['gt_boxes'][...,-1][uind].unsqueeze(-1).detach().clone()
+            roi_scores_multiclass = targets_dict['pseudo_sem_scores_multiclass'][uind].detach().clone()
+            roi_instance_sim_scores_multiclass = targets_dict['pseudo_instance_sim_scores'][uind].detach().clone()
+            roi_sim_scores_multiclass = targets_dict['pseudo_sim_scores'][uind].detach().clone()
+            roi_instance_sim_scores_multiclass = targets_dict['pseudo_instance_sim_scores'][uind].detach().clone()
+            metrics_input['rois'].append(rois)
+            metrics_input['roi_scores'].append(roi_scores_multiclass)
+            metrics_input['roi_sim_scores'].append(roi_sim_scores_multiclass)
+            metrics_input['roi_instance_sim_scores'].append(roi_instance_sim_scores_multiclass)
+
+            # (Real labels) GT info
+            gt_labeled_boxes = targets_dict['ori_unlabeled_boxes'][i]
+            metrics_input['ground_truths'].append(gt_labeled_boxes)
+            metrics_input['roi_weights'] = None
+            metrics_input['roi_iou_wrt_pl'] = None
+            metrics_input['roi_target_scores'] = None
+
+            bs_id = targets_dict['points'][:, 0] == uind
+            points = targets_dict['points'][bs_id, 1:].clone().detach()
+            metrics_input['points'].append(points)
+        if len(metrics_input['rois']) == 0:
+            # print(f'Warning: No {mask_type} rois for any unlabeled index')
+            return
+        tag = f'pl_gt_metrics_after_filtering_{mask_type}'
+        metrics_registry.get(tag).update(**metrics_input)
+        
