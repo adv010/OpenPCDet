@@ -29,12 +29,28 @@ def get_roi_metrics_input(targets_dict, mask_type='cls'):
         temperature = cfg.MODEL.ADAPTIVE_THRESH_CONFIG.AdaMatch.TEMPERATURE_SA
         roi_scores_multiclass = torch.softmax(targets_dict['roi_scores_logits'][uind][mask].detach().clone() / temperature, dim=-1)
         # roi_sim_scores_multiclass = targets_dict['roi_sim_scores'][uind][mask].detach().clone()
+        # roi_instance_sim_scores_multiclass = targets_dict['roi_instance_sim_scores'][uind][mask].detach().clone()
+        # roi_labeled_boxes = torch.cat([rois, roi_labels], dim=-1)
+        # gt_iou_of_rois = targets_dict['gt_iou_of_rois'][uind][mask].unsqueeze(-1).detach().clone()
+ 
         roi_labeled_boxes = torch.cat([rois, roi_labels], dim=-1)
         metrics_input['rois'].append(roi_labeled_boxes)
         metrics_input['roi_scores'].append(roi_scores_multiclass)
+        metrics_input['roi_sim_scores'].append(roi_sim_scores_multiclass)
+        metrics_input['roi_iou_wrt_pl'].append(gt_iou_of_rois)
+
+        # Target info
+        # target_labeled_boxes = targets_dict['gt_of_rois_src'][uind][mask].detach().clone()
+        # target_scores = targets_dict['rcnn_cls_labels'][uind][mask].detach().clone()
+        # metrics_input['roi_target_scores'].append(target_scores)
         # metrics_input['roi_sim_scores'].append(roi_sim_scores_multiclass)
-        # gt_iou_of_rois = targets_dict['gt_iou_of_rois'][uind][mask].unsqueeze(-1).detach().clone()
         # metrics_input['roi_iou_wrt_pl'].append(gt_iou_of_rois)
+        # metrics_input['roi_instance_sim_scores'].append(roi_instance_sim_scores_multiclass)
+
+        # Target info
+        target_labeled_boxes = targets_dict['gt_of_rois_src'][uind][mask].detach().clone()
+        target_scores = targets_dict['rcnn_cls_labels'][uind][mask].detach().clone()
+        metrics_input['roi_target_scores'].append(target_scores)
 
         # (Real labels) GT info
         gt_labeled_boxes = targets_dict['ori_unlabeled_boxes'][i]
@@ -321,7 +337,7 @@ class RoIHeadTemplate(nn.Module):
     def get_box_cls_layer_loss(self, forward_ret_dict):
         loss_cfgs = self.model_cfg.LOSS_CONFIG
         rcnn_cls = forward_ret_dict['rcnn_cls']
-        rcnn_cls_labels = forward_ret_dict['rcnn_cls_labels'].view(-1)
+        rcnn_cls_labels = forward_ret_dict['rcnn_cls_labels'].view(-1) 
         if loss_cfgs.CLS_LOSS == 'BinaryCrossEntropy':
             rcnn_cls_flat = rcnn_cls.view(-1)
             batch_loss_cls = F.binary_cross_entropy(torch.sigmoid(rcnn_cls_flat), rcnn_cls_labels.float(), reduction='none')
@@ -380,10 +396,58 @@ class RoIHeadTemplate(nn.Module):
         prob_new = self.momentum * prob_old + (1 - self.momentum) * prob_value
         setattr(self, prob_name, prob_new)
 
-    def _get_reliability_weight(self, unlabeled_inds):
+    def _get_sim_reliability_weight(self, unlabeled_inds):
         # Initialize reliability weights with 1s
         self.forward_ret_dict['rcnn_cls_weights'] = torch.ones_like(self.forward_ret_dict['rcnn_cls_labels'])
 
+        # Compute the background scores from the teacher based on student proposals
+        roi_sim_scores = self.forward_ret_dict['roi_sim_scores'].gather(-1,index=self.forward_ret_dict['roi_labels'].unsqueeze(-1)-1).squeeze(-1)
+        rcnn_bg_score_teacher = 1 - roi_sim_scores[unlabeled_inds]
+        unlabeled_rcnn_cls_weights = self.forward_ret_dict['rcnn_cls_weights'][unlabeled_inds]
+        ul_interval_mask = self.forward_ret_dict['interval_mask'][unlabeled_inds]
+        ulb_fg_mask = self.forward_ret_dict['rcnn_cls_labels'][unlabeled_inds] == 1
+        ulb_bg_mask = self.forward_ret_dict['rcnn_cls_labels'][unlabeled_inds] == 0
+
+        # # Use teacher's FG scores for FG mask, teacher's BG scores for UC+BG mask
+        # if self.model_cfg['LOSS_CONFIG']['UL_RCNN_CLS_WEIGHT_TYPE'] == 'fg-uc-bg':
+        #     ulb_fg_mask = self.forward_ret_dict['rcnn_cls_labels'][unlabeled_inds] == 1
+        #     unlabeled_rcnn_cls_weights[ulb_fg_mask] = self.forward_ret_dict['rcnn_cls_score_teacher'][unlabeled_inds][ulb_fg_mask]
+        #     unlabeled_rcnn_cls_weights[~ulb_fg_mask] = rcnn_bg_score_teacher[unlabeled_inds][~ulb_fg_mask]
+        # # Use teacher's FG scores for FG+UC mask, teacher's BG scores for BG mask
+        # elif self.model_cfg['LOSS_CONFIG']['UL_RCNN_CLS_WEIGHT_TYPE'] == 'fg-rev_uc-bg':
+        #     unlabeled_rcnn_cls_weights[~ulb_bg_mask] = self.forward_ret_dict['rcnn_cls_score_teacher'][unlabeled_inds][~ulb_bg_mask]
+        #     unlabeled_rcnn_cls_weights[ulb_bg_mask] = rcnn_bg_score_teacher[unlabeled_inds][ulb_bg_mask]
+
+        # # Use 1s for UC, FG scores for FG, BG scores for BG
+        # elif self.model_cfg['LOSS_CONFIG']['UL_RCNN_CLS_WEIGHT_TYPE'] == 'fg-bg':
+        #     unlabeled_rcnn_cls_weights[ulb_fg_mask] = self.forward_ret_dict['rcnn_cls_score_teacher'][unlabeled_inds][ulb_fg_mask]
+        #     unlabeled_rcnn_cls_weights[ulb_bg_mask] = rcnn_bg_score_teacher[unlabeled_inds][ulb_bg_mask]
+
+        # Use cos scores for UC, 1s for FG and BG
+        if self.model_cfg['LOSS_CONFIG']['UL_RCNN_CLS_WEIGHT_TYPE'] == 'cos-uc':
+            unlabeled_rcnn_cls_weights[ul_interval_mask] = roi_sim_scores[unlabeled_inds][ul_interval_mask]
+
+        # Use cos scores for FG,UC, 1 - cos_scores for BG
+        elif self.model_cfg['LOSS_CONFIG']['UL_RCNN_CLS_WEIGHT_TYPE'] == 'cos-uc-bg':
+            unlabeled_rcnn_cls_weights[ul_interval_mask] = roi_sim_scores[unlabeled_inds][ul_interval_mask]
+            unlabeled_rcnn_cls_weights[ulb_bg_mask] = 1 - roi_sim_scores[unlabeled_inds][ulb_bg_mask]
+            unlabeled_rcnn_cls_weights[ulb_fg_mask] = torch.clamp(roi_sim_scores[unlabeled_inds][ulb_fg_mask]+0.22,max=1.0)
+
+        # Use cos scores for FG, 1-cos scores for UC and BG
+        elif self.model_cfg['LOSS_CONFIG']['UL_RCNN_CLS_WEIGHT_TYPE'] == 'cos-rev-uc-bg':
+            unlabeled_rcnn_cls_weights[ul_interval_mask] = 1 - roi_sim_scores[unlabeled_inds][ul_interval_mask]
+            unlabeled_rcnn_cls_weights[ulb_bg_mask] = 1 - roi_sim_scores[unlabeled_inds][ulb_bg_mask]
+            unlabeled_rcnn_cls_weights[ulb_fg_mask] = torch.clamp((roi_sim_scores[unlabeled_inds][ulb_fg_mask]+0.22),max=1.0)
+
+        else:
+            raise ValueError
+
+        return unlabeled_rcnn_cls_weights
+
+    def _get_reliability_weight(self, unlabeled_inds):
+        # Initialize reliability weights with 1s
+        self.forward_ret_dict['rcnn_cls_weights'] = torch.ones_like(self.forward_ret_dict['rcnn_cls_labels'])
+        
         # Compute the background scores from the teacher based on student proposals
         rcnn_bg_score_teacher = 1 - self.forward_ret_dict['rcnn_cls_score_teacher']
         unlabeled_rcnn_cls_weights = self.forward_ret_dict['rcnn_cls_weights'][unlabeled_inds]
@@ -462,8 +526,13 @@ class RoIHeadTemplate(nn.Module):
 
     def get_loss(self, tb_dict=None):
         tb_dict = {} if tb_dict is None else tb_dict
-
-        if not self.model_cfg.ENABLE_SOFT_TEACHER or self.model_cfg.TARGET_CONFIG.DISABLE_ST_WEIGHTS:
+        if self.model_cfg.get("ENABLE_SIM_WEIGHTS",False):
+            unlabeled_inds = self.forward_ret_dict['unlabeled_inds']
+            self.forward_ret_dict['rcnn_cls_weights'] = torch.ones_like(self.forward_ret_dict['rcnn_cls_labels'])
+            if (self.forward_ret_dict['roi_sim_scores'].sum(-1) >= 0).all():
+                self.forward_ret_dict['rcnn_cls_weights'][unlabeled_inds] = self._get_sim_reliability_weight(unlabeled_inds)
+                
+        elif not self.model_cfg.ENABLE_SOFT_TEACHER or self.model_cfg.TARGET_CONFIG.DISABLE_ST_WEIGHTS:
             self.forward_ret_dict['rcnn_cls_weights'] = torch.ones_like(self.forward_ret_dict['rcnn_cls_labels'])
         else:
             # Get reliability weights for unlabeled samples

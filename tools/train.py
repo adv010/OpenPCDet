@@ -52,9 +52,10 @@ def parse_config():
     parser.add_argument('--num_epochs_to_eval', type=int, default=0, help='number of checkpoints to be evaluated')
     parser.add_argument('--save_to_file', action='store_true', default=False, help='')
     parser.add_argument('--split', type=str, default='train_0.01_1')
-    parser.add_argument('--repeat', type=int, default=5)
+    parser.add_argument('--repeat', type=int, default=1)
     parser.add_argument('--thresh', type=str, default='0.0, 0.0, 0.0')
     parser.add_argument('--sem_thresh', type=str, default='0.4, 0.4, 0.4')
+    parser.add_argument('--hybrid_thresh', type=str, default='0.0, 0.0, 0.0')
     parser.add_argument('--unlabeled_weight', type=float, default=1.0)
     parser.add_argument('--unlabeled_supervise_cls', action='store_true', default=True)
     parser.add_argument('--unlabeled_supervise_refine', action='store_true', default=True)
@@ -80,6 +81,7 @@ def parse_config():
 
     cfg.MODEL.THRESH = [float(x) for x in args.thresh.split(',')]
     cfg.MODEL.SEM_THRESH = [float(x) for x in args.sem_thresh.split(',')]
+    cfg.MODEL.HYBRID_THRESH = [float(x) for x in args.hybrid_thresh.split(',')]
     cfg.MODEL.UNLABELED_SUPERVISE_CLS = args.unlabeled_supervise_cls
     cfg.MODEL.UNLABELED_SUPERVISE_REFINE = args.unlabeled_supervise_refine
     cfg.MODEL.UNLABELED_WEIGHT = args.unlabeled_weight
@@ -189,7 +191,7 @@ def main():
 
     model.train()  # before wrap to DistributedDataParallel to support fixed some parameters
     if dist_train:
-        model = nn.parallel.DistributedDataParallel(model, device_ids=[cfg.LOCAL_RANK % torch.cuda.device_count()])
+        model = nn.parallel.DistributedDataParallel(model, device_ids=[cfg.LOCAL_RANK % torch.cuda.device_count()],find_unused_parameters=True)
     logger.info(model)
 
     lr_scheduler, lr_warmup_scheduler = build_scheduler(
@@ -244,12 +246,12 @@ def main():
     logger.info('**********************Start evaluation %s/%s(%s)**********************' %
                 (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
 
-    # test_set, test_loader, sampler = build_dataloader(
-    #     dataset_cfg=cfg.DATA_CONFIG,
-    #     class_names=cfg.CLASS_NAMES,
-    #     batch_size=args.eval_batch_size,
-    #     dist=dist_train, workers=args.workers, logger=logger, training=False
-    # )
+    test_set, test_loader, sampler = build_dataloader(
+        dataset_cfg=cfg.DATA_CONFIG,
+        class_names=cfg.CLASS_NAMES,
+        batch_size=args.eval_batch_size,
+        dist=dist_train, workers=args.workers, logger=logger, training=False
+    )
     eval_output_dir = output_dir / 'eval' / 'eval_with_train'
     eval_output_dir.mkdir(parents=True, exist_ok=True)
     args.start_epoch = max(args.epochs - 10, 0)  # Only evaluate the last 10 epochs
