@@ -331,6 +331,26 @@ class RoIHeadTemplate(nn.Module):
                 batch_loss_cls = batch_loss_cls.reshape(batch_size, -1)
                 cls_valid_mask = cls_valid_mask.reshape(batch_size, -1)
                 rcnn_loss_cls = (batch_loss_cls * cls_valid_mask).sum(-1) / torch.clamp(cls_valid_mask.sum(-1), min=1.0)
+        elif loss_cfgs.CLS_LOSS == 'UnbiasedCrossEntropy':
+            tau = self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS.get('unbiased_ce_tau', 1.0)
+            batch_size = forward_ret_dict['rcnn_cls_labels'].shape[0]
+            num_rois = forward_ret_dict['rcnn_cls_labels'].shape[1]
+            rcnn_cls_labels = forward_ret_dict['rcnn_cls_labels']
+            rcnn_cls_logits = forward_ret_dict['rcnn_cls'].reshape(batch_size, -1)
+            cls_valid_mask = (rcnn_cls_labels >= 0).float()
+
+            conf_scores = torch.sigmoid(rcnn_cls_logits.detach())
+            mean_conf_scores = conf_scores.reshape(2, -1).mean(keepdim=True, dim=-1)
+            mean_cls_labels = rcnn_cls_labels.reshape(2, -1).mean(keepdim=True, dim=-1)
+
+            self._ema_update_p('mean_p_cls', mean_conf_scores)
+            self._ema_update_p('mean_cls_labels', mean_cls_labels)
+            mean_p_cls_lbl = self.mean_p_cls.split(1)[0].repeat(batch_size//2, num_rois)
+            mean_p_cls_ulb = self.mean_p_cls.split(1)[1].repeat(batch_size//2, num_rois)
+            mean_p_cls = torch.cat([mean_p_cls_lbl, mean_p_cls_ulb], dim=0)
+            unbiased_logits = rcnn_cls_logits + tau * torch.log(mean_p_cls + 1e-6) * rcnn_cls_labels
+            batch_loss_cls = F.binary_cross_entropy_with_logits(unbiased_logits, rcnn_cls_labels, reduction='none')
+            rcnn_loss_cls = (batch_loss_cls * cls_valid_mask).sum(-1) / torch.clamp(cls_valid_mask.sum(-1), min=1.0)
         else:
             raise NotImplementedError
 

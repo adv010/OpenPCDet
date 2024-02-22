@@ -6,8 +6,11 @@ from .roi_head_template import RoIHeadTemplate
 from pcdet.utils.prototype_utils import feature_bank_registry
 import torch.nn.functional as F     # TODO - refactor imports
 
+from ...utils.normed_linear import NormedLinear
 
 class PVRCNNHead(RoIHeadTemplate):
+
+
     def __init__(self, input_channels, model_cfg, num_class=1,
                  predict_boxes_when_training=True, **kwargs):
         super().__init__(num_class=num_class, model_cfg=model_cfg,
@@ -21,7 +24,7 @@ class PVRCNNHead(RoIHeadTemplate):
         GRID_SIZE = self.model_cfg.ROI_GRID_POOL.GRID_SIZE
         pre_channel = GRID_SIZE * GRID_SIZE * GRID_SIZE * num_c_out
         pre_channel2 = GRID_SIZE * GRID_SIZE * GRID_SIZE * num_c_out
-
+ 
         shared_fc_list = []
         for k in range(0, self.model_cfg.SHARED_FC.__len__()):
             shared_fc_list.extend([
@@ -49,7 +52,10 @@ class PVRCNNHead(RoIHeadTemplate):
                 projected_fc_list.append(nn.Dropout(self.model_cfg.DP_RATIO))
 
         self.projector_fc_layer = nn.Sequential(*projected_fc_list) # Using this layer's projections to calculate instance wise contrastive loss on
+        self.normed_linear_layer = NormedLinear(input_channels, num_class)  # Instantiate NormedLinear
 
+        self.head_fc =  nn.Sequential(nn.Linear(3, 256), nn.BatchNorm1d(256), nn.ReLU(inplace=True),
+                                   nn.Linear(256, 256)) # From BalconLoss
         self.cls_layers = self.make_fc_layers(
             input_channels=pre_channel, output_channels=self.num_class, fc_list=self.model_cfg.CLS_FC
         )
@@ -199,7 +205,10 @@ class PVRCNNHead(RoIHeadTemplate):
                 proj_features = pooled_features.clone().detach()
                 projected_features_gt = self.projector_fc_layer(proj_features.view(batch_size_rcnn, -1, 1))
                 batch_dict['shared_features_gt'] = projected_features_gt
+                # unused_logits =  self.normed_linear_layer(projected_features_gt)
+                # batch_dict['class_centers'] = F.normalize(self.head_fc( self.normed_linear_layer.weight.T),dim=1)
             return batch_dict
+
         batch_size_rcnn = pooled_features.shape[0]
         shared_features = self.shared_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1))
         rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)

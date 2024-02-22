@@ -274,9 +274,13 @@ class PVRCNN_SSL(Detector3DTemplate):
                 loss += proto_cont_loss * self.model_cfg['ROI_HEAD']['PROTO_CONTRASTIVE_LOSS_WEIGHT']
                 tb_dict['proto_cont_loss'] = proto_cont_loss.item()
         if self.model_cfg['ROI_HEAD'].get('ENABLE_INSTANCE_SUP_LOSS', False):
-            lbl_inst_cont_loss, tb_dict = self._get_instance_contrastive_loss(tb_dict,batch_dict,batch_dict_wa,lbl_inds,ulb_inds)
+            lbl_inst_cont_loss, tb_dict = self._get_instance_supcon_loss(tb_dict,batch_dict,batch_dict_wa,lbl_inds,ulb_inds)
             if lbl_inst_cont_loss is not None:
                 loss +=  lbl_inst_cont_loss * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT']
+        if self.model_cfg['ROI_HEAD'].get('ENABLE_INSTANCE_BAL_LOSS', False):
+            lbl_inst_bal_loss, tb_dict = self._get_instance_bal_loss(tb_dict,batch_dict,batch_dict_wa,lbl_inds,ulb_inds)
+            if lbl_inst_bal_loss is not None:
+                loss +=  lbl_inst_bal_loss * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT']
         tb_dict_ = self._prep_tb_dict(tb_dict, lbl_inds, lbl_inds, reduce_loss_fn)
 
         if self.model_cfg.get('STORE_SCORES_IN_PKL', False):
@@ -405,7 +409,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         return labels_sa,labels_wa,instance_idx_sa,instance_idx_wa,shared_ft_sa, shared_ft_wa
 
 
-    def _get_instance_contrastive_loss(self, tb_dict,batch_dict,batch_dict_pair,lbl_inds,ulb_inds,temperature=1.0,base_temperature=1.0):
+    def _get_instance_supcon_loss(self, tb_dict,batch_dict,batch_dict_pair,lbl_inds,ulb_inds,temperature=1.0,base_temperature=1.0):
         '''
         Args:
             features: hidden vector of shape [bsz, n_views, ...].
@@ -509,6 +513,83 @@ class PVRCNN_SSL(Detector3DTemplate):
         instance_loss = instance_loss.mean()
         return instance_loss, tb_dict
 
+    def _get_instance_balcon_loss(self, tb_dict,batch_dict,batch_dict_pair,lbl_inds,ulb_inds,temperature=1.0,base_temperature=1.0):
+        # BalConloss paper implements Balconloss along with Logit Compensation. rcnn_cls= UnbiasedCE has logit compensation. 
+        # Total weight from Balconpaper -> Balconloss wt * 0.6 +  Logit compensationm * 2
+        # NOTE : For similar setting, use BalConLoss along with UnbiasedCE
+        '''
+        Args:
+            features: hidden vector of shape [bsz, n_views, ...].
+            labels: roi_labels[B,N].
+            mask: contrastive mask of shape [bsz, bsz], mask_{i,j}=1 if sample j
+                has the same class as sample i. Can be asymmetric.
+        '''
+        
+        labels_sa, labels_wa, instance_idx_sa, instance_idx_wa, embed_ft_sa, embed_ft_wa = self._align_instance_pairs(batch_dict, batch_dict_pair,lbl_inds)
+        batch_size_labeled = labels_sa.shape[0]
+        device = embed_ft_sa.device
+        labels = torch.cat((labels_sa,labels_sa), dim=0)
+        combined_embed_features = torch.cat([embed_ft_sa.unsqueeze(1), embed_ft_wa.unsqueeze(1)], dim=1) # B*N,num_pairs,channel_dim
+        num_pairs = combined_embed_features.shape[1]
+        assert num_pairs == 2  # contrast_count = 2
+        '''Create Contrastive Mask'''
+        labels_sa = labels_sa.contiguous().view(-1, 1)
+        mask = torch.eq(labels_sa, labels_sa.T).float().to(device) # (B*N, B*N)
+        mask = mask.repeat(num_pairs, num_pairs)        # Tiling mask from N,N -> 2N, 2N)
+        logits_mask = torch.scatter(torch.ones_like(mask),1,torch.arange(batch_size_labeled * num_pairs).view(-1, 1).to(device),0)    # mask-out self-contrast cases
+        mask = mask * logits_mask
+        batch_cls_count = torch.eye(3)[labels].sum(dim=0).squeeze() # TODO : Check logic
+        '''
+        plt.imshow(mask.cpu().numpy(), cmap='viridis')
+        plt.colorbar()
+        plt.savefig("mask.png")
+        plt.clf()
+        '''
+        contrast_feature = torch.cat(torch.unbind(combined_embed_features, dim=1), dim=0) 
+        #Class-Complement aspect : BALCONLOSS (TODO)
+        # features = torch.cat([features, centers1], dim=0) #OG Code
+        # logits = features[:2 * batch_size].mm(features.T)
+
+        contrast_feature = F.normalize(contrast_feature.view(-1,combined_embed_features.shape[-1])) # normalized features before masking. original code does it earlier : https://github.com/HobbitLong/SupContrast/blob/ae5da977b0abd4bdc1a6fd4ec4ba2c3655a1879f/networks/resnet_big.py#L185C51-L185C51
+        # compute logits
+        anchor_dot_contrast = torch.div(torch.matmul(contrast_feature, contrast_feature.T),temperature)
+        # for numerical stability
+        logits_max, _ = torch.max(anchor_dot_contrast, dim=1, keepdim=True)
+        logits = anchor_dot_contrast - logits_max.detach()
+
+        exp_logits = torch.exp(logits) * logits_mask
+        per_ins_weight = torch.tensor([batch_cls_count[i] for i in labels], device=device).view(1, -1).expand(
+            2 * batch_size_labeled, 2 * batch_size_labeled + 3) - mask #8,1008
+        exp_logits_sum = exp_logits.div(per_ins_weight).sum(dim=1, keepdim=True)
+        log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True))
+        mean_log_prob_pos = (mask * log_prob).sum(1) / mask.sum(1)         # compute mean of log-likelihood over positive
+
+        unscaled_instloss_car = mean_log_prob_pos[[labels==1]].mean()
+        unscaled_instloss_ped = mean_log_prob_pos[[labels==2]].mean()
+        unscaled_instloss_cyc = mean_log_prob_pos[[labels==3]].mean()
+
+        balcon_loss = - ( temperature/ base_temperature) * mean_log_prob_pos 
+        instloss_car = balcon_loss[labels==1].mean()
+        instloss_ped = balcon_loss[labels==2].mean()
+        instloss_cyc = balcon_loss[labels==3].mean()
+        instloss_all = balcon_loss.mean()
+
+        # inst_tb_dict = {
+        #     'unscaled_instloss_car': unscaled_instloss_car.unsqueeze(-1),
+        #     'unscaled_instloss_ped': unscaled_instloss_ped.unsqueeze(-1),
+        #     'unscaled_instloss_cyc': unscaled_instloss_cyc.unsqueeze(-1),
+        #     'instloss_car': instloss_car.unsqueeze(-1),
+        #     'instloss_cyc': instloss_cyc.unsqueeze(-1),
+        #     'instloss_ped': instloss_ped.unsqueeze(-1),
+        #     'instloss_all' : instloss_all.unsqueeze(-1),
+        # }
+        # tb_dict.update(inst_tb_dict)
+
+        if balcon_loss is None:
+            return
+        balcon_loss = balcon_loss.mean()
+        return balcon_loss, tb_dict
+    
 
     @staticmethod
     def _prep_tb_dict(tb_dict, lbl_inds, ulb_inds, reduce_loss_fn):
