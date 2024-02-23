@@ -162,6 +162,7 @@ MODEL:
         ENABLE_VIS: False
         ENABLE_PROTO_CONTRASTIVE_LOSS: False
         ENABLE_INSTANCE_SUP_LOSS: False
+        ENABLE_INSTANCE_BAL_LOSS: False
         PROTO_CONTRASTIVE_LOSS_WEIGHT: 1.0
         INSTANCE_CONTRASTIVE_LOSS_WEIGHT: 1.0
         INSTANCE_CONTRASTIVE_LOSS_START_EPOCH: 0
@@ -239,7 +240,7 @@ MODEL:
 
         LOSS_CONFIG:
             UL_RCNN_CLS_WEIGHT_TYPE: 'rev_uc-bg'
-            CLS_LOSS: BinaryCrossEntropy
+            CLS_LOSS: BinaryCrossEntropy #UnbiasedCrossEntropy
             REG_LOSS: smooth-l1
             CORNER_LOSS_REGULARIZATION: True
             LOSS_WEIGHTS: {
@@ -247,7 +248,8 @@ MODEL:
                 'rcnn_reg_weight': 1.0,
                 'rcnn_corner_weight': 1.0,
                 'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-                ulb_cls_dist_weight: 0.2
+                'ulb_cls_dist_weight': 0.2,
+                'unbiased_ce_tau': 2.0,
             }
         
         ROI_AUG:
