@@ -18,8 +18,6 @@ class PointHeadSimple(PointHeadTemplate):
             output_channels=num_class
         )
 
-        self.print_loss_when_eval = False
-
     def assign_targets(self, input_dict):
         """
         Args:
@@ -42,22 +40,22 @@ class PointHeadSimple(PointHeadTemplate):
             gt_boxes.view(-1, gt_boxes.shape[-1]), extra_width=self.model_cfg.TARGET_CONFIG.GT_EXTRA_WIDTH
         ).view(batch_size, -1, gt_boxes.shape[-1])
         targets_dict = self.assign_stack_targets(
-            points=point_coords, gt_boxes=gt_boxes, extend_gt_boxes=extend_gt_boxes,
-            set_ignore_flag=True, use_ball_constraint=False,
+            points=point_coords, gt_boxes=gt_boxes, extend_gt_boxes=extend_gt_boxes,  #modified: gt_boxex -> gt_boxes[:, :, 0:8]
+            set_ignore_flag=True, use_ball_constraint=False, #modified: extend_gt_boxes -> extend_gt_boxes[:, :, 0:8]
             ret_part_labels=False
         )
 
         return targets_dict
 
-    def get_loss(self, tb_dict=None, scalar=True):
+    def get_loss(self, tb_dict=None):
         tb_dict = {} if tb_dict is None else tb_dict
-        point_loss_cls, tb_dict_1 = self.get_cls_layer_loss(None, scalar=scalar)
+        point_loss_cls, tb_dict_1 = self.get_cls_layer_loss()
 
         point_loss = point_loss_cls
         tb_dict.update(tb_dict_1)
         return point_loss, tb_dict
 
-    def forward(self, batch_dict, disable_gt_roi_when_pseudo_labeling=False):
+    def forward(self, batch_dict):
         """
         Args:
             batch_dict:
@@ -80,16 +78,29 @@ class PointHeadSimple(PointHeadTemplate):
 
         ret_dict = {
             'point_cls_preds': point_cls_preds,
-            'batch_size': batch_dict['batch_size']
         }
 
         point_cls_scores = torch.sigmoid(point_cls_preds)
         batch_dict['point_cls_scores'], _ = point_cls_scores.max(dim=-1)
 
-        # should not use gt_roi for pseudo label generation
-        if (self.training or self.print_loss_when_eval) and not disable_gt_roi_when_pseudo_labeling:
+        if self.training:
             targets_dict = self.assign_targets(batch_dict)
             ret_dict['point_cls_labels'] = targets_dict['point_cls_labels']
         self.forward_ret_dict = ret_dict
 
+        return batch_dict
+
+    def get_point_score(self, batch_dict):
+        if self.model_cfg.get('USE_POINT_FEATURES_BEFORE_FUSION', False):
+            point_features = batch_dict['point_features_before_fusion']
+        else:
+            point_features = batch_dict['point_features']
+        point_cls_preds = self.cls_layers(point_features)  # (total_points, num_class)
+
+        ret_dict = {
+            'point_cls_preds': point_cls_preds,
+        }
+
+        point_cls_scores = torch.sigmoid(point_cls_preds)
+        batch_dict['point_cls_scores'], _ = point_cls_scores.max(dim=-1)
         return batch_dict

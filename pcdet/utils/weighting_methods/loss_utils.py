@@ -72,64 +72,6 @@ class SigmoidFocalClassificationLoss(nn.Module):
         return loss * weights
 
 
-class WeightedClassificationLoss(nn.Module):
-    def __init__(self):
-        super(WeightedClassificationLoss, self).__init__()
-        
-    @staticmethod
-    def sigmoid_cross_entropy_with_logits(input: torch.Tensor, target: torch.Tensor):
-        """ PyTorch Implementation for tf.nn.sigmoid_cross_entropy_with_logits:
-            max(x, 0) - x * z + log(1 + exp(-abs(x))) in
-            https://www.tensorflow.org/api_docs/python/tf/nn/sigmoid_cross_entropy_with_logits
-
-        Args:
-            input: (B, #anchors, #classes) float tensor.
-                Predicted logits for each class
-            target: (B, #anchors, #classes) float tensor.
-                One-hot encoded classification targets
-
-        Returns:
-            loss: (B, #anchors, #classes) float tensor.
-                Sigmoid cross entropy loss without reduction
-        """
-        loss = torch.clamp(input, min=0) - input * target + \
-               torch.log1p(torch.exp(-torch.abs(input)))
-        return loss
-
-    def forward(self, input: torch.Tensor, target: torch.Tensor, weights=None,  reduction='none'):
-        """
-        Args:
-            input: (B, #anchors, #classes) float tensor.
-                Predited logits for each class.
-            target: (B, #anchors, #classes) float tensor.
-                One-hot classification targets.
-            weights: (B, #anchors) float tensor.
-                Anchor-wise weights.
-
-        Returns:
-            loss: (B, #anchors) float tensor.
-                Weighted cross entropy loss without reduction
-        """
-        bce_loss = self.sigmoid_cross_entropy_with_logits(input, target)
-        
-        if weights is not None:                
-            if weights.shape.__len__() == 2 or \
-                    (weights.shape.__len__() == 1 and target.shape.__len__() == 2):
-                weights = weights.unsqueeze(-1)
-
-            assert weights.shape.__len__() == bce_loss.shape.__len__()
-            
-            loss = weights * bce_loss
-        else:
-            loss = bce_loss
-
-        if reduction == 'none':
-            return loss
-        elif reduction == 'sum':
-            loss = loss.sum(dim=-1)
-        elif reduction == 'mean':
-            loss = loss.mean(dim=-1)
-        return loss   
 class WeightedSmoothL1Loss(nn.Module):
     """
     Code-wise Weighted Smooth L1 Loss modified based on fvcore.nn.smooth_l1_loss
@@ -139,7 +81,6 @@ class WeightedSmoothL1Loss(nn.Module):
                   | abs(x) - 0.5 * beta   otherwise,
     where x = input - target.
     """
-
     def __init__(self, beta: float = 1.0 / 9.0, code_weights: list = None):
         """
         Args:
@@ -237,38 +178,11 @@ class WeightedL1Loss(nn.Module):
         return loss
 
 
-class WeightedBinaryCrossEntropyLoss(nn.Module):
-    """
-    Transform input to fit the fomation of PyTorch offical cross entropy loss
-    with anchor-wise weighting.
-    """
-    def __init__(self):
-        super(WeightedBinaryCrossEntropyLoss, self).__init__()
-
-    def forward(self, input: torch.Tensor, target: torch.Tensor, weights: torch.Tensor):
-        """
-        Args:
-            input: (B, #anchors, #classes) float tensor.
-                Predited logits for each class.
-            target: (B, #anchors, #classes) float tensor.
-                One-hot classification targets.
-            weights: (B, #anchors) float tensor.
-                Anchor-wise weights.
-
-        Returns:
-            loss: (B, #anchors) float tensor.
-                Weighted cross entropy loss without reduction
-        """
-        loss = F.binary_cross_entropy_with_logits(input, target, reduction='none').mean(dim=-1) * weights
-        return loss
-
-
 class WeightedCrossEntropyLoss(nn.Module):
     """
     Transform input to fit the fomation of PyTorch offical cross entropy loss
     with anchor-wise weighting.
     """
-
     def __init__(self):
         super(WeightedCrossEntropyLoss, self).__init__()
 
@@ -291,53 +205,6 @@ class WeightedCrossEntropyLoss(nn.Module):
         loss = F.cross_entropy(input, target, reduction='none') * weights
         return loss
 
-class WeightedCrossEntropyLoss_ver1(nn.Module):
-    def __init__(self):
-        super(WeightedCrossEntropyLoss, self).__init__()
-        
-    @staticmethod
-    def sigmoid_cross_entropy_with_logits(input: torch.Tensor, target: torch.Tensor):
-        """ PyTorch Implementation for tf.nn.sigmoid_cross_entropy_with_logits:
-            max(x, 0) - x * z + log(1 + exp(-abs(x))) in
-            https://www.tensorflow.org/api_docs/python/tf/nn/sigmoid_cross_entropy_with_logits
-
-        Args:
-            input: (B, #anchors, #classes) float tensor.
-                Predicted logits for each class
-            target: (B, #anchors, #classes) float tensor.
-                One-hot encoded classification targets
-
-        Returns:
-            loss: (B, #anchors, #classes) float tensor.
-                Sigmoid cross entropy loss without reduction
-        """
-        loss = torch.clamp(input, min=0) - input * target + \
-               torch.log1p(torch.exp(-torch.abs(input)))
-        return loss
-
-    def forward(self, input: torch.Tensor, target: torch.Tensor, weights: torch.Tensor,  reduction='none'):
-        """
-        Args:
-            input: (B, #anchors, #classes) float tensor.
-                Predited logits for each class.
-            target: (B, #anchors, #classes) float tensor.
-                One-hot classification targets.
-            weights: (B, #anchors) float tensor.
-                Anchor-wise weights.
-
-        Returns:
-            loss: (B, #anchors) float tensor.
-                Weighted cross entropy loss without reduction
-        """
-        loss = self.sigmoid_cross_entropy_with_logits(input, target)
-
-        if reduction == 'none':
-            return loss
-        elif reduction == 'sum':
-            loss = loss.sum(dim=-1)
-        elif reduction == 'mean':
-            loss = loss.mean(dim=-1)
-        return loss      
 
 def get_corner_loss_lidar(pred_bbox3d: torch.Tensor, gt_bbox3d: torch.Tensor):
     """
@@ -436,7 +303,6 @@ class FocalLossCenterNet(nn.Module):
     """
     Refer to https://github.com/tianweiy/CenterPoint
     """
-
     def __init__(self):
         super(FocalLossCenterNet, self).__init__()
         self.neg_loss = neg_loss_cornernet
@@ -478,8 +344,8 @@ def _reg_loss(regr, gt_regr, mask):
 
 
 def _gather_feat(feat, ind, mask=None):
-    dim = feat.size(2)
-    ind = ind.unsqueeze(2).expand(ind.size(0), ind.size(1), dim)
+    dim  = feat.size(2)
+    ind  = ind.unsqueeze(2).expand(ind.size(0), ind.size(1), dim)
     feat = feat.gather(1, ind)
     if mask is not None:
         mask = mask.unsqueeze(2).expand_as(feat)
@@ -517,101 +383,4 @@ class RegLossCenterNet(nn.Module):
         else:
             pred = _transpose_and_gather_feat(output, ind)
         loss = _reg_loss(pred, target, mask)
-        return loss
-
-
-class FastFocalLoss(nn.Module):
-    '''
-    Reimplemented focal loss, exactly the same as the CornerNet version.
-    Faster and costs much less memory.
-    '''
-
-    def __init__(self, alpha, beta):
-        super(FastFocalLoss, self).__init__()
-        self.alpha = alpha
-        self.beta = beta
-
-    def _gather_feat(self, feat, ind, mask=None):
-        dim = feat.size(2)
-        ind = ind.unsqueeze(2).expand(ind.size(0), ind.size(1), dim)
-        feat = feat.gather(1, ind)
-        if mask is not None:
-            mask = mask.unsqueeze(2).expand_as(feat)
-            feat = feat[mask]
-            feat = feat.reshape(-1, dim)
-        return feat
-
-    def forward(self, out, target, ind, mask, cat):
-        '''
-        Arguments:
-          out, target: B x C x H x W
-          ind, mask: B x M
-          cat (category id for peaks): B x M
-        '''
-        mask = mask.float()
-
-        gt = torch.pow(1 - target, self.beta)
-        neg_loss = torch.log(1 - out + 1e-30) * torch.pow(out, self.alpha) * gt
-        neg_loss = neg_loss.sum()
-
-        out = out.reshape(out.size(0), -1, out.size(3))
-        pos_pred_pix = self._gather_feat(out, ind)  # B x M x C
-        pos_pred = pos_pred_pix.gather(2, cat.unsqueeze(2))  # B x M
-        num_pos = mask.sum()
-        pos_loss = torch.log(pos_pred + 1e-30) * torch.pow(1 - pos_pred, self.alpha) * \
-                   mask.unsqueeze(2)
-        pos_loss = pos_loss.sum()
-        if num_pos == 0:
-            return - neg_loss
-        return - (pos_loss + neg_loss) / num_pos
-
-
-class BCELoss(nn.Module):
-    def __init__(self):
-        super(BCELoss, self).__init__()
-
-    def forward(self, pred, target, weights=None):
-        pred = torch.sigmoid(pred)
-
-        loss = -target * torch.log(pred) - (1 - target) * torch.log(1 - pred)
-
-        # anchor-wise weighting
-        if weights is not None:
-            assert weights.shape[0] == loss.shape[0] and weights.shape[1] == loss.shape[1]
-            loss = loss * weights.unsqueeze(-1)
-
-        return loss
-
-
-class RegLoss(nn.Module):
-    '''Regression loss for an output tensor
-    Arguments:
-      output (batch x dim x h x w)
-      mask (batch x max_objects)
-      ind (batch x max_objects)
-      target (batch x max_objects x dim)
-    '''
-
-    def __init__(self, code_weights: list = None):
-        super(RegLoss, self).__init__()
-
-    def _gather_feat(self, feat, ind, mask=None):
-        dim = feat.size(2)
-        ind = ind.unsqueeze(2).expand(ind.size(0), ind.size(1), dim)
-        feat = feat.gather(1, ind)
-        if mask is not None:
-            mask = mask.unsqueeze(2).expand_as(feat)
-            feat = feat[mask]
-            feat = feat.reshape(-1, dim)
-        return feat
-
-    def forward(self, out, target, ind, mask):
-        mask = mask.float().unsqueeze(2)
-
-        out = out.reshape(out.size(0), -1, out.size(3))
-        pred = self._gather_feat(out, ind)  # B x M x C
-
-        loss = F.l1_loss(pred * mask, target * mask, reduction='none')
-        loss = loss / (mask.sum() + 1e-4)
-        loss = loss.transpose(2, 0).sum(dim=2).sum(dim=1)
         return loss

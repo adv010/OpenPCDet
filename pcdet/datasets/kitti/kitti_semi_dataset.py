@@ -40,6 +40,22 @@ def split_kitti_semi_data(dataset_cfg, info_paths, data_splits, root_path, label
                 infos = pickle.load(f)
                 kitti_infos["test"].extend(infos)
 
+        # split = dataset_cfg.DATA_SPLIT[mode]
+        # root_split_path = root_path / ('training' if split != 'test' else 'testing')
+        # repeat = dataset_cfg.REPEAT
+
+        # split_dir  = root_path / 'ImageSets' / (split + '.txt')
+        # # self.test = self.split == 'test' or self.split == 'val'
+
+        # if not training:
+        #     sample_id_list = [x.strip() for x in open(split_dir).readlines()] if split_dir.exists() else None
+        # else:
+        #     sample_id_list = [x.strip().split(' ')[0] for x in
+        #                        open(split_dir).readlines()] if split_dir.exists() else None
+        #     sample_index_list = [x.strip().split(' ')[1] for x in
+        #                           open(split_dir).readlines()] if split_dir.exists() else None
+
+
         sampled_id = np.load(dataset_cfg.RANDOM_SAMPLE_ID_PATH)
         kitti_pretrain_infos = [kitti_infos["train"][i] for i in sampled_id]
         kitti_labeled_infos = [kitti_infos["train"][i] for i in sampled_id]
@@ -514,8 +530,8 @@ class KittiLabeledDataset(KittiSemiDataset):
         gt_boxes_camera = np.concatenate([loc, dims, rots[..., np.newaxis]], axis=1).astype(np.float32)
         gt_boxes_lidar = box_utils.boxes3d_kitti_camera_to_lidar(gt_boxes_camera, calib)
         
-        if self.dataset_cfg.get('SHIFT_COOR', None):
-            gt_boxes_lidar[:, 0:3] += self.dataset_cfg.SHIFT_COOR
+        # if self.dataset_cfg.get('SHIFT_COOR', None):  #Commenting , not required for SSL
+        #     gt_boxes_lidar[:, 0:3] += self.dataset_cfg.SHIFT_COOR
 
         input_dict.update({
             'gt_names': gt_names,

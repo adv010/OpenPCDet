@@ -1,31 +1,18 @@
 import numpy as np
 
 
-def get_calib_from_file(calib_file, oss_flag):
-    if oss_flag == False:
-        with open(calib_file) as f:
-            lines = f.readlines()
-        
-        obj = lines[2].strip().split(' ')[1:]
-        P2 = np.array(obj, dtype=np.float32)
-        obj = lines[3].strip().split(' ')[1:]
-        P3 = np.array(obj, dtype=np.float32)
-        obj = lines[4].strip().split(' ')[1:]
-        R0 = np.array(obj, dtype=np.float32)
-        obj = lines[5].strip().split(' ')[1:]
-        Tr_velo_to_cam = np.array(obj, dtype=np.float32)
+def get_calib_from_file(calib_file):
+    with open(calib_file) as f:
+        lines = f.readlines()
 
-    else:
-        # split the text buffer
-        lines = calib_file.readlines()
-        obj = lines[2].strip().split(' ')[1:]
-        P2 = np.array(obj, dtype=np.float32)
-        obj = lines[3].strip().split(' ')[1:]
-        P3 = np.array(obj, dtype=np.float32)
-        obj = lines[4].strip().split(' ')[1:]
-        R0 = np.array(obj, dtype=np.float32)
-        obj = lines[5].strip().split(' ')[1:]
-        Tr_velo_to_cam = np.array(obj, dtype=np.float32)
+    obj = lines[2].strip().split(' ')[1:]
+    P2 = np.array(obj, dtype=np.float32)
+    obj = lines[3].strip().split(' ')[1:]
+    P3 = np.array(obj, dtype=np.float32)
+    obj = lines[4].strip().split(' ')[1:]
+    R0 = np.array(obj, dtype=np.float32)
+    obj = lines[5].strip().split(' ')[1:]
+    Tr_velo_to_cam = np.array(obj, dtype=np.float32)
 
     return {'P2': P2.reshape(3, 4),
             'P3': P3.reshape(3, 4),
@@ -34,9 +21,9 @@ def get_calib_from_file(calib_file, oss_flag):
 
 
 class Calibration(object):
-    def __init__(self, calib_file, oss_flag):
+    def __init__(self, calib_file):
         if not isinstance(calib_file, dict):
-            calib = get_calib_from_file(calib_file, oss_flag)
+            calib = get_calib_from_file(calib_file)
         else:
             calib = calib_file
 

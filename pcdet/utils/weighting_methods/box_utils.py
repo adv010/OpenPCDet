@@ -238,6 +238,8 @@ def boxes3d_kitti_camera_to_imageboxes(boxes3d, calib, image_shape=None):
     max_uv = np.max(corners_in_image, axis=1)  # (N, 2)
     boxes2d_image = np.concatenate([min_uv, max_uv], axis=1)
     if image_shape is not None:
+        if not isinstance(image_shape, np.ndarray):
+            image_shape = image_shape.cpu() if image_shape.is_cuda else image_shape  
         boxes2d_image[:, 0] = np.clip(boxes2d_image[:, 0], a_min=0, a_max=image_shape[1] - 1)
         boxes2d_image[:, 1] = np.clip(boxes2d_image[:, 1], a_min=0, a_max=image_shape[0] - 1)
         boxes2d_image[:, 2] = np.clip(boxes2d_image[:, 2], a_min=0, a_max=image_shape[1] - 1)
@@ -296,24 +298,3 @@ def boxes3d_nearest_bev_iou(boxes_a, boxes_b):
     boxes_bev_b = boxes3d_lidar_to_aligned_bev_boxes(boxes_b)
 
     return boxes_iou_normal(boxes_bev_a, boxes_bev_b)
-
-
-def transform_boxes3d(boxes, pose):
-    """
-
-    Args:
-        boxes: N * 9 x,y,z,dx,dy,dz,heading,vx,vy
-        pose:
-
-    Returns:
-
-    """
-    center = boxes[:, :3]
-    center = np.concatenate([center, np.ones((center.shape[0], 1))], axis=-1)
-    center = center @ pose.T
-    heading = boxes[:, [6]] + np.arctan2(pose[1, 0], pose[0, 0])
-    velocity = boxes[:, 7:]
-    velocity = np.concatenate([velocity, np.zeros((velocity.shape[0], 1))], axis=-1)
-    velocity = velocity @ pose[:3, :3].T
-
-    return np.concatenate([center[:, :3], boxes[:, 3:6], heading, velocity[:, :2]], axis=-1)

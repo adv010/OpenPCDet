@@ -21,9 +21,6 @@ def check_numpy_to_torch(x):
         # modified
         d = np.array([x],dtype=np.float32)
         return torch.from_numpy(d).float(), True
-    elif isinstance(x, np.float32):
-        d = np.array([x], dtype=np.float32)
-        return torch.from_numpy(d).float(), True
     return x, False
 
 
@@ -151,19 +148,50 @@ def init_dist_slurm(tcp_port, local_rank, backend='nccl'):
 
     """
     proc_id = int(os.environ['SLURM_PROCID'])
-    ntasks = int(os.environ['SLURM_NTASKS'])
+    # ntasks = int(os.environ['SLURM_NTASKS'])
     node_list = os.environ['SLURM_NODELIST']
     num_gpus = torch.cuda.device_count()
     torch.cuda.set_device(proc_id % num_gpus)
-    addr = subprocess.getoutput('scontrol show hostname {} | head -n1'.format(node_list))
-    os.environ['MASTER_PORT'] = str(tcp_port)
-    os.environ['MASTER_ADDR'] = addr
-    os.environ['WORLD_SIZE'] = str(ntasks)
-    os.environ['RANK'] = str(proc_id)
+    # addr = subprocess.getoutput('scontrol show hostname {} | head -n1'.format(node_list))
+    # os.environ['MASTER_PORT'] = str(tcp_port)
+    # os.environ['MASTER_ADDR'] = addr
+    # os.environ['WORLD_SIZE'] = str(ntasks)
+    # os.environ['RANK'] = str(proc_id)
     dist.init_process_group(backend=backend)
-
+    rank = int(os.environ['RANK'])
     total_gpus = dist.get_world_size()
-    rank = dist.get_rank()
+    
+    dist_vars = """ SLURM_NODELIST: %s
+                    
+                    cuda.device_count: %s
+                    
+                    SLURM_NTASKS: %s
+                    WORLD_SIZE: %s
+                    dist.get_world_size: %s
+                    
+                    LOCAL_RANK: %s
+                    RANK remainder cuda.device_count: %s
+                    
+                    SLURM_PROCID: %s
+                    RANK: %s
+                    dist.get_rank: %s
+                    \n
+                    """ % (os.environ["SLURM_NODELIST"],
+
+                           str(torch.cuda.device_count()),
+
+                           os.environ["SLURM_NTASKS"],
+                           os.environ["WORLD_SIZE"],
+                           str(dist.get_world_size()),
+
+                           os.environ["LOCAL_RANK"],
+                           str(int(os.environ["RANK"]) % int(torch.cuda.device_count())),
+
+                           os.environ["SLURM_PROCID"],
+                           os.environ["RANK"],
+                           str(dist.get_rank())
+                           )
+    print(dist_vars)
     return total_gpus, rank
 
 
@@ -252,12 +280,6 @@ def generate_voxel2pinds(sparse_tensor):
 
 
 def sa_create(name, var):
-    """
-        Args:
-            name: identify the shared memory, file:// prefix to indicate file while shm:// to indicate to be a POSIX shared memory object
-            var: only use the var.shape and var.dtype to create SA object
-            see more: https://pypi.org/project/SharedArray/
-    """
     x = SharedArray.create(name, var.shape, dtype=var.dtype)
     x[...] = var[...]
     x.flags.writeable = False
@@ -398,30 +420,6 @@ def split_two_spare_tensor(split_tag_s1, split_tag_s2, sparse_tensor):
 
     return input_sp_tensor_s1, input_sp_tensor_s2
 
-def merge_two_sparse_tensor(sparse_tensor_1, sparse_tensor_2, batch_size_1, batch_size_2):
-    voxel_features_1 = sparse_tensor_1.features
-    voxel_features_2 = sparse_tensor_2.features
-    voxel_coords_1 = sparse_tensor_1.indices
-    voxel_coords_2 = sparse_tensor_2.indices
-    
-    # split the voxel_coords of the dataset-merged voxel_coords
-    voxel_coords_2[:, 0] += batch_size_1
-    tar_coor = torch.cat([voxel_coords_1, voxel_coords_2], dim=0)
-    
-    # split the voxel_tensor of the dataset-merged voxel_coords
-    tar_list = [voxel_features_1.reshape(-1, voxel_features_1.shape[-1]), voxel_features_2.reshape(-1, voxel_features_2.shape[-1])]
-    voxel_features = torch.cat(tar_list, dim=0)
-    
-    # convert the dense_tensor of voxel into the sparse representations
-    input_sp_tensor = spconv.SparseConvTensor(
-        features=voxel_features,
-        indices=tar_coor.int(),
-        spatial_shape=sparse_tensor_1.spatial_shape,
-        batch_size=batch_size_1 + batch_size_2
-    )
-
-    return input_sp_tensor
-
 # For split the batch_dict for two head
 
 def split_two_batch_dict(split_tag_s1, split_tag_s2, batch_dict):
@@ -487,11 +485,6 @@ def split_two_batch_dict(split_tag_s1, split_tag_s2, batch_dict):
                 tar_list_s2.append(voxel_s2.reshape(-1))
             tar_dicts_s1[key] = np.concatenate(tar_list_s1, axis=0)
             tar_dicts_s2[key] = np.concatenate(tar_list_s2, axis=0)
-        
-        elif key in ['augmentation_list', 'augmentation_params']:
-            tar_dicts_s1[key] = val[:len(split_tag_s1)]
-            tar_dicts_s2[key] = val[len(split_tag_s1):]
-        
         elif key in [ 'metadata' ]:
             # Due to that the kitti do not have the 'metadata' key, and give the 'metadata' key to nusc branch
             if "kitti" in batch_dict['db_flag']:
@@ -528,7 +521,7 @@ def split_two_batch_dict_gpu(split_tag_s1, split_tag_s2, batch_dict):
     tar_dicts_s2 = {}
     
     for key, val in batch_dict.items():
-        if key in ['db_flag', 'data_flag', 'frame_id', 'use_lead_xyz']:
+        if key in ['db_flag', 'frame_id', 'use_lead_xyz']:
             tar_list_s1 = []
             tar_list_s2 = []
             for i in split_tag_s1:
@@ -582,9 +575,6 @@ def split_two_batch_dict_gpu(split_tag_s1, split_tag_s2, batch_dict):
         elif key in ['spatial_features', 'spatial_features_2d']:
             tar_dicts_s1[key] = val[split_tag_s1, :, :, :]
             tar_dicts_s2[key] = val[split_tag_s2, :, :, :]
-        elif key in ['augmentation_list', 'augmentation_params']:
-            tar_dicts_s1[key] = val[:len(split_tag_s1)]
-            tar_dicts_s2[key] = val[len(split_tag_s1):]
         elif key in [ 'metadata' ]:
             # Due to that the kitti and once do not have the 'metadata' key, 
             # and only give the 'metadata' key to nusc branch
@@ -675,7 +665,7 @@ def merge_two_batch_dict(batch_dict_1, batch_dict_2):
     for key, val in batch_dict_1.items():
         if key in ['batch_size']:
             continue
-        elif key in ['db_flag', 'data_flag', 'frame_id', 'use_lead_xyz']:
+        elif key in ['db_flag', 'frame_id', 'use_lead_xyz']:
             tar_list_merge = []
             tar_list_merge = [val, batch_dict_2[key]]
             batch_merge_dict[key] = np.concatenate(tar_list_merge, axis=0)
@@ -723,9 +713,6 @@ def merge_two_batch_dict(batch_dict_1, batch_dict_2):
                 batch_merge_dict[key] = np.concatenate(tar_list_merge, axis=0)
             else:
                 batch_merge_dict[key] = val
-        elif key in ['augmentation_list', 'augmentation_params']:
-            tar_list_merge = val + batch_dict_2[key]
-            batch_merge_dict[key] = tar_list_merge
     
     if 'metadata' in batch_dict_2.keys() and 'metadata' not in batch_dict_1.keys() :
         batch_merge_dict['metadata'] = batch_dict_2['metadata']
@@ -742,49 +729,17 @@ def merge_two_batch_dict(batch_dict_1, batch_dict_2):
     return batch_merge_dict
 
 
-def merge_two_batch_dict_gpu(batch_dict_1, batch_dict_2):
+def merge_two_batch_dict_gpu(split_tag_s1, split_tag_s2, batch_dict):
     """
     To support a custom dataset, implement this function to merge two batch_dict (and labels)
     from different datasets
 
     Args:
-        batch_dict_1:
-        batch_dict_2:
+        split_tag_s1:
+        split_tag_s2:
+        batch_dict:
 
     Returns:
         batch_merge_dict:
     """
-    batch_merge_dict = {}
-    batch_merge_dict['batch_size'] = batch_dict_1['batch_size'] + batch_dict_2['batch_size']
-    
-    for key, val in batch_dict_1.items():
-        if key in ['db_flag', 'data_flag', 'frame_id', 'use_lead_xyz']:
-            tar_list_merge = val + batch_dict_2[key]
-            batch_merge_dict[key] = tar_list_merge
-        elif key in ['points', 'voxel_coords', 'point_coords']:
-            tar_list_merge = []
-            batch_bias = batch_dict_1['batch_size']
-            val_2 = batch_dict_2[key]
-            val_2[:,0] = val_2[:,0] + batch_bias
-            tar_list_merge = [val, val_2]
-            batch_merge_dict[key] = torch.cat(tar_list_merge, dim=0)
-        elif key in ['gt_boxes', 'voxel_features', 'spatial_features', 'spatial_features_2d', 'batch_cls_preds', 'batch_box_preds', 'point_features_before_fusion', 'point_features']:
-            tar_list_merge = []
-            val_2 = batch_dict_2[key]
-            tar_list_merge = [val, val_2]
-            batch_merge_dict[key] = torch.cat(tar_list_merge, dim=0)
-        elif key in ['multi_scale_3d_features']:
-            merge_sp_3d = {}
-            batch_size_1 = batch_dict_1['batch_size']
-            batch_size_2 = batch_dict_2['batch_size']
-            val_2 = batch_dict_2[key]
-            for src_name in ['x_conv1', 'x_conv2', 'x_conv3', 'x_conv4']:
-                merge_sp_tensor = merge_two_sparse_tensor(val[src_name], val_2[src_name], batch_size_1, batch_size_2)
-                merge_sp_3d[src_name] = merge_sp_tensor
-            
-            batch_merge_dict[key] = merge_sp_3d
-        elif key in ['multi_scale_3d_strides', 'spatial_features_stride', 'cls_preds_normalized']:
-            batch_merge_dict[key] = val
-        else:
-            continue
-    return batch_merge_dict
+    raise NotImplementedError

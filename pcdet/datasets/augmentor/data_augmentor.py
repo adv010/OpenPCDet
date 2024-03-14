@@ -2,21 +2,21 @@ from functools import partial
 
 import numpy as np
 
-from ...utils import common_utils
+from ...utils import common_utils, downsample_utils
 from . import augmentor_utils, database_sampler
 
 
 class DataAugmentor(object):
-    def __init__(self, root_path, augmentor_configs, class_names, logger=None):
+    def __init__(self, root_path, augmentor_configs, class_names, logger=None, oss_flag=False):
         self.root_path = root_path
         self.class_names = class_names
         self.logger = logger
+        self.oss_flag = oss_flag
         self.augmentor_configs = augmentor_configs
-
         self.data_augmentor_queue = []
         aug_config_list = augmentor_configs if isinstance(augmentor_configs, list) \
             else augmentor_configs.AUG_CONFIG_LIST
-
+        
         for cur_cfg in aug_config_list:
             if not isinstance(augmentor_configs, list):
                 if cur_cfg.NAME in augmentor_configs.DISABLE_AUG_LIST:
@@ -29,18 +29,19 @@ class DataAugmentor(object):
             root_path=self.root_path,
             sampler_cfg=config,
             class_names=self.class_names,
-            logger=self.logger
+            logger=self.logger,
+            oss_flag=self.oss_flag
         )
         return db_sampler
-
+    
     def __getstate__(self):
         d = dict(self.__dict__)
         del d['logger']
         return d
-
+    
     def __setstate__(self, d):
         self.__dict__.update(d)
-
+    
     def random_object_rotation(self, data_dict=None, config=None):
         if data_dict is None:
             return partial(self.random_object_rotation, config=config)
@@ -105,11 +106,11 @@ class DataAugmentor(object):
             gt_boxes, points = getattr(augmentor_utils, 'random_flip_along_%s' % cur_axis)(
                 gt_boxes, points,
             )
-
+        
         data_dict['gt_boxes'] = gt_boxes
         data_dict['points'] = points
         return data_dict
-
+    
     def random_world_rotation(self, data_dict=None, config=None):
         if data_dict is None:
             return partial(self.random_world_rotation, config=config)
@@ -119,21 +120,22 @@ class DataAugmentor(object):
         gt_boxes, points = augmentor_utils.global_rotation(
             data_dict['gt_boxes'], data_dict['points'], rot_range=rot_range
         )
-
+        
         data_dict['gt_boxes'] = gt_boxes
         data_dict['points'] = points
         return data_dict
-
+    
     def random_world_scaling(self, data_dict=None, config=None):
         if data_dict is None:
             return partial(self.random_world_scaling, config=config)
         gt_boxes, points = augmentor_utils.global_scaling(
             data_dict['gt_boxes'], data_dict['points'], config['WORLD_SCALE_RANGE']
         )
+        
         data_dict['gt_boxes'] = gt_boxes
         data_dict['points'] = points
         return data_dict
-
+    
     def random_image_flip(self, data_dict=None, config=None):
         if data_dict is None:
             return partial(self.random_image_flip, config=config)
@@ -147,12 +149,12 @@ class DataAugmentor(object):
             images, depth_maps, gt_boxes = getattr(augmentor_utils, 'random_image_flip_%s' % cur_axis)(
                 images, depth_maps, gt_boxes, calib,
             )
-
+        
         data_dict['images'] = images
         data_dict['depth_maps'] = depth_maps
         data_dict['gt_boxes'] = gt_boxes
         return data_dict
-
+    
     def random_world_translation(self, data_dict=None, config=None):
         if data_dict is None:
             return partial(self.random_world_translation, config=config)
@@ -183,11 +185,11 @@ class DataAugmentor(object):
             gt_boxes, points = getattr(augmentor_utils, 'random_local_translation_along_%s' % cur_axis)(
                 gt_boxes, points, offset_range,
             )
-
+        
         data_dict['gt_boxes'] = gt_boxes
         data_dict['points'] = points
         return data_dict
-
+    
     def random_local_rotation(self, data_dict=None, config=None):
         """
         Please check the correctness of it before using.
@@ -200,11 +202,11 @@ class DataAugmentor(object):
         gt_boxes, points = augmentor_utils.local_rotation(
             data_dict['gt_boxes'], data_dict['points'], rot_range=rot_range
         )
-
+        
         data_dict['gt_boxes'] = gt_boxes
         data_dict['points'] = points
         return data_dict
-
+    
     def random_local_scaling(self, data_dict=None, config=None):
         """
         Please check the correctness of it before using.
@@ -214,18 +216,18 @@ class DataAugmentor(object):
         gt_boxes, points = augmentor_utils.local_scaling(
             data_dict['gt_boxes'], data_dict['points'], config['LOCAL_SCALE_RANGE']
         )
-
+        
         data_dict['gt_boxes'] = gt_boxes
         data_dict['points'] = points
         return data_dict
-
+    
     def random_world_frustum_dropout(self, data_dict=None, config=None):
         """
         Please check the correctness of it before using.
         """
         if data_dict is None:
             return partial(self.random_world_frustum_dropout, config=config)
-
+        
         intensity_range = config['INTENSITY_RANGE']
         gt_boxes, points = data_dict['gt_boxes'], data_dict['points']
         for direction in config['DIRECTION']:
@@ -233,18 +235,18 @@ class DataAugmentor(object):
             gt_boxes, points = getattr(augmentor_utils, 'global_frustum_dropout_%s' % direction)(
                 gt_boxes, points, intensity_range,
             )
-
+        
         data_dict['gt_boxes'] = gt_boxes
         data_dict['points'] = points
         return data_dict
-
+    
     def random_local_frustum_dropout(self, data_dict=None, config=None):
         """
         Please check the correctness of it before using.
         """
         if data_dict is None:
             return partial(self.random_local_frustum_dropout, config=config)
-
+        
         intensity_range = config['INTENSITY_RANGE']
         gt_boxes, points = data_dict['gt_boxes'], data_dict['points']
         for direction in config['DIRECTION']:
@@ -252,11 +254,11 @@ class DataAugmentor(object):
             gt_boxes, points = getattr(augmentor_utils, 'local_frustum_dropout_%s' % direction)(
                 gt_boxes, points, intensity_range,
             )
-
+        
         data_dict['gt_boxes'] = gt_boxes
         data_dict['points'] = points
         return data_dict
-
+    
     def random_local_pyramid_aug(self, data_dict=None, config=None):
         """
         Refer to the paper: 
@@ -264,9 +266,9 @@ class DataAugmentor(object):
         """
         if data_dict is None:
             return partial(self.random_local_pyramid_aug, config=config)
-
+        
         gt_boxes, points = data_dict['gt_boxes'], data_dict['points']
-
+        
         gt_boxes, points, pyramids = augmentor_utils.local_pyramid_dropout(gt_boxes, points, config['DROP_PROB'])
         gt_boxes, points, pyramids = augmentor_utils.local_pyramid_sparsify(gt_boxes, points,
                                                                             config['SPARSIFY_PROB'],
@@ -279,7 +281,60 @@ class DataAugmentor(object):
         data_dict['gt_boxes'] = gt_boxes
         data_dict['points'] = points
         return data_dict
+    
+    def random_downsample(self, data_dict=None, config=None):
+        if data_dict is None:
+            return partial(self.random_downsample, config=config)
 
+        prob = config['PROB']
+        enable = np.random.choice([False, True], replace=False, p=[1-prob, prob])
+        # enable = np.random.choice([False, True], replace=False, p=[0.5, 0.5])
+        if enable:
+            points = data_dict['points']
+            theta, phi = downsample_utils.compute_angles(points)
+            label, centroids = downsample_utils.beam_label(theta, config['BEAM'])
+            idxs = np.argsort(centroids)
+            mask = downsample_utils.generate_mask(phi, config['BEAM'], label, idxs, config['BEAM_RATIO'], bin_ratio=1)
+            data_dict['points'] = points[mask]
+        return data_dict
+
+    def random_beam_sampling(self, data_dict=None, config=None):
+        if data_dict is None:
+            return partial(self.random_beam_sampling, config=config)
+        
+        num_rings = config['BEAM']
+        proj_fov_up, proj_fov_down = config['VFOV'][0], config['VFOV'][1]
+        points = data_dict['points']
+
+        points_interpolate = augmentor_utils.random_beam_sampling(points, num_rings, proj_fov_up, proj_fov_down)
+        points = np.concatenate([points[:, :points_interpolate.shape[-1]], points_interpolate], axis=0)
+        data_dict['points'] = points
+        return data_dict
+
+    def beam_resampling(self, data_dict=None, config=None):
+        if data_dict is None:
+            return partial(self.beam_resampling, config=config)
+        
+        enable = np.random.choice([False, True], replace=False, p=[0.3, 0.7])
+        if enable:
+            downsample = np.random.choice([False, True], replace=False, p=[0.5, 0.5])
+            if downsample:
+                points = data_dict['points']
+                theta, phi = downsample_utils.compute_angles(points)
+                label, centroids = downsample_utils.beam_label(theta, config['BEAM'])
+                idxs = np.argsort(centroids)
+                mask = downsample_utils.generate_mask(phi, config['BEAM'], label, idxs, config['BEAM_RATIO'], bin_ratio=1)
+                data_dict['points'] = points[mask]
+            else:
+                num_rings = config['BEAM']
+                proj_fov_up, proj_fov_down = config['VFOV'][0], config['VFOV'][1]
+                points = data_dict['points']
+
+                points_interpolate = augmentor_utils.random_beam_sampling(points, num_rings, proj_fov_up, proj_fov_down)
+                points = np.concatenate([points, points_interpolate], axis=0)
+                data_dict['points'] = points
+        return data_dict
+    
     def forward(self, data_dict):
         """
         Args:
@@ -293,7 +348,7 @@ class DataAugmentor(object):
         """
         for cur_augmentor in self.data_augmentor_queue:
             data_dict = cur_augmentor(data_dict=data_dict)
-
+        
         data_dict['gt_boxes'][:, 6] = common_utils.limit_period(
             data_dict['gt_boxes'][:, 6], offset=0.5, period=2 * np.pi
         )
@@ -307,10 +362,10 @@ class DataAugmentor(object):
             data_dict['gt_names'] = data_dict['gt_names'][gt_boxes_mask]
             if 'gt_boxes2d' in data_dict:
                 data_dict['gt_boxes2d'] = data_dict['gt_boxes2d'][gt_boxes_mask]
-
+            
             data_dict.pop('gt_boxes_mask')
         return data_dict
-
+    
     def re_prepare(self, augmentor_configs=None, intensity=None, aug_times=1):
         self.data_augmentor_queue = []
 
