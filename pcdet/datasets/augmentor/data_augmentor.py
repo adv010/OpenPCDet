@@ -7,11 +7,11 @@ from . import augmentor_utils, database_sampler
 
 
 class DataAugmentor(object):
-    def __init__(self, root_path, augmentor_configs, class_names, logger=None, oss_flag=False):
+    def __init__(self, root_path, augmentor_configs, class_names, logger=None):
         self.root_path = root_path
         self.class_names = class_names
         self.logger = logger
-        self.oss_flag = oss_flag
+        # self.oss_flag = oss_flag
         self.augmentor_configs = augmentor_configs
         self.data_augmentor_queue = []
         aug_config_list = augmentor_configs if isinstance(augmentor_configs, list) \

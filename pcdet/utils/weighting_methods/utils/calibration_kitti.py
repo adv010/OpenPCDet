@@ -34,9 +34,9 @@ def get_calib_from_file(calib_file, oss_flag):
 
 
 class Calibration(object):
-    def __init__(self, calib_file, oss_flag):
+    def __init__(self, calib_file):
         if not isinstance(calib_file, dict):
-            calib = get_calib_from_file(calib_file, oss_flag)
+            calib = get_calib_from_file(calib_file)
         else:
             calib = calib_file
 

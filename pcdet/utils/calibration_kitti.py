@@ -1,7 +1,7 @@
 import numpy as np
 
 
-def get_calib_from_file(calib_file, oss_flag):
+def get_calib_from_file(calib_file, oss_flag=False):
     if oss_flag == False:
         with open(calib_file) as f:
             lines = f.readlines()
@@ -34,9 +34,9 @@ def get_calib_from_file(calib_file, oss_flag):
 
 
 class Calibration(object):
-    def __init__(self, calib_file, oss_flag):
+    def __init__(self, calib_file):
         if not isinstance(calib_file, dict):
-            calib = get_calib_from_file(calib_file, oss_flag)
+            calib = get_calib_from_file(calib_file)
         else:
             calib = calib_file
 
