@@ -138,6 +138,7 @@ class VoxelBackBone8x(nn.Module):
         """
         voxel_features, voxel_coords = batch_dict['voxel_features'], batch_dict['voxel_coords']
         batch_size = batch_dict['batch_size']
+        if self.sparse_shape.ndim==2: self.sparse_shape = self.sparse_shape.squeeze()
         input_sp_tensor = spconv.SparseConvTensor(
             features=voxel_features,
             indices=voxel_coords.int(),

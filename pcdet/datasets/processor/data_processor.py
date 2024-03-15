@@ -145,6 +145,7 @@ class DataProcessor(object):
             return partial(self.transform_points_to_voxels, config=config)
 
         if self.voxel_generator is None:
+            if len(config.VOXEL_SIZE) ==1:config.VOXEL_SIZE = config.VOXEL_SIZE[0]
             self.voxel_generator = VoxelGeneratorWrapper(
                 vsize_xyz=config.VOXEL_SIZE,
                 coors_range_xyz=self.point_cloud_range,
