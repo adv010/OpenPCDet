@@ -22,6 +22,8 @@ class AnchorGenerator(object):
                 grid_sizes, self.anchor_sizes, self.anchor_rotations, self.anchor_heights, self.align_center):
 
             num_anchors_per_location.append(len(anchor_rotation) * len(anchor_size) * len(anchor_height))
+            if grid_size.ndim>1:
+                grid_size = grid_size.squeeze()
             if align_center:
                 x_stride = (self.anchor_range[3] - self.anchor_range[0]) / grid_size[0]
                 y_stride = (self.anchor_range[4] - self.anchor_range[1]) / grid_size[1]
