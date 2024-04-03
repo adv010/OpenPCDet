@@ -3,7 +3,7 @@ from torch.functional import F
 from torchmetrics import Metric
 import numpy as np
 from torch.distributions import Categorical
-
+from sklearn.neighbors import KNeighborsClassifier
 
 class FeatureBank(Metric):
     full_state_update:bool=False
@@ -154,7 +154,7 @@ class PseudoFeatureBank(Metric): # ROIFeatureBank a better name
         self.tag = kwargs.get('NAME', None)
         self.temperature = kwargs.get('TEMPERATURE')
         self.feat_size = kwargs.get('FEATURE_SIZE')
-        # self.ulb_bank_size = kwargs.get('BANK_SIZE')  # e.g., num. of classes or labeled instances
+        self.capacity = self.batch_size * 10 #  From SEMPPL : C = 20 * B
         self.momentum = kwargs.get('MOMENTUM')
         # self.direct_update = kwargs.get('DIRECT_UPDATE')
         self.reset_state_interval = kwargs.get('RESET_STATE_INTERVAL')  # reset the state when N unique samples are seen
@@ -162,6 +162,8 @@ class PseudoFeatureBank(Metric): # ROIFeatureBank a better name
         self.initialized = False
         self.smplid_hist = {}  # Dictionary mapping ulb scene's FrameID to histogram of roi_labels founds
         self.threshold_fg_cls = 0.25
+        self.KNN_pseudo_labels = None
+        self.k = 1  # controls scope of K-NN
 
         self.add_state('ulb_feats', default=[], dist_reduce_fx='cat')
         self.add_state('ulb_roi_scores', default=[], dist_reduce_fx='cat')
@@ -177,9 +179,9 @@ class PseudoFeatureBank(Metric): # ROIFeatureBank a better name
         self.add_state('lb_smpl_ids', default=[], dist_reduce_fx='cat')
         
 
-
     def _init_(self):
-        self.initialized = True
+        if len(self.ulb_feats)==self.capacity:
+            self.initialized = True
         
     
     def update(self, ulb_feats: [torch.Tensor], ulb_roi_scores: [torch.Tensor],  ulb_obj_scores: [torch.Tensor], pseudo_boxes: [torch.Tensor], 
@@ -231,8 +233,29 @@ class PseudoFeatureBank(Metric): # ROIFeatureBank a better name
         lb_roi_scores = lb_roi_scores[lb_fg_mask]
         lb_roi_boxes = torch.cat(self.pseudo_boxes)
         lb_roi_boxes = lb_roi_boxes[lb_fg_mask]
-        
-        return ulb_features, ulb_roi_scores, lb_features, lb_roi_scores        
+        self.KNN_pseudo_labels = self._get_KNN_labels(ulb_features, lb_features, lb_roi_scores, ulb_roi_scores)
+        self.reset()
+        return self.KNN_pseudo_labels
+
+    def _get_KNN_labels(self,ulb_features,lb_features,lb_roi_scores,ulb_roi_scores): 
+        lb_features_np = lb_features.cpu().numpy()
+        ulb_features_np = ulb_features.cpu().numpy()
+        lb_roi_scores_np = lb_roi_scores.cpu().numpy()
+        knn = KNeighborsClassifier(n_neighbors=self.k) # From SEMPPL
+        # SEMPPL Appendix suggestion : Replace KNN with FAISS(Facebook) for speedups : https://towardsdatascience.com/make-knn-300-times-faster-than-scikit-learns-in-20-lines-5e29d74e76bb
+        knn.fit(lb_features_np,lb_roi_scores_np)
+        preds_np = knn.predict(ulb_features_np)
+        preds_tensor = torch.tensor(preds_np)
+        return preds_tensor   
+
+    @torch.no_grad()
+    def _get_SEMPPL_loss(self):
+        '''
+        1. Collect features from different augmentations
+        2. Find 
+
+        '''
+        raise NotImplementedError      
 
 class FeatureBankRegistry(object):
     def __init__(self, **kwargs):

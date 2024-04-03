@@ -303,11 +303,12 @@ class PVRCNN_SSL(Detector3DTemplate):
             sa_gt_lbl_inputs = self._prep_bank_inputs(batch_dict, lbl_inds, bank.num_points_thresh, use_gtboxes = True)
             bank.update(**sa_gt_lbl_inputs, iteration=batch_dict['cur_iteration'])
             
-            # roi_bank = feature_bank_registry.get('gt_aug_ulb_features')
+            #roi_bank = feature_bank_registry.get('gt_aug_ulb_features')
             #sa_roi_lbl_inputs = self._prep_roi_bank_inputs(batch_dict, lbl_inds, bank.num_points_thresh, use_gtboxes = False)
-            # roi_bank.update(**sa_roi_lbl_inputs, iteration=batch_dict['cur_iteration'])
-            sa_roi_ulb_inputs = self._prep_roi_bank_inputs(batch_dict, ulb_inds, lbl_inds, bank.num_points_thresh, use_gtboxes = False)
+            #roi_bank.update(**sa_roi_lbl_inputs, iteration=batch_dict['cur_iteration'])
+            
             ulb_bank = feature_bank_registry.get('roi_aug_ulb_features')
+            sa_roi_ulb_inputs = self._prep_roi_bank_inputs(batch_dict, ulb_inds, lbl_inds, bank.num_points_thresh, use_gtboxes = False)
             ulb_bank.update(**sa_roi_ulb_inputs)
         # For metrics calculation
         self.pv_rcnn.roi_head.forward_ret_dict['unlabeled_inds'] = ulb_inds
