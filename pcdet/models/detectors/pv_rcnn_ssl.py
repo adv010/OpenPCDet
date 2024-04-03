@@ -70,10 +70,23 @@ class PVRCNN_SSL(Detector3DTemplate):
             "point_cls_scores": batch_dict['point_cls_scores'].clone().detach()
         }
 
-    def _prep_bank_inputs(self, batch_dict, inds, num_points_threshold=20):
+    @staticmethod
+    def _clone_roi_boxes_and_feats(batch_dict):
+        return {
+            "batch_size": batch_dict['batch_size'],
+            "gt_boxes": batch_dict['gt_boxes'].clone().detach(),
+            "rois": batch_dict['rois'].clone().detach(),
+            "point_coords": batch_dict['point_coords'].clone().detach(),
+            "point_features": batch_dict['point_features'].clone().detach(),
+            "point_cls_scores": batch_dict['point_cls_scores'].clone().detach(),
+            "roi_bank_prep" : True
+        }
+
+
+    def _prep_bank_inputs(self, batch_dict, inds, num_points_threshold=20, use_gtboxes = None):
         selected_batch_dict = self._clone_gt_boxes_and_feats(batch_dict)
         with torch.no_grad():
-            batch_gt_feats = self.pv_rcnn.roi_head.pool_features(selected_batch_dict, use_gtboxes=True)
+            batch_gt_feats = self.pv_rcnn.roi_head.pool_features(selected_batch_dict, use_gtboxes=use_gtboxes)
 
         batch_gt_feats = batch_gt_feats.view(*batch_dict['gt_boxes'].shape[:2], -1)
         bank_inputs = defaultdict(list)
@@ -109,6 +122,38 @@ class PVRCNN_SSL(Detector3DTemplate):
             # valid_box_labels = gt_labels[valid_gts_mask]
             # self.vis(valid_boxes, valid_box_labels, points)
 
+        return bank_inputs
+
+    def _prep_roi_bank_inputs(self, batch_dict, ulb_inds, lb_inds, num_points_threshold=20, use_gtboxes = False):
+        batch_roi_feats =  batch_dict['pooled_features']
+        bank_inputs = defaultdict(list)
+        for ix in ulb_inds:
+            rois = batch_dict['rois'][ix]
+            roi_feat = batch_roi_feats[ix]
+            roi_labels = batch_dict['roi_labels'][ix] - 1
+            obj_scores = batch_dict['batch_cls_preds'][ix]
+            roi_reg_boxes = batch_dict['batch_box_preds'][ix]
+            # ins_idxs = batch_dict['instance_idx'][ix][nonzero_mask].int()
+            smpl_id = torch.from_numpy(batch_dict['frame_id'].astype(np.int32))[ix].cpu()
+            bank_inputs['ulb_feats'].append(roi_feat)
+            bank_inputs['ulb_roi_scores'].append(roi_labels)
+            bank_inputs['ulb_obj_scores'].append(obj_scores)
+            bank_inputs['pseudo_boxes'].append(roi_reg_boxes)
+            bank_inputs['ulb_smpl_ids'].append(smpl_id)
+
+        for idx in lb_inds:
+            rois = batch_dict['rois'][idx]
+            roi_feat = batch_roi_feats[idx]
+            roi_labels = batch_dict['roi_labels'][idx] - 1
+            obj_scores = batch_dict['batch_cls_preds'][idx]
+            roi_reg_boxes = batch_dict['batch_box_preds'][idx]
+            # ins_idxs = batch_dict['instance_idx'][ix][nonzero_mask].int()
+            smpl_id = torch.from_numpy(batch_dict['frame_id'].astype(np.int32))[idx].cpu()
+            bank_inputs['lb_feats'].append(roi_feat)
+            bank_inputs['lb_roi_scores'].append(roi_labels)
+            bank_inputs['lb_obj_scores'].append(obj_scores)
+            bank_inputs['lb_roi_boxes'].append(roi_reg_boxes)
+            bank_inputs['lb_smpl_ids'].append(smpl_id)
         return bank_inputs
 
     def forward(self, batch_dict):
@@ -255,9 +300,15 @@ class PVRCNN_SSL(Detector3DTemplate):
         if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTOTYPING', False):
             # Update the bank with student's features from augmented labeled data
             bank = feature_bank_registry.get('gt_aug_lbl_prototypes')
-            sa_gt_lbl_inputs = self._prep_bank_inputs(batch_dict, lbl_inds, bank.num_points_thresh)
+            sa_gt_lbl_inputs = self._prep_bank_inputs(batch_dict, lbl_inds, bank.num_points_thresh, use_gtboxes = True)
             bank.update(**sa_gt_lbl_inputs, iteration=batch_dict['cur_iteration'])
-
+            
+            # roi_bank = feature_bank_registry.get('gt_aug_ulb_features')
+            #sa_roi_lbl_inputs = self._prep_roi_bank_inputs(batch_dict, lbl_inds, bank.num_points_thresh, use_gtboxes = False)
+            # roi_bank.update(**sa_roi_lbl_inputs, iteration=batch_dict['cur_iteration'])
+            sa_roi_ulb_inputs = self._prep_roi_bank_inputs(batch_dict, ulb_inds, lbl_inds, bank.num_points_thresh, use_gtboxes = False)
+            ulb_bank = feature_bank_registry.get('roi_aug_ulb_features')
+            ulb_bank.update(**sa_roi_ulb_inputs)
         # For metrics calculation
         self.pv_rcnn.roi_head.forward_ret_dict['unlabeled_inds'] = ulb_inds
 
