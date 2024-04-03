@@ -154,7 +154,7 @@ class PseudoFeatureBank(Metric): # ROIFeatureBank a better name
         self.tag = kwargs.get('NAME', None)
         self.temperature = kwargs.get('TEMPERATURE')
         self.feat_size = kwargs.get('FEATURE_SIZE')
-        self.capacity = self.batch_size * 10 #  From SEMPPL : C = 20 * B
+        # self.capacity = self.batch_size * 10 #  From SEMPPL : C = 20 * B
         self.momentum = kwargs.get('MOMENTUM')
         # self.direct_update = kwargs.get('DIRECT_UPDATE')
         self.reset_state_interval = kwargs.get('RESET_STATE_INTERVAL')  # reset the state when N unique samples are seen
@@ -171,7 +171,6 @@ class PseudoFeatureBank(Metric): # ROIFeatureBank a better name
         self.add_state('pseudo_boxes', default=[], dist_reduce_fx='cat')
         self.add_state('ulb_smpl_ids', default=[], dist_reduce_fx='cat')
         
-
         self.add_state('lb_feats', default=[], dist_reduce_fx='cat')
         self.add_state('lb_roi_scores', default=[], dist_reduce_fx='cat')
         self.add_state('lb_obj_scores', default=[], dist_reduce_fx='cat')
@@ -179,9 +178,9 @@ class PseudoFeatureBank(Metric): # ROIFeatureBank a better name
         self.add_state('lb_smpl_ids', default=[], dist_reduce_fx='cat')
         
 
-    def _init_(self):
-        if len(self.ulb_feats)==self.capacity:
-            self.initialized = True
+    # def _init_(self):
+    #     if len(self.ulb_feats)==self.capacity:
+    #         self.initialized = True
         
     
     def update(self, ulb_feats: [torch.Tensor], ulb_roi_scores: [torch.Tensor],  ulb_obj_scores: [torch.Tensor], pseudo_boxes: [torch.Tensor], 
@@ -189,16 +188,16 @@ class PseudoFeatureBank(Metric): # ROIFeatureBank a better name
                lb_smpl_ids: torch.Tensor) -> None:
         for i in range(len(ulb_feats)):
             self.ulb_feats.append(ulb_feats[i])                 # (N, C)
-            self.ulb_roi_scores.append(ulb_roi_scores[i].view(-1))     # (N,)
-            self.ulb_obj_scores.append(ulb_obj_scores[i].view(-1))
-            self.pseudo_boxes.append(pseudo_boxes[i].view(-1))
-            self.ulb_smpl_ids.append(ulb_smpl_ids[i].view(-1))  # (1,)
+            self.ulb_roi_scores.append(ulb_roi_scores[i].view(-1).cpu())     # (N,)
+            self.ulb_obj_scores.append(ulb_obj_scores[i].view(-1).cpu())
+            self.pseudo_boxes.append(pseudo_boxes[i].view(-1).cpu())
+            self.ulb_smpl_ids.append(ulb_smpl_ids[i].view(-1).cpu())  # (1,)
             
             self.lb_feats.append(lb_feats[i])                 # (N, C)
-            self.lb_roi_scores.append(lb_roi_scores[i].view(-1))     # (N,)
-            self.lb_obj_scores.append(lb_obj_scores[i].view(-1))
-            self.lb_roi_boxes.append(lb_roi_boxes[i].view(-1))
-            self.lb_smpl_ids.append(lb_smpl_ids[i].view(-1))  # (1,)
+            self.lb_roi_scores.append(lb_roi_scores[i].view(-1).cpu())     # (N,)
+            self.lb_obj_scores.append(lb_obj_scores[i].view(-1).cpu())
+            self.lb_roi_boxes.append(lb_roi_boxes[i].view(-1).cpu())
+            self.lb_smpl_ids.append(lb_smpl_ids[i].view(-1).cpu())  # (1,)
 
     def compute(self):
         ulb_obj_scores = torch.cat(self.ulb_obj_scores)
@@ -207,17 +206,17 @@ class PseudoFeatureBank(Metric): # ROIFeatureBank a better name
         ulb_fg_mask = ulb_obj_scores>self.threshold_fg_cls        
         
         ulb_features = torch.cat(self.ulb_feats)
-        ulb_features = ulb_features[ulb_fg_mask]
+        # ulb_features = ulb_features[ulb_fg_mask]
         ulb_roi_scores = torch.cat(self.ulb_roi_scores).int()
-        ulb_roi_scores = ulb_roi_scores[ulb_fg_mask]
+        # ulb_roi_scores = ulb_roi_scores[ulb_fg_mask]
         pseudo_boxes = torch.cat(self.pseudo_boxes)
-        pseudo_boxes = pseudo_boxes[ulb_fg_mask]
+        # pseudo_boxes = pseudo_boxes[ulb_fg_mask]
 
         
         smpl_ids_list = [int(tensor) for tensor in self.ulb_smpl_ids]
         for i, smpl_id in enumerate(smpl_ids_list):
-            histogram, _ = torch.histogram(ulb_roi_scores[i], bins=3)
-            if smpl_id in self.smplid_lbl_hist:
+            histogram, _ = torch.histogram(ulb_roi_scores[i].cpu().float(), bins=3)
+            if smpl_id in self.smplid_hist:
                 self.smplid_hist[smpl_id] += histogram
             else:
                 self.smplid_hist[smpl_id] = histogram  
@@ -225,21 +224,21 @@ class PseudoFeatureBank(Metric): # ROIFeatureBank a better name
         lb_obj_scores = torch.cat(self.lb_obj_scores)
         lb_obj_scores = torch.sigmoid(lb_obj_scores.view(-1))
 
-        lb_fg_mask = lb_obj_scores>self.threshold_fg_cls
+        # lb_fg_mask = lb_obj_scores>self.threshold_fg_cls
 
         lb_features = torch.cat(self.lb_feats)
-        lb_features = lb_features[lb_fg_mask]
+        # lb_features = lb_features[lb_fg_mask]
         lb_roi_scores = torch.cat(self.lb_roi_scores).int()
-        lb_roi_scores = lb_roi_scores[lb_fg_mask]
+        # lb_roi_scores = lb_roi_scores[lb_fg_mask]
         lb_roi_boxes = torch.cat(self.pseudo_boxes)
-        lb_roi_boxes = lb_roi_boxes[lb_fg_mask]
+        # lb_roi_boxes = lb_roi_boxes[lb_fg_mask]
         self.KNN_pseudo_labels = self._get_KNN_labels(ulb_features, lb_features, lb_roi_scores, ulb_roi_scores)
         self.reset()
         return self.KNN_pseudo_labels
 
     def _get_KNN_labels(self,ulb_features,lb_features,lb_roi_scores,ulb_roi_scores): 
-        lb_features_np = lb_features.cpu().numpy()
-        ulb_features_np = ulb_features.cpu().numpy()
+        lb_features_np = lb_features.cpu().detach().numpy()
+        ulb_features_np = ulb_features.cpu().detach().numpy()
         lb_roi_scores_np = lb_roi_scores.cpu().numpy()
         knn = KNeighborsClassifier(n_neighbors=self.k) # From SEMPPL
         # SEMPPL Appendix suggestion : Replace KNN with FAISS(Facebook) for speedups : https://towardsdatascience.com/make-knn-300-times-faster-than-scikit-learns-in-20-lines-5e29d74e76bb
@@ -280,5 +279,31 @@ class FeatureBankRegistry(object):
     def tags(self):
         return self._banks.keys()
 
-
 feature_bank_registry = FeatureBankRegistry()
+
+
+class PseudoFeatureBankRegistry(object):
+    def __init__(self, **kwargs):
+        self._banks = {}
+
+    def register(self, tag=None, **bank_configs):
+        if tag is None:
+            tag = 'default'
+        if tag in self.tags():
+            raise ValueError(f'Feature bank with tag {tag} already exists')
+        bank = PseudoFeatureBank(**bank_configs)
+        self._banks[tag] = bank
+        return self._banks[tag]
+
+    def get(self, tag=None):
+        if tag is None:
+            tag = 'default'
+        if tag not in self.tags():
+            raise ValueError(f'Feature bank with tag {tag} does not exist')
+        return self._banks[tag]
+
+    def tags(self):
+        return self._banks.keys()
+
+
+pseudo_feature_bank_registry = PseudoFeatureBankRegistry()

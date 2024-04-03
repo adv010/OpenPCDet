@@ -11,7 +11,7 @@ from .pv_rcnn import PVRCNN
 
 from pcdet.utils import common_utils
 from pcdet.utils.stats_utils import metrics_registry
-from pcdet.utils.prototype_utils import feature_bank_registry
+from pcdet.utils.prototype_utils import feature_bank_registry,pseudo_feature_bank_registry
 from collections import defaultdict
 from pcdet.utils.thresh_algs import thresh_registry
 #from visual_utils import open3d_vis_utils as V
@@ -51,6 +51,9 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         for bank_configs in model_cfg.get("FEATURE_BANK_LIST", []):
             feature_bank_registry.register(tag=bank_configs["NAME"], **bank_configs)
+
+        for ubank_configs in model_cfg.get("PSEUDO_FEATURE_BANK_LIST", []):
+            pseudo_feature_bank_registry.register(tag=ubank_configs["NAME"], **ubank_configs)
 
         for metrics_configs in model_cfg.get("METRICS_BANK_LIST", []):
             if metrics_configs.ENABLE:
@@ -125,10 +128,10 @@ class PVRCNN_SSL(Detector3DTemplate):
         return bank_inputs
 
     def _prep_roi_bank_inputs(self, batch_dict, ulb_inds, lb_inds, num_points_threshold=20, use_gtboxes = False):
-        batch_roi_feats =  batch_dict['pooled_features']
+        batch_roi_feats =  batch_dict['shared_features']
         bank_inputs = defaultdict(list)
+        batch_roi_feats = batch_roi_feats.view(*batch_dict['rois'].shape[:2], -1)
         for ix in ulb_inds:
-            rois = batch_dict['rois'][ix]
             roi_feat = batch_roi_feats[ix]
             roi_labels = batch_dict['roi_labels'][ix] - 1
             obj_scores = batch_dict['batch_cls_preds'][ix]
@@ -142,7 +145,6 @@ class PVRCNN_SSL(Detector3DTemplate):
             bank_inputs['ulb_smpl_ids'].append(smpl_id)
 
         for idx in lb_inds:
-            rois = batch_dict['rois'][idx]
             roi_feat = batch_roi_feats[idx]
             roi_labels = batch_dict['roi_labels'][idx] - 1
             obj_scores = batch_dict['batch_cls_preds'][idx]
@@ -307,7 +309,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             #sa_roi_lbl_inputs = self._prep_roi_bank_inputs(batch_dict, lbl_inds, bank.num_points_thresh, use_gtboxes = False)
             #roi_bank.update(**sa_roi_lbl_inputs, iteration=batch_dict['cur_iteration'])
             
-            ulb_bank = feature_bank_registry.get('roi_aug_ulb_features')
+            ulb_bank = pseudo_feature_bank_registry.get('roi_aug_ulb_features')
             sa_roi_ulb_inputs = self._prep_roi_bank_inputs(batch_dict, ulb_inds, lbl_inds, bank.num_points_thresh, use_gtboxes = False)
             ulb_bank.update(**sa_roi_ulb_inputs)
         # For metrics calculation
@@ -359,6 +361,10 @@ class PVRCNN_SSL(Detector3DTemplate):
         if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTOTYPING', False):
             for tag in feature_bank_registry.tags():
                 feature_bank_registry.get(tag).compute()
+            
+        if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTOTYPING', False):
+            for tag in pseudo_feature_bank_registry.tags():
+                pseudo_feature_bank_registry.get(tag).compute()
 
         # update dynamic thresh alg
         if self.thresh_alg is not None and (results := self.thresh_alg.compute()):
