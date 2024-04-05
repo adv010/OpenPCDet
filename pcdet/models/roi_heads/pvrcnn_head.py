@@ -177,7 +177,7 @@ class PVRCNNHead(RoIHeadTemplate):
         # batch_dict['pooled_features'] = pooled_features.view(pooled_features.shape[0], -1)
         batch_size_rcnn = pooled_features.shape[0]
         shared_features = self.shared_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1))
-        batch_dict['shared_features'] = shared_features        
+        batch_dict['shared_features'] = shared_features.clone().cpu()        
         rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
         rcnn_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
 

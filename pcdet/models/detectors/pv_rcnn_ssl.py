@@ -132,30 +132,30 @@ class PVRCNN_SSL(Detector3DTemplate):
         bank_inputs = defaultdict(list)
         batch_roi_feats = batch_roi_feats.view(*batch_dict['rois'].shape[:2], -1)
         for ix in ulb_inds:
-            roi_feat = batch_roi_feats[ix]
-            roi_labels = batch_dict['roi_labels'][ix] - 1
-            obj_scores = batch_dict['batch_cls_preds'][ix]
-            roi_reg_boxes = batch_dict['batch_box_preds'][ix]
+            ulb_feat = batch_roi_feats[ix]
+            ulb_sem_labels = batch_dict['roi_labels'][ix] - 1
+            ulb_obj_scores = batch_dict['batch_cls_preds'][ix]
+            ulb_reg_boxes = batch_dict['batch_box_preds'][ix]
             # ins_idxs = batch_dict['instance_idx'][ix][nonzero_mask].int()
             smpl_id = torch.from_numpy(batch_dict['frame_id'].astype(np.int32))[ix].cpu()
-            bank_inputs['ulb_feats'].append(roi_feat)
-            bank_inputs['ulb_roi_scores'].append(roi_labels)
-            bank_inputs['ulb_obj_scores'].append(obj_scores)
-            bank_inputs['pseudo_boxes'].append(roi_reg_boxes)
+            bank_inputs['ulb_feats'].append(ulb_feat)
+            bank_inputs['ulb_roi_scores'].append(ulb_sem_labels)
+            bank_inputs['ulb_obj_scores'].append(ulb_obj_scores)
+            bank_inputs['pseudo_boxes'].append(ulb_reg_boxes)
             bank_inputs['ulb_smpl_ids'].append(smpl_id)
 
         for idx in lb_inds:
-            roi_feat = batch_roi_feats[idx]
-            roi_labels = batch_dict['roi_labels'][idx] - 1
-            obj_scores = batch_dict['batch_cls_preds'][idx]
-            roi_reg_boxes = batch_dict['batch_box_preds'][idx]
+            lb_feat = batch_roi_feats[idx]
+            lb_labels = batch_dict['roi_labels'][idx] - 1
+            lb_scores = batch_dict['batch_cls_preds'][idx]
+            lb_reg_boxes = batch_dict['batch_box_preds'][idx]
             # ins_idxs = batch_dict['instance_idx'][ix][nonzero_mask].int()
-            smpl_id = torch.from_numpy(batch_dict['frame_id'].astype(np.int32))[idx].cpu()
-            bank_inputs['lb_feats'].append(roi_feat)
-            bank_inputs['lb_roi_scores'].append(roi_labels)
-            bank_inputs['lb_obj_scores'].append(obj_scores)
-            bank_inputs['lb_roi_boxes'].append(roi_reg_boxes)
-            bank_inputs['lb_smpl_ids'].append(smpl_id)
+            lb_smpl_id = torch.from_numpy(batch_dict['frame_id'].astype(np.int32))[idx].cpu()
+            bank_inputs['lb_feats'].append(lb_feat)
+            bank_inputs['lb_roi_scores'].append(lb_labels)
+            bank_inputs['lb_obj_scores'].append(lb_scores)
+            bank_inputs['lb_roi_boxes'].append(lb_reg_boxes)
+            bank_inputs['lb_smpl_ids'].append(lb_smpl_id)
         return bank_inputs
 
     def forward(self, batch_dict):

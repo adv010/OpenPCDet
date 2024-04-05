@@ -4,7 +4,7 @@ from torchmetrics import Metric
 import numpy as np
 from torch.distributions import Categorical
 from sklearn.neighbors import KNeighborsClassifier
-
+from sklearn import svm
 class FeatureBank(Metric):
     full_state_update:bool=False
 
@@ -162,7 +162,9 @@ class PseudoFeatureBank(Metric): # ROIFeatureBank a better name
         self.initialized = False
         self.smplid_hist = {}  # Dictionary mapping ulb scene's FrameID to histogram of roi_labels founds
         self.threshold_fg_cls = 0.25
-        self.KNN_pseudo_labels = None
+        self.KNN_sem_pseudo_labels = None
+        self.KNN_obj_pseudo_labels = None
+
         self.k = 1  # controls scope of K-NN
 
         self.add_state('ulb_feats', default=[], dist_reduce_fx='cat')
@@ -188,16 +190,16 @@ class PseudoFeatureBank(Metric): # ROIFeatureBank a better name
                lb_smpl_ids: torch.Tensor) -> None:
         for i in range(len(ulb_feats)):
             self.ulb_feats.append(ulb_feats[i])                 # (N, C)
-            self.ulb_roi_scores.append(ulb_roi_scores[i].view(-1).cpu())     # (N,)
-            self.ulb_obj_scores.append(ulb_obj_scores[i].view(-1).cpu())
-            self.pseudo_boxes.append(pseudo_boxes[i].view(-1).cpu())
-            self.ulb_smpl_ids.append(ulb_smpl_ids[i].view(-1).cpu())  # (1,)
+            self.ulb_roi_scores.append(ulb_roi_scores[i].cpu().view(-1))     # (N,)
+            self.ulb_obj_scores.append(ulb_obj_scores[i].cpu().view(-1))
+            self.pseudo_boxes.append(pseudo_boxes[i].cpu().view(-1))
+            self.ulb_smpl_ids.append(ulb_smpl_ids[i].cpu().view(-1))  # (1,)
             
             self.lb_feats.append(lb_feats[i])                 # (N, C)
-            self.lb_roi_scores.append(lb_roi_scores[i].view(-1).cpu())     # (N,)
-            self.lb_obj_scores.append(lb_obj_scores[i].view(-1).cpu())
-            self.lb_roi_boxes.append(lb_roi_boxes[i].view(-1).cpu())
-            self.lb_smpl_ids.append(lb_smpl_ids[i].view(-1).cpu())  # (1,)
+            self.lb_roi_scores.append(lb_roi_scores[i].cpu().view(-1))     # (N,)
+            self.lb_obj_scores.append(lb_obj_scores[i].cpu().view(-1))
+            self.lb_roi_boxes.append(lb_roi_boxes[i].cpu().view(-1))
+            self.lb_smpl_ids.append(lb_smpl_ids[i].cpu().view(-1))  # (1,)
 
     def compute(self):
         ulb_obj_scores = torch.cat(self.ulb_obj_scores)
@@ -232,20 +234,28 @@ class PseudoFeatureBank(Metric): # ROIFeatureBank a better name
         # lb_roi_scores = lb_roi_scores[lb_fg_mask]
         lb_roi_boxes = torch.cat(self.pseudo_boxes)
         # lb_roi_boxes = lb_roi_boxes[lb_fg_mask]
-        self.KNN_pseudo_labels = self._get_KNN_labels(ulb_features, lb_features, lb_roi_scores, ulb_roi_scores)
+        self.KNN_sem_pseudo_labels, self.KNN_obj_pseudo_labels = self._get_KNN_labels(ulb_features, lb_features, lb_roi_scores, lb_obj_scores)
         self.reset()
-        return self.KNN_pseudo_labels
+        return self.KNN_sem_pseudo_labels, self.KNN_obj_pseudo_labels
 
-    def _get_KNN_labels(self,ulb_features,lb_features,lb_roi_scores,ulb_roi_scores): 
+    def _get_KNN_labels(self, ulb_features, lb_features, lb_roi_scores, lb_obj_scores): 
         lb_features_np = lb_features.cpu().detach().numpy()
         ulb_features_np = ulb_features.cpu().detach().numpy()
         lb_roi_scores_np = lb_roi_scores.cpu().numpy()
-        knn = KNeighborsClassifier(n_neighbors=self.k) # From SEMPPL
+        lb_obj_scores_np = lb_obj_scores.cpu().numpy()
+        sem_knn = KNeighborsClassifier(n_neighbors=self.k) # From SEMPPL
+        obj_svm = svm.SVR()
+
         # SEMPPL Appendix suggestion : Replace KNN with FAISS(Facebook) for speedups : https://towardsdatascience.com/make-knn-300-times-faster-than-scikit-learns-in-20-lines-5e29d74e76bb
-        knn.fit(lb_features_np,lb_roi_scores_np)
-        preds_np = knn.predict(ulb_features_np)
-        preds_tensor = torch.tensor(preds_np)
-        return preds_tensor   
+        sem_knn.fit(lb_features_np, lb_roi_scores_np)
+        knn_ulb_sem_scores = sem_knn.predict(ulb_features_np)
+        knn_ulb_sem_scores = torch.tensor(knn_ulb_sem_scores)
+
+        obj_svm.fit(lb_features_np, lb_obj_scores_np)
+        knn_ulb_obj_scores = obj_svm.predict(ulb_features_np)
+        knn_ulb_obj_scores = torch.tensor(knn_ulb_obj_scores)        
+        return knn_ulb_sem_scores, knn_ulb_obj_scores   
+    
 
     @torch.no_grad()
     def _get_SEMPPL_loss(self):
