@@ -159,7 +159,7 @@ MODEL:
     ROI_HEAD:
         NAME: PVRCNNHead
         CLASS_AGNOSTIC: True
-
+        ENABLE_PROTOTYPING: False
         SHARED_FC: [256, 256]
         CLS_FC: [256, 256]
         REG_FC: [256, 256]
@@ -209,8 +209,12 @@ MODEL:
                 'rcnn_cls_weight': 1.0,
                 'rcnn_reg_weight': 1.0,
                 'rcnn_corner_weight': 1.0,
-                'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+                'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+                'mcont_weight': 0.25
             }
+            MOMENTUM: 0.9
+            FEAT_SIZE: 256
+            TEMPERATURE: 0.8
 
     POST_PROCESSING:
         RECALL_THRESH_LIST: [0.3, 0.5, 0.7]
@@ -225,6 +229,8 @@ MODEL:
             NMS_THRESH: 0.1
             NMS_PRE_MAXSIZE: 4096
             NMS_POST_MAXSIZE: 500
+    
+    STORE_SCORES_IN_PKL: True
 
 
 OPTIMIZATION:

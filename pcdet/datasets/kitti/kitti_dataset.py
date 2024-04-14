@@ -408,6 +408,7 @@ class KittiDataset(DatasetTemplate):
         input_dict = {
             'frame_id': sample_idx,
             'calib': calib,
+            'labeled_mask' : 1
         }
 
         if 'annos' in info:

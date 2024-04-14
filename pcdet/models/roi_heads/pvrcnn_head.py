@@ -31,6 +31,8 @@ class PVRCNNHead(RoIHeadTemplate):
             if k != self.model_cfg.SHARED_FC.__len__() - 1 and self.model_cfg.DP_RATIO > 0:
                 shared_fc_list.append(nn.Dropout(self.model_cfg.DP_RATIO))
 
+        
+        
         self.shared_fc_layer = nn.Sequential(*shared_fc_list)
 
         self.cls_layers = self.make_fc_layers(
@@ -65,7 +67,17 @@ class PVRCNNHead(RoIHeadTemplate):
                     nn.init.constant_(m.bias, 0)
         nn.init.normal_(self.reg_layers[-1].weight, mean=0, std=0.001)
 
-    def roi_grid_pool(self, batch_dict):
+
+    def pool_features(self, batch_dict, use_gtboxes=False):
+        pooled_features = self.roi_grid_pool(batch_dict, use_gtboxes=use_gtboxes)  # (BxN, 6x6x6, C)
+        grid_size = self.model_cfg.ROI_GRID_POOL.GRID_SIZE
+        batch_size_rcnn = pooled_features.shape[0]
+        pooled_features = pooled_features.permute(0, 2, 1). \
+            contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
+
+        return pooled_features
+
+    def roi_grid_pool(self, batch_dict, use_gtboxes = False):
         """
         Args:
             batch_dict:
@@ -79,7 +91,7 @@ class PVRCNNHead(RoIHeadTemplate):
 
         """
         batch_size = batch_dict['batch_size']
-        rois = batch_dict['rois']
+        rois = batch_dict['gt_boxes'][..., 0:7] if use_gtboxes else batch_dict['rois']
         point_coords = batch_dict['point_coords']
         point_features = batch_dict['point_features']
 
@@ -151,9 +163,10 @@ class PVRCNNHead(RoIHeadTemplate):
             targets_dict = self.assign_targets(batch_dict)
             batch_dict['rois'] = targets_dict['rois']
             batch_dict['roi_labels'] = targets_dict['roi_labels']
-
+            batch_dict['roi_scores_logits'] = targets_dict['roi_scores_logits']
         # RoI aware pooling
         pooled_features = self.roi_grid_pool(batch_dict)  # (BxN, 6x6x6, C)
+        pooled_features_gt = self.roi_grid_pool(batch_dict, use_gtboxes  = True)  # (BxN, 6x6x6, C)
 
         grid_size = self.model_cfg.ROI_GRID_POOL.GRID_SIZE
         batch_size_rcnn = pooled_features.shape[0]
@@ -161,6 +174,15 @@ class PVRCNNHead(RoIHeadTemplate):
             contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
 
         shared_features = self.shared_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1))
+        batch_dict['shared_features'] =  shared_features.squeeze().detach() #shared_features_copy
+        grid_size = self.model_cfg.ROI_GRID_POOL.GRID_SIZE
+        batch_size_rcnn_gt = pooled_features_gt.shape[0]
+        pooled_features_gt = pooled_features_gt.permute(0, 2, 1).\
+            contiguous().view(batch_size_rcnn_gt, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
+        shared_features_gt = self.shared_fc_layer(pooled_features_gt.view(batch_size_rcnn_gt, -1, 1))
+        # shared_features_copy = shared_features.squeeze().view(*batch_dict['rois'].shape[:2],-1).clone()
+        batch_dict['shared_features_gt'] =  shared_features_gt.squeeze().detach()
+
         rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
         rcnn_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
 

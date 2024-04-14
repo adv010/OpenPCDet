@@ -254,6 +254,7 @@ class Detector3DTemplate(nn.Module):
                     label_preds = batch_dict[label_key][index]
                     if self.training:
                         sem_scores = batch_dict['roi_scores'][index]
+                        sem_scores_logits = batch_dict['roi_scores_logits'][index]
                 else:
                     label_preds = label_preds + 1
 
