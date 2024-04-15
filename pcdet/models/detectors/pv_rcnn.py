@@ -22,7 +22,7 @@ class PVRCNN(Detector3DTemplate):
         super().__init__(model_cfg=model_cfg, num_class=num_class, dataset=dataset)
         self.module_list = self.build_networks()
         self.model_cfg = model_cfg
-        vals_to_store = ['iou_roi_pl', 'iou_roi_gt', 'obj_scores','gt_boxes',
+        vals_to_store = ['iou_roi_pl', 'iou_roi_gt', 'obj_scores','gt_boxes','assigned_gt_inds','assigned_iou_class',
                          'roi_scores','num_points_in_roi', 'class_labels', 'iteration', 'shared_features','frame_id', 'shared_features_gt']
         self.val_dict = defaultdict(list)
         for val in vals_to_store:
@@ -101,11 +101,15 @@ class PVRCNN(Detector3DTemplate):
 
             cur_unlabeled_ind = labeled_inds[i]
             if num_gts > 0 and num_preds > 0:
-                # Find IoU between Student's ROI v/s Original GTs
+                # Find IoU between ROI v/s Original GTs
                 overlap = iou3d_nms_utils.boxes_iou3d_gpu(valid_rois[:, 0:7], valid_gt_boxes[:, 0:7])
                 preds_iou_max, assigned_gt_inds = overlap.max(dim=1)
                 self.val_dict['iou_roi_gt'].extend(preds_iou_max.tolist())
-
+                self.val_dict['assigned_gt_inds'].extend(assigned_gt_inds.tolist())
+                assigned_iou_class = []
+                for ind in assigned_gt_inds:
+                    assigned_iou_class.append(valid_gt_boxes[ind][-1].cpu())
+                self.val_dict['assigned_iou_class'].extend(assigned_iou_class)
                 cur_iou_roi_pl = self.roi_head.forward_ret_dict['gt_iou_of_rois'][cur_unlabeled_ind]
                 self.val_dict['iou_roi_pl'].extend(cur_iou_roi_pl.tolist())
 
@@ -137,5 +141,5 @@ class PVRCNN(Detector3DTemplate):
         assert len(self.val_dict['shared_features_gt']) == len(self.val_dict['gt_boxes'])
         # replace old pickle data (if exists) with updated one
         output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
-        file_path = os.path.join(output_dir, 'tsne_scores_14042024_masked.pkl')
+        file_path = os.path.join(output_dir, 'new_ohnegtsmpl.pkl')
         pickle.dump(self.val_dict, open(file_path, 'wb'))
