@@ -26,12 +26,13 @@ def get_roi_metrics_input(targets_dict, mask_type='cls'):
         # (Proposals) ROI info
         rois = targets_dict['rois'][uind][mask].detach().clone()
         roi_labels = targets_dict['roi_labels'][uind][mask].unsqueeze(-1).detach().clone()
-        temperature = cfg.MODEL.ADAPTIVE_THRESH_CONFIG.AdaMatch.TEMPERATURE_SA
+        temperature = cfg.MODEL.ADAPTIVE_THRESHOLDING.TEMPERATURE_SA
         roi_scores_multiclass = torch.softmax(targets_dict['roi_scores_logits'][uind][mask].detach().clone() / temperature, dim=-1)
         # roi_sim_scores_multiclass = targets_dict['roi_sim_scores'][uind][mask].detach().clone()
         roi_labeled_boxes = torch.cat([rois, roi_labels], dim=-1)
         metrics_input['rois'].append(roi_labeled_boxes)
         metrics_input['roi_scores'].append(roi_scores_multiclass)
+        metrics_input['roi_weights'].append(torch.ones_like(roi_labels))
         # metrics_input['roi_sim_scores'].append(roi_sim_scores_multiclass)
         # gt_iou_of_rois = targets_dict['gt_iou_of_rois'][uind][mask].unsqueeze(-1).detach().clone()
         # metrics_input['roi_iou_wrt_pl'].append(gt_iou_of_rois)
@@ -66,13 +67,15 @@ class RoIHeadTemplate(nn.Module):
         self.forward_ret_dict = None
         self.mean_p_model_sa = None
         self.mean_p_cls = None
+        self.ulb_cls_dist = None
         self.mean_cls_labels = None
         self.mean_p_cls_shadow = None
+        self.ulb_cls_dist_shadow = None
         self.mean_cls_labels_shadow = None
         self.avg_num_fgs_per_sample = 4.5
         self.iteration_count = 0
         self.target_dist = torch.tensor([0.82, 0.13, 0.05])
-        self.momentum = 0.9
+        self.momentum = 0.99
         self.predict_boxes_when_training = predict_boxes_when_training
 
     def build_losses(self, losses_cfg):
@@ -248,7 +251,7 @@ class RoIHeadTemplate(nn.Module):
         reg_valid_mask = forward_ret_dict['reg_valid_mask'].view(-1)
         gt_boxes3d_ct = forward_ret_dict['gt_of_rois'][..., 0:code_size]
         gt_of_rois_src = forward_ret_dict['gt_of_rois_src'][..., 0:code_size].view(-1, code_size)
-        gt_of_rois_loss_weight = forward_ret_dict['gt_of_rois'][..., -1].view(-1)
+        # gt_of_rois_loss_weight = forward_ret_dict['gt_of_rois'][..., -1].view(-1)
         rcnn_reg = forward_ret_dict['rcnn_reg']  # (rcnn_batch_size, C)
         roi_boxes3d = forward_ret_dict['rois']
         rcnn_batch_size = gt_boxes3d_ct.view(-1, code_size).shape[0]
@@ -273,9 +276,9 @@ class RoIHeadTemplate(nn.Module):
             )  # [B, M, 7]
 
             fg_sum_ = fg_mask.reshape(batch_size, -1).long().sum(-1)
-            assert gt_of_rois_loss_weight[:rcnn_batch_size // 2].sum() == rcnn_batch_size // 2
+            # assert gt_of_rois_loss_weight[:rcnn_batch_size // 2].sum() == rcnn_batch_size // 2
             rcnn_loss_reg = (rcnn_loss_reg.view(rcnn_batch_size, -1) *
-                             gt_of_rois_loss_weight.view(rcnn_batch_size, -1) *
+                             # gt_of_rois_loss_weight.view(rcnn_batch_size, -1) *
                              fg_mask.unsqueeze(dim=-1).float()
                              ).reshape(batch_size, -1).sum(-1) / torch.clamp(fg_sum_.float(), min=1.0)
             rcnn_loss_reg = rcnn_loss_reg * loss_cfgs.LOSS_WEIGHTS['rcnn_reg_weight']
@@ -350,46 +353,40 @@ class RoIHeadTemplate(nn.Module):
             self.iteration_count += 1
             tau = self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS.get('unbiased_ce_tau', 1.0)
             batch_size = forward_ret_dict['rcnn_cls_labels'].shape[0]
-            ulb_bs = batch_size // 2
             roi_labels = forward_ret_dict['roi_labels']
 
             rcnn_cls_labels = forward_ret_dict['rcnn_cls_labels']
-            rcnn_cls_logits = forward_ret_dict['rcnn_cls'].reshape(batch_size, -1)
+            rcnn_cls_logits = forward_ret_dict['rcnn_cls'].view(batch_size, -1)
             cls_valid_mask = (rcnn_cls_labels >= 0).float()
             assert cls_valid_mask.sum() == cls_valid_mask.numel(), "All the labels should be valid if valid mask is not used"
 
-            # conf_scores = torch.sigmoid(rcnn_cls_logits.detach())
-            # car_mask = roi_labels.split(ulb_bs)[1] == 1
-            # ped_mask = roi_labels.split(ulb_bs)[1] == 2
-            # cycl_mask = roi_labels.split(ulb_bs)[1] == 3
-            # from matplotlib import pyplot as plt
-            # car_logits = rcnn_cls_logits.split(ulb_bs)[1][car_mask]
-            # ped_logits = rcnn_cls_logits.split(ulb_bs)[1][ped_mask]
-            # cycl_logits = rcnn_cls_logits.split(ulb_bs)[1][cycl_mask]
-            # plt.hist(car_logits.view(-1).detach().cpu().numpy())
-            # plt.hist(ped_logits.view(-1).detach().cpu().numpy())
-            # plt.hist(cycl_logits.view(-1).detach().cpu().numpy())
-            # plt.hist(rcnn_cls_labels.split(8)[1][car_mask].view(-1).detach().cpu().numpy())
-            # plt.show()
+            roi_labels = forward_ret_dict['roi_labels']
+            ulb_roi_labels = roi_labels.chunk(2)[1].long() - 1
+            ulb_label_hist = torch.bincount(ulb_roi_labels.view(-1), minlength=3)
+            ulb_rcnn_cls_labels = forward_ret_dict['rcnn_cls_labels'].chunk(2)[1]
+            ulb_sum_cls_labels = roi_labels.new_zeros((3,), dtype=torch.float).scatter_add_(0, ulb_roi_labels.view(-1), ulb_rcnn_cls_labels.view(-1))
+            ulb_rcnn_cls_dist = ulb_sum_cls_labels / torch.clamp(ulb_label_hist, min=1.0)
 
-            # mean_conf_scores = conf_scores.reshape(2, -1).mean(keepdim=True, dim=-1)
-            # mean_cls_labels = rcnn_cls_labels.reshape(2, -1).mean(keepdim=True, dim=-1)
-            # self._ema_update_p('mean_p_cls', mean_conf_scores)
-            # self._ema_update_p('mean_cls_labels', mean_cls_labels)
-            # mean_p_cls_lbl = self.mean_p_cls.split(1)[0].repeat(batch_size//2, num_rois)
-            # mean_p_cls_ulb = self.mean_p_cls.split(1)[1].repeat(batch_size//2, num_rois)
-            # mean_p_cls = torch.cat([mean_p_cls_lbl, mean_p_cls_ulb], dim=0)
+            self._ema_update_p('mean_p_cls', ulb_rcnn_cls_dist)
 
-            # torch.log(1 - self.target_dist)
-            # tensor([-1.7148, -0.1393, -0.0513])
-            log_target = torch.log(1 - self.target_dist)
+            # ulb_cls_dist = ulb_sum_cls_labels / ulb_sum_cls_labels.sum()
+            # self._ema_update_p('ulb_cls_dist', ulb_cls_dist)
+            # self.target_dist = self.target_dist.to(ulb_cls_dist.device)
+            # divergence_offsets = self.target_dist * torch.log(ulb_cls_dist / self.target_dist)
+            # ulb_logit_offsets = divergence_offsets.unsqueeze(0).repeat(ulb_roi_labels.shape[0], 1).gather(1, ulb_roi_labels)
+            # ulb_logit_offsets = ulb_logit_offsets * (1 - ulb_rcnn_cls_labels)
 
-            ulb_roi_labels = roi_labels.split(ulb_bs)[1] - 1
-            ulb_logit_offsets = log_target.unsqueeze(0).repeat(ulb_bs, 1).to(ulb_roi_labels.device).gather(1, ulb_roi_labels)
+            # average values when using fully supervised setting: torch.log(torch.tensor([0.2, 0.1, 0.1]))
+            # tensor([-1.6094, -2.3026, -2.3026])
+            # torch.log(torch.tensor([0.2, 0.1, 1e-6])) with epsilon 1e-6 if the value is 0
+            # tensor([ -1.6094,  -2.3026, -13.8155])
+            log_target = torch.log(torch.clamp(self.mean_p_cls, min=1e-6)).to(ulb_roi_labels.device)
+            ulb_logit_offsets = log_target.unsqueeze(0).repeat(ulb_roi_labels.shape[0], 1).gather(1, ulb_roi_labels)
+            ulb_logit_offsets = ulb_logit_offsets * ulb_rcnn_cls_labels
             logit_offsets = torch.cat([torch.zeros_like(ulb_logit_offsets), ulb_logit_offsets])
-            unbiased_logits = rcnn_cls_logits - tau * logit_offsets
-            batch_loss_cls = F.binary_cross_entropy_with_logits(unbiased_logits, rcnn_cls_labels, reduction='none')
-            rcnn_loss_cls = (batch_loss_cls * cls_valid_mask).sum(-1) / torch.clamp(cls_valid_mask.sum(-1), min=1.0)
+            unbiased_logits = rcnn_cls_logits + tau * logit_offsets
+            batch_loss_cls = F.binary_cross_entropy(torch.sigmoid(unbiased_logits).view(-1), rcnn_cls_labels.view(-1), reduction='none')
+            rcnn_loss_cls = (batch_loss_cls.unsqueeze(-1).view_as(cls_valid_mask) * cls_valid_mask).sum(-1) / torch.clamp(cls_valid_mask.sum(-1), min=1.0)
         else:
             raise NotImplementedError
 
@@ -397,6 +394,11 @@ class RoIHeadTemplate(nn.Module):
         tb_dict = {
             'rcnn_loss_cls': rcnn_loss_cls
         }
+
+        if loss_cfgs.CLS_LOSS == 'UnbiasedCrossEntropy':
+          tb_dict.update({'rcnn_fg_dist_unlabeled': self._arr2dict(self.mean_p_cls.detach().cpu().numpy())})
+          tb_dict.update({'rcnn_cls_dist_unlabeled': self._arr2dict(self.ulb_cls_dist.detach().cpu().numpy())})
+
         return rcnn_loss_cls, tb_dict
 
     def _ema_update_p(self, prob_name, probs):
@@ -491,9 +493,7 @@ class RoIHeadTemplate(nn.Module):
     def get_loss(self, tb_dict=None):
         tb_dict = {} if tb_dict is None else tb_dict
 
-        if not self.model_cfg.ENABLE_SOFT_TEACHER or self.model_cfg.TARGET_CONFIG.DISABLE_ST_WEIGHTS:
-            self.forward_ret_dict['rcnn_cls_weights'] = torch.ones_like(self.forward_ret_dict['rcnn_cls_labels'])
-        else:
+        if self.model_cfg.ENABLE_SOFT_TEACHER and not self.model_cfg.TARGET_CONFIG.DISABLE_ST_WEIGHTS:
             # Get reliability weights for unlabeled samples
             unlabeled_inds = self.forward_ret_dict['unlabeled_inds']
             self.forward_ret_dict['rcnn_cls_weights'][unlabeled_inds] = self._get_reliability_weight(unlabeled_inds)
