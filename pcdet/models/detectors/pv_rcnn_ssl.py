@@ -53,10 +53,17 @@ class PVRCNN_SSL(Detector3DTemplate):
         for metrics_configs in model_cfg.get("METRICS_BANK_LIST", []):
             if metrics_configs.ENABLE:
                 metrics_registry.register(tag=metrics_configs["NAME"], dataset=self.dataset, **metrics_configs)
-
-        vals_to_store = ['iou_roi_pl', 'iou_roi_gt', 'pred_scores', 'teacher_pred_scores',
-                         'weights', 'roi_scores', 'pcv_scores', 'num_points_in_roi', 'class_labels', 'iteration']
-        self.val_dict = {val: [] for val in vals_to_store}
+        vals_to_store = ['iou_roi_pl', 'iou_roi_gt', 'obj_scores','gt_boxes','assigned_gt_inds','assigned_iou_class',
+                         'roi_scores','num_points_in_roi', 'class_labels', 'iteration', 'shared_features','frame_id', 'shared_features_gt']
+        self.val_dict =   defaultdict(list)     
+        for val in vals_to_store:
+            self.val_dict[val] = []                   
+        # self.lb_val_dict = defaultdict(list)
+        # self.ulb_val_dict = defaultdict(list)
+        # for val in vals_to_store:
+        #     self.lb_val_dict[val] = []
+        # for val in vals_to_store:
+        #     self.ulb_val_dict[val] = []
 
     @staticmethod
     def _clone_gt_boxes_and_feats(batch_dict):
@@ -114,6 +121,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             return self._forward_training(batch_dict)
 
         for cur_module in self.pv_rcnn.module_list:
+            # batch_dict['student'] = True
             batch_dict = cur_module(batch_dict)
         pred_dicts, recall_dicts = self.pv_rcnn.post_processing(batch_dict)
 
@@ -121,6 +129,7 @@ class PVRCNN_SSL(Detector3DTemplate):
     @torch.no_grad()
     def _gen_pseudo_labels(self, batch_dict_ema):
         # self.pv_rcnn_ema.eval()  # https://github.com/yezhen17/3DIoUMatch-PVRCNN/issues/6
+        batch_dict_ema['student'] = False
         for cur_module in self.pv_rcnn_ema.module_list:
             try:
                 batch_dict_ema = cur_module(batch_dict_ema, test_only=True)
@@ -141,6 +150,10 @@ class PVRCNN_SSL(Detector3DTemplate):
                 batch_dict.pop(k)
             if k in ['batch_size']:
                 batch_dict_out[k] = batch_dict[k]
+        batch_dict_out['labeled_mask'] = batch_dict['labeled_mask']
+        batch_dict_out['labeled_inds'] = batch_dict['labeled_inds']
+        batch_dict_out['unlabeled_inds'] = batch_dict['unlabeled_inds']        
+        batch_dict_out['frame_id'] = batch_dict['frame_id'] 
         return batch_dict_out
 
     @staticmethod
@@ -150,7 +163,9 @@ class PVRCNN_SSL(Detector3DTemplate):
         unlabeled_inds = torch.nonzero(1 - labeled_mask).squeeze(1).long()
         batch_dict['unlabeled_inds'] = unlabeled_inds
         batch_dict['labeled_inds'] = labeled_inds
+        batch_dict['ori_gt_boxes_ema'] = batch_dict['gt_boxes'].clone().detach()
         batch_dict['ori_unlabeled_boxes'] = batch_dict['gt_boxes'][unlabeled_inds, ...].clone().detach()
+        batch_dict['ori_unlabeled_boxes_ema'] = batch_dict['gt_boxes'][unlabeled_inds, ...].clone().detach()
         return labeled_inds, unlabeled_inds
 
     @staticmethod
@@ -186,7 +201,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         # batch_dict = self._get_fixed_batch_dict()
         lbl_inds, ulb_inds = self._prep_batch_dict(batch_dict)
         batch_dict_ema = self._split_batch(batch_dict, tag='ema')
-
+        
         if self.supervise_mode == 1:
             pl_boxes, pl_conf_scores, pl_sem_scores, pl_sem_logits, pl_rect_scores, masks = self._get_gt_pls(batch_dict_ema, ulb_inds)
             pl_cls_count_pre_filter = torch.bincount(batch_dict_ema['gt_boxes'][ulb_inds, :, -1].view(-1).int(), minlength=4)[1:]
@@ -206,6 +221,11 @@ class PVRCNN_SSL(Detector3DTemplate):
         if 'pl_metrics' in metrics_registry.tags():
             self._update_pl_metrics(pl_boxes, pl_rect_scores, pl_weights, masks, batch_dict_ema['gt_boxes'][ulb_inds])
 
+        if self.model_cfg.get('STORE_SCORES_IN_PKL', False):
+            self._fill_with_pls(batch_dict_ema, pl_boxes, masks, ulb_inds, lbl_inds) #Replace batch_dict_ema['gt_boxes'] with filtered PL boxes
+            assert not torch.equal(batch_dict_ema['gt_boxes'], batch_dict_ema['ori_gt_boxes']) is True # Confirm overwriting of GTs with PLs
+            self.dump_statistics(batch_dict_ema, ulb_inds, lbl_inds) # Dump stats for tsne pkl
+
         # TODO(farzad): Check if commenting the following line and apply_augmentation is equal to a fully supervised setting
         self._fill_with_pls(batch_dict, pl_boxes, masks, ulb_inds, lbl_inds)
 
@@ -217,81 +237,189 @@ class PVRCNN_SSL(Detector3DTemplate):
                          # backward compatibility. Added to stats_utils. Will be removed later.
                          'avg_num_pls_post_filter_per_sample': self._arr2dict(pl_cls_count_post_filter / len(ulb_inds))}
 
-        # apply student's augs on teacher's pseudo-labels (filtered) only (not points)
-        batch_dict = self.apply_augmentation(batch_dict, batch_dict, ulb_inds, key='gt_boxes')
 
-        for cur_module in self.pv_rcnn.module_list:
-            batch_dict = cur_module(batch_dict)
+        # # apply student's augs on teacher's pseudo-labels (filtered) only (not points)
+        # batch_dict = self.apply_augmentation(batch_dict, batch_dict, ulb_inds, key='gt_boxes')
+        
 
-        if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTOTYPING', False):
-            # Update the bank with student's features from augmented labeled data
-            bank = feature_bank_registry.get('gt_aug_lbl_prototypes')
-            sa_gt_lbl_inputs = self._prep_bank_inputs(batch_dict, lbl_inds, bank.num_points_thresh)
-            bank.update(**sa_gt_lbl_inputs, iteration=batch_dict['cur_iteration'])
+        # for cur_module in self.pv_rcnn.module_list:
+        #     batch_dict['student'] = True
+        #     batch_dict = cur_module(batch_dict)
 
-        # For metrics calculation
-        self.pv_rcnn.roi_head.forward_ret_dict['unlabeled_inds'] = ulb_inds
+        # if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTOTYPING', False):
+        #     # Update the bank with student's features from augmented labeled data
+        #     bank = feature_bank_registry.get('gt_aug_lbl_prototypes')
+        #     sa_gt_lbl_inputs = self._prep_bank_inputs(batch_dict, lbl_inds, bank.num_points_thresh)
+        #     bank.update(**sa_gt_lbl_inputs, iteration=batch_dict['cur_iteration'])
 
-        if self.model_cfg['ROI_HEAD'].get('ENABLE_SOFT_TEACHER', False):
-            # using teacher to evaluate student's bg/fg proposals through its rcnn head
-            with torch.no_grad():
-                self._add_teacher_scores(batch_dict, batch_dict_ema, ulb_inds)
+        # # For metrics calculation
+        # self.pv_rcnn.roi_head.forward_ret_dict['unlabeled_inds'] = ulb_inds
+
+        # if self.model_cfg['ROI_HEAD'].get('ENABLE_SOFT_TEACHER', False):
+        #     # using teacher to evaluate student's bg/fg proposals through its rcnn head
+        #     with torch.no_grad():
+        #         self._add_teacher_scores(batch_dict, batch_dict_ema, ulb_inds)
 
         disp_dict = {}
-        loss_rpn_cls, loss_rpn_box, tb_dict = self.pv_rcnn.dense_head.get_loss()
-        loss_point, tb_dict = self.pv_rcnn.point_head.get_loss(tb_dict)
-        loss_rcnn_cls, loss_rcnn_box, tb_dict = self.pv_rcnn.roi_head.get_loss(tb_dict)
+        tb_dict = {}
+        # loss_rpn_cls, loss_rpn_box, tb_dict = self.pv_rcnn.dense_head.get_loss()
+        # loss_point, tb_dict = self.pv_rcnn.point_head.get_loss(tb_dict)
+        # loss_rcnn_cls, loss_rcnn_box, tb_dict = self.pv_rcnn.roi_head.get_loss(tb_dict)
 
-        loss = 0
+        loss =  torch.zeros(1, 1) #0
         # Use the same reduction method as the baseline model (3diou) by the default
         reduce_loss_fn = getattr(torch, self.model_cfg.REDUCE_LOSS, 'sum')
-        loss += reduce_loss_fn(loss_rpn_cls[lbl_inds, ...])
-        loss += reduce_loss_fn(loss_rpn_box[lbl_inds, ...]) + reduce_loss_fn(loss_rpn_box[ulb_inds, ...]) * self.unlabeled_weight
-        loss += reduce_loss_fn(loss_point[lbl_inds, ...])
-        loss += reduce_loss_fn(loss_rcnn_cls[lbl_inds, ...])
-        loss += reduce_loss_fn(loss_rcnn_box[lbl_inds, ...])
+        # loss += reduce_loss_fn(loss_rpn_cls[lbl_inds, ...])
+        # loss += reduce_loss_fn(loss_rpn_box[lbl_inds, ...]) + reduce_loss_fn(loss_rpn_box[ulb_inds, ...]) * self.unlabeled_weight
+        # loss += reduce_loss_fn(loss_point[lbl_inds, ...])
+        # loss += reduce_loss_fn(loss_rcnn_cls[lbl_inds, ...])
+        # loss += reduce_loss_fn(loss_rcnn_box[lbl_inds, ...])
 
-        if self.unlabeled_supervise_cls:
-            loss += reduce_loss_fn(loss_rpn_cls[ulb_inds, ...]) * self.unlabeled_weight
-        if self.model_cfg['ROI_HEAD'].get('ENABLE_SOFT_TEACHER', False) or self.model_cfg.get('UNLABELED_SUPERVISE_OBJ', False):
-            loss += reduce_loss_fn(loss_rcnn_cls[ulb_inds, ...]) * self.unlabeled_weight
-        if self.unlabeled_supervise_refine:
-            loss += reduce_loss_fn(loss_rcnn_box[ulb_inds, ...]) * self.unlabeled_weight
-        if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTO_CONTRASTIVE_LOSS', False):
-            proto_cont_loss = self._get_proto_contrastive_loss(batch_dict, bank, ulb_inds)
-            if proto_cont_loss is not None:
-                loss += proto_cont_loss * self.model_cfg['ROI_HEAD']['PROTO_CONTRASTIVE_LOSS_WEIGHT']
-                tb_dict['proto_cont_loss'] = proto_cont_loss.item()
+        # if self.unlabeled_supervise_cls:
+        #     loss += reduce_loss_fn(loss_rpn_cls[ulb_inds, ...]) * self.unlabeled_weight
+        # if self.model_cfg['ROI_HEAD'].get('ENABLE_SOFT_TEACHER', False) or self.model_cfg.get('UNLABELED_SUPERVISE_OBJ', False):
+        #     loss += reduce_loss_fn(loss_rcnn_cls[ulb_inds, ...]) * self.unlabeled_weight
+        # if self.unlabeled_supervise_refine:
+        #     loss += reduce_loss_fn(loss_rcnn_box[ulb_inds, ...]) * self.unlabeled_weight
+        # if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTO_CONTRASTIVE_LOSS', False):
+        #     proto_cont_loss = self._get_proto_contrastive_loss(batch_dict, bank, ulb_inds)
+        #     if proto_cont_loss is not None:
+        #         loss += proto_cont_loss * self.model_cfg['ROI_HEAD']['PROTO_CONTRASTIVE_LOSS_WEIGHT']
+        #         tb_dict['proto_cont_loss'] = proto_cont_loss.item()
 
         tb_dict_ = self._prep_tb_dict(tb_dict, lbl_inds, ulb_inds, reduce_loss_fn)
-        tb_dict_.update(**pl_count_dict)
+        # tb_dict_.update(**pl_count_dict)
 
-        if self.model_cfg['ROI_HEAD'].get('ENABLE_ULB_CLS_DIST_LOSS', False):
-            roi_head_forward_dict = self.pv_rcnn.roi_head.forward_ret_dict
-            ulb_loss_cls_dist, cls_dist_dict = self.pv_rcnn.roi_head.get_ulb_cls_dist_loss(roi_head_forward_dict)
-            loss += ulb_loss_cls_dist
-            tb_dict_.update(cls_dist_dict)
+        # if self.model_cfg['ROI_HEAD'].get('ENABLE_ULB_CLS_DIST_LOSS', False):
+        #     roi_head_forward_dict = self.pv_rcnn.roi_head.forward_ret_dict
+        #     ulb_loss_cls_dist, cls_dist_dict = self.pv_rcnn.roi_head.get_ulb_cls_dist_loss(roi_head_forward_dict)
+        #     loss += ulb_loss_cls_dist
+        #     tb_dict_.update(cls_dist_dict)
 
-        if self.model_cfg.get('STORE_SCORES_IN_PKL', False):
-            self.dump_statistics(batch_dict, ulb_inds)
 
-        if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTOTYPING', False):
-            for tag in feature_bank_registry.tags():
-                feature_bank_registry.get(tag).compute()
 
-        # update dynamic thresh alg
-        if self.thresh_alg is not None and (results := self.thresh_alg.compute()):
-            tb_dict_.update(results)
+        # if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTOTYPING', False):
+        #     for tag in feature_bank_registry.tags():
+        #         feature_bank_registry.get(tag).compute()
 
-        for tag in metrics_registry.tags():
-            results = metrics_registry.get(tag).compute()
-            if results is not None:
-                tb_dict_.update({f"{tag}/{k}": v for k, v in zip(*results)})
+        # # update dynamic thresh alg
+        # if self.thresh_alg is not None and (results := self.thresh_alg.compute()):
+        #     tb_dict_.update(results)
+
+        # for tag in metrics_registry.tags():
+        #     results = metrics_registry.get(tag).compute()
+        #     if results is not None:
+        #         tb_dict_.update({f"{tag}/{k}": v for k, v in zip(*results)})
 
         ret_dict = {
             'loss': loss
         }
         return ret_dict, tb_dict_, disp_dict
+
+    def dump_statistics(self, batch_dict, unlabeled_inds,labeled_inds,):
+        '''
+        iou_roi_gt calculation snippet from proposal_target_layer
+        iou3d = iou3d_nms_utils.boxes_iou3d_gpu(cur_roi, cur_gt_boxes[:, 0:7])  # (M, N)
+        max_overlaps, gt_assignment = torch.max(iou3d, dim=1)
+        sampled_inds = self.subsample_rois(max_overlaps=max_overlaps)
+        roi_ious = max_overlaps[sampled_inds]
+        '''
+        
+        embed_size = 256
+        batch_size = batch_dict['batch_size']
+        labeled_mask = batch_dict['labeled_mask'].cpu().numpy().astype(int)
+        unlabeled_mask = 1 - labeled_mask
+        # Store different types of scores over all itrs and epochs and dump them in a pickle for offline modeling
+        # TODO (shashank) : Can be optimized later to save computational time, currently takes about 0.002sec
+        # batch_roi_labels = self.pv_rcnn_ema.roi_head.forward_ret_dict['roi_labels'][unlabeled_inds]
+        self.val_dict['frame_id'].extend(batch_dict['frame_id'][labeled_mask].tolist())
+        self.val_dict['instance_idx'].extend(batch_dict['instance_idx'].cpu().tolist())
+        self.val_dict['labeled_mask'].extend(labeled_mask.tolist())
+        self.val_dict['unlabeled_mask'].extend(unlabeled_mask.tolist())
+
+        # self.val_dict['shared_features'].extend(batch_dict['shared_features'])
+        # self.val_dict['shared_features_gt'].extend(batch_dict['shared_features_gt'])
+        # self.val_dict['gt_boxes'].extend(batch_dict['gt_boxes'])
+        batch_roi_labels =  self.pv_rcnn_ema.roi_head.forward_ret_dict['roi_labels']
+        batch_roi_labels = [roi_labels.clone().detach() for roi_labels in batch_roi_labels]
+
+        batch_rois = self.pv_rcnn_ema.roi_head.forward_ret_dict['rois']
+        batch_rois = [rois.clone().detach() for rois in batch_rois]
+
+        batch_ori_gt_boxes = batch_dict['ori_gt_boxes']
+        batch_ori_gt_boxes = [ori_gt_boxes.clone().detach() for ori_gt_boxes in batch_ori_gt_boxes]
+
+        batch_pl_boxes = batch_dict['gt_boxes']
+        batch_pl_boxes = [boxes.clone().detach() for boxes in batch_pl_boxes] #Filtered PLs at end of Teacher
+
+        shared_features = batch_dict['shared_features'].reshape(batch_size,-1,embed_size)
+        shared_features_gt = batch_dict['shared_features_gt'].reshape(batch_size,-1,embed_size)
+
+        for i in range(len(batch_rois)): # B
+            valid_rois_mask = torch.logical_not(torch.all(batch_rois[i] == 0, dim=-1)).cpu()
+            valid_rois = batch_rois[i][valid_rois_mask]
+            valid_roi_labels = batch_roi_labels[i][valid_rois_mask]
+            valid_roi_labels -= 1  # Starting class indices from zero
+
+            valid_gt_boxes_mask = torch.logical_not(torch.all(batch_ori_gt_boxes[i] == 0, dim=-1)).cpu()
+            valid_gt_boxes = batch_ori_gt_boxes[i][valid_gt_boxes_mask]
+            valid_gt_boxes[:, -1] -= 1  # Starting class indices from zero
+
+            valid_pl_boxes_mask = torch.logical_not(torch.all(batch_pl_boxes[i] == 0, dim=-1)).cpu()
+            valid_pl_boxes = batch_pl_boxes[i][valid_pl_boxes_mask]
+            valid_pl_labels = valid_pl_boxes[:,-1] - 1
+
+            sh_ft =  shared_features[i][valid_rois_mask]
+            self.val_dict['shared_features'].extend(sh_ft)
+
+            sh_ft_gt =  shared_features_gt[i][valid_gt_boxes_mask]
+            self.val_dict['shared_features_gt'].extend(sh_ft_gt)
+
+            num_gts = valid_gt_boxes_mask.sum()
+            num_preds = valid_rois_mask.sum()
+            num_pls = valid_pl_boxes_mask.sum()
+
+            # cur_unlabeled_ind = unlabeled_inds[i]
+            if num_gts > 0 and num_preds > 0:
+                # Find IoU between ROI v/s Original GTs
+                overlap = iou3d_nms_utils.boxes_iou3d_gpu(valid_rois[:, 0:7], valid_gt_boxes[:, 0:7])
+                preds_iou_max, assigned_gt_inds = overlap.max(dim=1)
+                self.val_dict['iou_roi_gt'].extend(preds_iou_max.tolist())
+                self.val_dict['assigned_gt_inds'].extend(assigned_gt_inds.tolist())
+                assigned_iou_class = []
+                for ind in assigned_gt_inds:
+                    assigned_iou_class.append(valid_gt_boxes[ind][-1].cpu())
+                self.val_dict['assigned_iou_class'].extend(assigned_iou_class)
+
+                if num_pls > 0 and num_preds > 0:
+                    overlap = iou3d_nms_utils.boxes_iou3d_gpu(valid_rois[:, 0:7], valid_pl_boxes[:, 0:7])
+                    preds_iou_max, assigned_pl_inds = overlap.max(dim=1)
+                    self.val_dict['iou_roi_pl'].extend(preds_iou_max.tolist())
+                    self.val_dict['assigned_pl_inds'].extend(assigned_pl_inds.tolist())
+                    assigned_iou_class = []
+                    for ind in assigned_pl_inds:
+                        assigned_iou_class.append(valid_pl_boxes[ind][-1].cpu())
+                    self.val_dict['assigned_iou_pl_class'].extend(assigned_iou_class)
+
+
+                cur_pred_score = torch.sigmoid(batch_dict['batch_cls_preds']).squeeze()
+                self.val_dict['obj_scores'].extend(cur_pred_score.tolist())
+                self.val_dict['gt_boxes'].extend(valid_pl_boxes.tolist())
+                self.val_dict['ori_gt_boxes'].extend(valid_gt_boxes.tolist())
+
+                cur_roi_score = torch.sigmoid(self.pv_rcnn_ema.roi_head.forward_ret_dict['roi_scores'])
+                self.val_dict['roi_scores'].extend(cur_roi_score.tolist())
+
+                cur_roi_label = self.pv_rcnn_ema.roi_head.forward_ret_dict['roi_labels'].squeeze()
+                self.val_dict['class_labels'].extend(cur_roi_label.tolist())
+
+                cur_iteration = torch.ones_like(preds_iou_max) * (batch_dict['cur_iteration'])
+                self.val_dict['iteration'].extend(cur_iteration.tolist())
+
+        epoch = 10
+        output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
+        file_path = os.path.join(output_dir, f'Tsne_{epoch}ep_secndstg.pkl')
+        pickle.dump(self.val_dict, open(file_path, 'wb'))
 
     def get_max_iou(self, anchors, gt_boxes, gt_classes, matched_threshold=0.6):
         num_anchors = anchors.shape[0]
@@ -382,14 +510,14 @@ class PVRCNN_SSL(Detector3DTemplate):
     @staticmethod
     def _prep_tb_dict(tb_dict, lbl_inds, ulb_inds, reduce_loss_fn):
         tb_dict_ = {}
-        for key in tb_dict.keys():
-            if key == 'proto_cont_loss':
-                tb_dict_[key] = tb_dict[key]
-            elif 'loss' in key or 'acc' in key or 'point_pos_num' in key:
-                tb_dict_[f"{key}_labeled"] = reduce_loss_fn(tb_dict[key][lbl_inds, ...])
-                tb_dict_[f"{key}_unlabeled"] = reduce_loss_fn(tb_dict[key][ulb_inds, ...])
-            else:
-                tb_dict_[key] = tb_dict[key]
+        # for key in tb_dict.keys():
+        #     if key == 'proto_cont_loss':
+        #         tb_dict_[key] = tb_dict[key]
+        #     elif 'loss' in key or 'acc' in key or 'point_pos_num' in key:
+        #         tb_dict_[f"{key}_labeled"] = reduce_loss_fn(tb_dict[key][lbl_inds, ...])
+        #         tb_dict_[f"{key}_unlabeled"] = reduce_loss_fn(tb_dict[key][ulb_inds, ...])
+        #     else:
+        #         tb_dict_[key] = tb_dict[key]
 
         return tb_dict_
 
@@ -606,8 +734,10 @@ class PVRCNN_SSL(Detector3DTemplate):
         alpha = self.model_cfg.EMA_ALPHA
         # Use the true average until the exponential average is more correct
         alpha = min(1 - 1 / (self.global_step + 1), alpha)
-        for ema_param, param in zip(self.pv_rcnn_ema.parameters(), self.pv_rcnn.parameters()):
-            ema_param.data.mul_(alpha).add_((1 - alpha) * param.data)
+
+        # Making teacher  completely offline for TsNE visualization
+        # for ema_param, param in zip(self.pv_rcnn_ema.parameters(), self.pv_rcnn.parameters()):
+        #     ema_param.data.mul_(alpha).add_((1 - alpha) * param.data)
         self.accumulated_itr = 0
 
     def load_params_from_file(self, filename, logger, to_cpu=False):
