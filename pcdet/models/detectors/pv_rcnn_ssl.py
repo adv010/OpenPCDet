@@ -31,7 +31,9 @@ class PVRCNN_SSL(Detector3DTemplate):
         self.add_module('pv_rcnn', self.pv_rcnn)
         self.add_module('pv_rcnn_ema', self.pv_rcnn_ema)
         self.accumulated_itr = 0
-
+        self.pkl_init = False
+        self.iter_to_remove = 0
+        self.cur_epoch = 0
         self.thresh = model_cfg.THRESH
         self.sem_thresh = model_cfg.SEM_THRESH
         self.unlabeled_supervise_cls = model_cfg.UNLABELED_SUPERVISE_CLS
@@ -53,11 +55,10 @@ class PVRCNN_SSL(Detector3DTemplate):
         for metrics_configs in model_cfg.get("METRICS_BANK_LIST", []):
             if metrics_configs.ENABLE:
                 metrics_registry.register(tag=metrics_configs["NAME"], dataset=self.dataset, **metrics_configs)
-        vals_to_store = ['iou_roi_pl', 'iou_roi_gt', 'obj_scores','gt_boxes','assigned_gt_inds','assigned_iou_class',
-                         'roi_scores','num_points_in_roi', 'class_labels', 'iteration', 'shared_features','frame_id', 'shared_features_gt']
+
         self.val_dict =   defaultdict(list)     
-        for val in vals_to_store:
-            self.val_dict[val] = []                   
+             
+        
         # self.lb_val_dict = defaultdict(list)
         # self.ulb_val_dict = defaultdict(list)
         # for val in vals_to_store:
@@ -220,11 +221,17 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         if 'pl_metrics' in metrics_registry.tags():
             self._update_pl_metrics(pl_boxes, pl_rect_scores, pl_weights, masks, batch_dict_ema['gt_boxes'][ulb_inds])
-
+        
         if self.model_cfg.get('STORE_SCORES_IN_PKL', False):
             self._fill_with_pls(batch_dict_ema, pl_boxes, masks, ulb_inds, lbl_inds) #Replace batch_dict_ema['gt_boxes'] with filtered PL boxes
             assert not torch.equal(batch_dict_ema['gt_boxes'], batch_dict_ema['ori_gt_boxes']) is True # Confirm overwriting of GTs with PLs
-            self.dump_statistics(batch_dict_ema, ulb_inds, lbl_inds) # Dump stats for tsne pkl
+            if not self.pkl_init or batch_dict_ema['cur_epoch'] == self.cur_epoch + 1 :
+                use_new_pkl = True
+                self.pkl_init = True
+                self.iter_to_remove = batch_dict_ema['cur_iteration']
+            else:
+                use_new_pkl = False
+            self.cur_epoch = self.dump_statistics(batch_dict_ema, ulb_inds, lbl_inds, use_new_pkl) # Dump stats for tsne pkl
 
         # TODO(farzad): Check if commenting the following line and apply_augmentation is equal to a fully supervised setting
         self._fill_with_pls(batch_dict, pl_boxes, masks, ulb_inds, lbl_inds)
@@ -316,7 +323,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         }
         return ret_dict, tb_dict_, disp_dict
 
-    def dump_statistics(self, batch_dict, unlabeled_inds,labeled_inds,):
+    def dump_statistics(self, batch_dict, unlabeled_inds,labeled_inds, use_new_pkl = False):
         '''
         iou_roi_gt calculation snippet from proposal_target_layer
         iou3d = iou3d_nms_utils.boxes_iou3d_gpu(cur_roi, cur_gt_boxes[:, 0:7])  # (M, N)
@@ -324,6 +331,17 @@ class PVRCNN_SSL(Detector3DTemplate):
         sampled_inds = self.subsample_rois(max_overlaps=max_overlaps)
         roi_ious = max_overlaps[sampled_inds]
         '''
+        ckpt = 15
+        epoch_data_of = batch_dict['cur_epoch'] - 1
+        if use_new_pkl:
+            output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
+            file_path = os.path.join(output_dir, f'Tsne_{ckpt}ep_secndstg_{epoch_data_of}.pkl')
+            pickle.dump(self.val_dict, open(file_path, 'wb'))
+            self.val_dict = defaultdict(list) 
+            vals_to_store = ['iou_roi_pl', 'iou_roi_gt', 'obj_scores','gt_boxes','assigned_gt_inds','assigned_iou_class',
+                    'roi_scores','num_points_in_roi', 'class_labels', 'iteration', 'shared_features','frame_id', 'shared_features_gt']
+            for val in vals_to_store:
+                self.val_dict[val] = []    
         
         embed_size = 256
         batch_size = batch_dict['batch_size']
@@ -332,7 +350,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         # Store different types of scores over all itrs and epochs and dump them in a pickle for offline modeling
         # TODO (shashank) : Can be optimized later to save computational time, currently takes about 0.002sec
         # batch_roi_labels = self.pv_rcnn_ema.roi_head.forward_ret_dict['roi_labels'][unlabeled_inds]
-        self.val_dict['frame_id'].extend(batch_dict['frame_id'][labeled_mask].tolist())
+        self.val_dict['frame_id'].extend(batch_dict['frame_id'].tolist()) #16
         self.val_dict['instance_idx'].extend(batch_dict['instance_idx'].cpu().tolist())
         self.val_dict['labeled_mask'].extend(labeled_mask.tolist())
         self.val_dict['unlabeled_mask'].extend(unlabeled_mask.tolist())
@@ -355,7 +373,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         shared_features = batch_dict['shared_features'].reshape(batch_size,-1,embed_size)
         shared_features_gt = batch_dict['shared_features_gt'].reshape(batch_size,-1,embed_size)
 
-        for i in range(len(batch_rois)): # B
+        for i in range(len(batch_rois)): # B - 8
             valid_rois_mask = torch.logical_not(torch.all(batch_rois[i] == 0, dim=-1)).cpu()
             valid_rois = batch_rois[i][valid_rois_mask]
             valid_roi_labels = batch_roi_labels[i][valid_rois_mask]
@@ -369,11 +387,11 @@ class PVRCNN_SSL(Detector3DTemplate):
             valid_pl_boxes = batch_pl_boxes[i][valid_pl_boxes_mask]
             valid_pl_labels = valid_pl_boxes[:,-1] - 1
 
-            sh_ft =  shared_features[i][valid_rois_mask]
-            self.val_dict['shared_features'].extend(sh_ft)
+            sh_ft =  shared_features[i][valid_rois_mask] #100 at a time
+            self.val_dict['shared_features'].extend(sh_ft) # 100 indices, each with 256 shape tensor
 
-            sh_ft_gt =  shared_features_gt[i][valid_gt_boxes_mask]
-            self.val_dict['shared_features_gt'].extend(sh_ft_gt)
+            sh_ft_gt =  shared_features_gt[i][valid_gt_boxes_mask]  # X at a time
+            self.val_dict['shared_features_gt'].extend(sh_ft_gt)  # 100 indices, each with 256 shape tensor
 
             num_gts = valid_gt_boxes_mask.sum()
             num_preds = valid_rois_mask.sum()
@@ -384,12 +402,12 @@ class PVRCNN_SSL(Detector3DTemplate):
                 # Find IoU between ROI v/s Original GTs
                 overlap = iou3d_nms_utils.boxes_iou3d_gpu(valid_rois[:, 0:7], valid_gt_boxes[:, 0:7])
                 preds_iou_max, assigned_gt_inds = overlap.max(dim=1)
-                self.val_dict['iou_roi_gt'].extend(preds_iou_max.tolist())
-                self.val_dict['assigned_gt_inds'].extend(assigned_gt_inds.tolist())
+                self.val_dict['iou_roi_gt'].extend(preds_iou_max.tolist()) #100 at a time
+                self.val_dict['assigned_gt_inds'].extend(assigned_gt_inds.tolist()) 
                 assigned_iou_class = []
                 for ind in assigned_gt_inds:
                     assigned_iou_class.append(valid_gt_boxes[ind][-1].cpu())
-                self.val_dict['assigned_iou_class'].extend(assigned_iou_class)
+                self.val_dict['assigned_iou_class'].extend(assigned_iou_class) # 100 at a time
 
                 if num_pls > 0 and num_preds > 0:
                     overlap = iou3d_nms_utils.boxes_iou3d_gpu(valid_rois[:, 0:7], valid_pl_boxes[:, 0:7])
@@ -403,9 +421,9 @@ class PVRCNN_SSL(Detector3DTemplate):
 
 
                 cur_pred_score = torch.sigmoid(batch_dict['batch_cls_preds']).squeeze()
-                self.val_dict['obj_scores'].extend(cur_pred_score.tolist())
-                self.val_dict['gt_boxes'].extend(valid_pl_boxes.tolist())
-                self.val_dict['ori_gt_boxes'].extend(valid_gt_boxes.tolist())
+                self.val_dict['obj_scores'].extend(cur_pred_score.tolist()) # 16(100)
+                self.val_dict['gt_boxes'].extend(valid_pl_boxes.tolist())  # 27(8)
+                self.val_dict['ori_gt_boxes'].extend(valid_gt_boxes.tolist()) #27(8)
 
                 cur_roi_score = torch.sigmoid(self.pv_rcnn_ema.roi_head.forward_ret_dict['roi_scores'])
                 self.val_dict['roi_scores'].extend(cur_roi_score.tolist())
@@ -413,13 +431,11 @@ class PVRCNN_SSL(Detector3DTemplate):
                 cur_roi_label = self.pv_rcnn_ema.roi_head.forward_ret_dict['roi_labels'].squeeze()
                 self.val_dict['class_labels'].extend(cur_roi_label.tolist())
 
-                cur_iteration = torch.ones_like(preds_iou_max) * (batch_dict['cur_iteration'])
+                cur_iteration = torch.ones_like(preds_iou_max) * (batch_dict['cur_iteration'] - self.iter_to_remove)
                 self.val_dict['iteration'].extend(cur_iteration.tolist())
 
-        epoch = 10
-        output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
-        file_path = os.path.join(output_dir, f'Tsne_{epoch}ep_secndstg.pkl')
-        pickle.dump(self.val_dict, open(file_path, 'wb'))
+        cur_epoch = batch_dict['cur_epoch']
+        return cur_epoch
 
     def get_max_iou(self, anchors, gt_boxes, gt_classes, matched_threshold=0.6):
         num_anchors = anchors.shape[0]
