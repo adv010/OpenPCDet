@@ -188,6 +188,8 @@ class PVRCNNHead(RoIHeadTemplate):
         shared_features_gt = self.shared_fc_layer(pooled_features_gt.view(batch_size_rcnn_gt, -1, 1))
         # shared_features_copy = shared_features.squeeze().view(*batch_dict['rois'].shape[:2],-1).clone()
         batch_dict['shared_features_gt'] =  shared_features_gt.squeeze().detach().cpu().numpy()
+        batch_cls_preds_gt = self.cls_layers(shared_features_gt).transpose(1, 2).contiguous().squeeze(dim=1)
+        batch_dict['batch_cls_preds_gt'] = batch_cls_preds_gt
         del batch_size_rcnn_gt
         del pooled_features_gt
         del shared_features_gt

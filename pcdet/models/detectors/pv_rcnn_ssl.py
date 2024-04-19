@@ -223,6 +223,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             self._update_pl_metrics(pl_boxes, pl_rect_scores, pl_weights, masks, batch_dict_ema['gt_boxes'][ulb_inds])
         
         if self.model_cfg.get('STORE_SCORES_IN_PKL', False):
+            # self.pv_rcnn_ema.dense_head.forward(batch_dict_ema, test_only=True)
             self._fill_with_pls(batch_dict_ema, pl_boxes, masks, ulb_inds, lbl_inds) #Replace batch_dict_ema['gt_boxes'] with filtered PL boxes
             assert not torch.equal(batch_dict_ema['gt_boxes'], batch_dict_ema['ori_gt_boxes']) is True # Confirm overwriting of GTs with PLs
             if not self.pkl_init or batch_dict_ema['cur_epoch'] == self.cur_epoch + 1 :
@@ -333,7 +334,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         '''
         ckpt = 15
         epoch_data_of = batch_dict['cur_epoch'] - 1
-        if use_new_pkl:
+        if use_new_pkl: #dumping statistics pkl
             output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
             file_path = os.path.join(output_dir, f'Tsne_{ckpt}ep_secndstg_{epoch_data_of}.pkl')
             pickle.dump(self.val_dict, open(file_path, 'wb'))
@@ -373,6 +374,19 @@ class PVRCNN_SSL(Detector3DTemplate):
         shared_features = batch_dict['shared_features'].reshape(batch_size,-1,embed_size)
         shared_features_gt = batch_dict['shared_features_gt'].reshape(batch_size,-1,embed_size)
 
+        cur_pred_score_tensor = torch.sigmoid(batch_dict['batch_cls_preds']).squeeze()
+        cur_pred_score_list = [pred_score.clone().detach() for pred_score in cur_pred_score_tensor]
+
+        cur_roi_score_tenspr = torch.sigmoid(self.pv_rcnn_ema.roi_head.forward_ret_dict['roi_scores'])
+        cur_roi_score_list = [roi_score.clone().detach() for roi_score in cur_roi_score_tenspr]
+
+        cur_roi_label_tensor = self.pv_rcnn_ema.roi_head.forward_ret_dict['roi_labels'].squeeze()
+        cur_roi_label_list = [roi_label.clone().detach() for roi_label in cur_roi_label_tensor]
+
+        cur_gt_pred_score_tensor= torch.sigmoid(batch_dict['batch_cls_preds_gt']).squeeze()
+        cur_gt_pred_score_tensor = cur_gt_pred_score_tensor.reshape(batch_size,-1)
+        cur_gt_pred_score_list = [gt_pred_score.clone().detach() for gt_pred_score in cur_gt_pred_score_tensor]
+        
         for i in range(len(batch_rois)): # B - 8
             valid_rois_mask = torch.logical_not(torch.all(batch_rois[i] == 0, dim=-1)).cpu()
             valid_rois = batch_rois[i][valid_rois_mask]
@@ -393,6 +407,10 @@ class PVRCNN_SSL(Detector3DTemplate):
             sh_ft_gt =  shared_features_gt[i][valid_gt_boxes_mask]  # X at a time
             self.val_dict['shared_features_gt'].extend(sh_ft_gt)  # 100 indices, each with 256 shape tensor
 
+
+            self.val_dict['gt_boxes'].extend(valid_pl_boxes.tolist())  # 27(8)
+            self.val_dict['ori_gt_boxes'].extend(valid_gt_boxes.tolist()) #27(8)
+
             num_gts = valid_gt_boxes_mask.sum()
             num_preds = valid_rois_mask.sum()
             num_pls = valid_pl_boxes_mask.sum()
@@ -409,30 +427,30 @@ class PVRCNN_SSL(Detector3DTemplate):
                     assigned_iou_class.append(valid_gt_boxes[ind][-1].cpu())
                 self.val_dict['assigned_iou_class'].extend(assigned_iou_class) # 100 at a time
 
-                if num_pls > 0 and num_preds > 0:
-                    overlap = iou3d_nms_utils.boxes_iou3d_gpu(valid_rois[:, 0:7], valid_pl_boxes[:, 0:7])
-                    preds_iou_max, assigned_pl_inds = overlap.max(dim=1)
-                    self.val_dict['iou_roi_pl'].extend(preds_iou_max.tolist())
-                    self.val_dict['assigned_pl_inds'].extend(assigned_pl_inds.tolist())
-                    assigned_iou_class = []
-                    for ind in assigned_pl_inds:
-                        assigned_iou_class.append(valid_pl_boxes[ind][-1].cpu())
-                    self.val_dict['assigned_iou_pl_class'].extend(assigned_iou_class)
+            if num_pls > 0 and num_preds > 0:
+                overlap = iou3d_nms_utils.boxes_iou3d_gpu(valid_rois[:, 0:7], valid_pl_boxes[:, 0:7])
+                preds_iou_max, assigned_pl_inds = overlap.max(dim=1)
+                self.val_dict['iou_roi_pl'].extend(preds_iou_max.tolist())
+                self.val_dict['assigned_pl_inds'].extend(assigned_pl_inds.tolist())
+                assigned_iou_class = []
+                for ind in assigned_pl_inds:
+                    assigned_iou_class.append(valid_pl_boxes[ind][-1].cpu())
+                self.val_dict['assigned_iou_pl_class'].extend(assigned_iou_class)
 
 
-                cur_pred_score = torch.sigmoid(batch_dict['batch_cls_preds']).squeeze()
-                self.val_dict['obj_scores'].extend(cur_pred_score.tolist()) # 16(100)
-                self.val_dict['gt_boxes'].extend(valid_pl_boxes.tolist())  # 27(8)
-                self.val_dict['ori_gt_boxes'].extend(valid_gt_boxes.tolist()) #27(8)
+            cur_pred_score  = cur_pred_score_list[i][valid_rois_mask]
+            self.val_dict['obj_scores'].extend(cur_pred_score.tolist()) # 16(100)
 
-                cur_roi_score = torch.sigmoid(self.pv_rcnn_ema.roi_head.forward_ret_dict['roi_scores'])
-                self.val_dict['roi_scores'].extend(cur_roi_score.tolist())
+            cur_roi_score = cur_roi_score_list[i][valid_rois_mask]
+            self.val_dict['roi_scores'].extend(cur_roi_score.tolist())
 
-                cur_roi_label = self.pv_rcnn_ema.roi_head.forward_ret_dict['roi_labels'].squeeze()
-                self.val_dict['class_labels'].extend(cur_roi_label.tolist())
+            cur_roi_label =  cur_roi_label_list[i][valid_rois_mask]
+            self.val_dict['class_labels'].extend(cur_roi_label.tolist())
 
-                cur_iteration = torch.ones_like(preds_iou_max) * (batch_dict['cur_iteration'] - self.iter_to_remove)
-                self.val_dict['iteration'].extend(cur_iteration.tolist())
+            cur_gt_pred_score =  cur_gt_pred_score_list[i][valid_gt_boxes_mask]
+            self.val_dict['gt_obj_scores'].extend(cur_gt_pred_score.tolist())
+                # cur_iteration = torch.ones_like(preds_iou_max) * (batch_dict['cur_iteration'] ) #- self.iter_to_remove
+                # self.val_dict['iteration'].extend(cur_iteration.tolist())
 
         cur_epoch = batch_dict['cur_epoch']
         return cur_epoch

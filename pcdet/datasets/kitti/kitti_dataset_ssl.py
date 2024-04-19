@@ -68,6 +68,8 @@ class KittiDatasetSSL(DatasetTemplate):
                 self.class_counter[name] += 1
         print("Labeled instances before gt_sampling: ", self.class_counter)
         if self.logger is not None:
+            # print("counter init")
+            # self.counter_ulb = 0
             self.logger.info('Total samples for KITTI dataset: %d' % (len(self.kitti_infos)))
 
     def include_kitti_data(self, mode):
@@ -391,11 +393,17 @@ class KittiDatasetSSL(DatasetTemplate):
         data_dict_labeled = self.get_item_single(info)
 
         if self.training:
+            # index_unlabeled = self.counter_ulb
             # index_unlabeled = np.random.choice(self.unlabeled_index_list, 1)[0]
+            # info_unlabeled = copy.deepcopy(self.unlabeled_kitti_infos[index_unlabeled])
+            # if self.counter_ulb == 3676:
+            #     sys.exit()
             # info_unlabeled = copy.deepcopy(self.unlabeled_kitti_infos[index_unlabeled])
             info_unlabeled = np.random.choice(self.unlabeled_kitti_infos, 1)[0]
 
             data_dict_unlabeled = self.get_item_single(info_unlabeled, unlabeled=True)
+            # print(f"*********###### index_unlabeled ======> {self.counter_ulb} ##########************************")
+            # self.counter_ulb += 1
             return [data_dict_labeled, data_dict_unlabeled]
         else:
             return data_dict_labeled
