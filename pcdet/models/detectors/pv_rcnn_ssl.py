@@ -10,7 +10,7 @@ from .detector3d_template import Detector3DTemplate
 from .pv_rcnn import PVRCNN
 
 from pcdet.utils import common_utils
-from pcdet.utils.stats_utils import metrics_registry
+from pcdet.utils.stats_utils import metrics_registry, get_max_iou
 from pcdet.utils.prototype_utils import feature_bank_registry
 from collections import defaultdict
 # from ssod import AdaptiveThresholding
@@ -56,9 +56,9 @@ class PVRCNN_SSL(Detector3DTemplate):
             if metrics_configs.ENABLE:
                 metrics_registry.register(tag=metrics_configs["NAME"], dataset=self.dataset, **metrics_configs)
 
-        self.val_dict =   defaultdict(list)
+        self.val_dict = defaultdict(list)
         self.frame_ids_dumped = [] 
-             
+        self.min_overlaps = np.array([0.7, 0.5, 0.5])
         
         # self.lb_val_dict = defaultdict(list)
         # self.ulb_val_dict = defaultdict(list)
@@ -378,7 +378,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         batch_roi_labels =  self.pv_rcnn_ema.roi_head.forward_ret_dict['roi_labels']
         batch_roi_labels = [roi_labels.clone().detach() for roi_labels in batch_roi_labels]
 
-        batch_rois = self.pv_rcnn_ema.roi_head.forward_ret_dict['rois'][unlabeled_mask]
+        batch_rois = self.pv_rcnn_ema.roi_head.forward_ret_dict['rois']
         batch_rois = [rois.clone().detach() for rois in batch_rois]
 
         batch_ori_gt_boxes = batch_dict['ori_gt_boxes']
@@ -387,14 +387,16 @@ class PVRCNN_SSL(Detector3DTemplate):
         batch_pl_boxes = batch_dict['gt_boxes']
         batch_pl_boxes = [boxes.clone().detach() for boxes in batch_pl_boxes] #Filtered PLs at end of Teacher
 
-        shared_features = batch_dict['shared_features'].reshape(batch_size,-1,embed_size) #16,100,256
-        shared_features_gt = batch_dict['shared_features_gt'].reshape(batch_size,-1,embed_size) #16,28,256
+        shared_features = batch_dict['shared_features'].reshape(batch_size,-1,embed_size).cpu() #16,100,256
+        shared_features = shared_features
+        shared_features_gt = batch_dict['shared_features_gt'].reshape(batch_size,-1,embed_size).cpu() #16,28,256
+        shared_features_gt = shared_features_gt
 
         cur_pred_score_tensor = torch.sigmoid(batch_dict['batch_cls_preds']).squeeze()
         cur_pred_score_list = [pred_score.clone().detach() for pred_score in cur_pred_score_tensor]
 
-        cur_roi_score_tenspr = torch.sigmoid(self.pv_rcnn_ema.roi_head.forward_ret_dict['roi_scores'])
-        cur_roi_score_list = [roi_score.clone().detach() for roi_score in cur_roi_score_tenspr]
+        cur_roi_score_tensor = torch.sigmoid(self.pv_rcnn_ema.roi_head.forward_ret_dict['roi_scores'])
+        cur_roi_score_list = [roi_score.clone().detach() for roi_score in cur_roi_score_tensor]
 
         cur_roi_label_tensor = self.pv_rcnn_ema.roi_head.forward_ret_dict['roi_labels'].squeeze()
         cur_roi_label_list = [roi_label.clone().detach() for roi_label in cur_roi_label_tensor]
@@ -403,11 +405,10 @@ class PVRCNN_SSL(Detector3DTemplate):
         cur_gt_pred_score_tensor = cur_gt_pred_score_tensor.reshape(batch_size,-1)
         cur_gt_pred_score_list = [gt_pred_score.clone().detach() for gt_pred_score in cur_gt_pred_score_tensor]
 
-
         # Store different types of scores over all itrs and epochs and dump them in a pickle for offline modeling
         # TODO (shashank) : Can be optimized later to save computational time, currently takes about 0.002sec
         # batch_roi_labels = self.pv_rcnn_ema.roi_head.forward_ret_dict['roi_labels'][unlabeled_inds]
-        for i in range(batch_size): #16
+        for i in unlabeled_inds: #16
             if batch_dict['frame_id'][i] not in self.frame_ids_dumped:
                 self.val_dict['frame_id'].append(batch_dict['frame_id'][i])
                 self.frame_ids_dumped.append(batch_dict['frame_id'][i])
@@ -444,40 +445,60 @@ class PVRCNN_SSL(Detector3DTemplate):
                 num_pls = valid_pl_boxes_mask.sum()
 
                 # cur_unlabeled_ind = unlabeled_inds[i]
-                if num_gts > 0 and num_preds > 0:
-                    # Find IoU between ROI v/s Original GTs
-                    overlap = iou3d_nms_utils.boxes_iou3d_gpu(valid_rois[:, 0:7], valid_gt_boxes[:, 0:7])
-                    preds_iou_max, assigned_gt_inds = overlap.max(dim=1)
-                    self.val_dict['iou_roi_gt'].append(preds_iou_max) #100 at a time
-                    self.val_dict['assigned_gt_inds'].append(assigned_gt_inds) 
-                    assigned_iou_class = []
-                    for ind in assigned_gt_inds:
-                        assigned_iou_class.append(valid_gt_boxes[ind][-1].cpu())
-                    self.val_dict['assigned_iou_class'].append(assigned_iou_class) # 100 at a time
+                # if num_gts > 0 and num_preds > 0:
+                #     # Find IoU between ROI v/s Original GTs
+                #     overlap = iou3d_nms_utils.boxes_iou3d_gpu(valid_rois[:, 0:7], valid_gt_boxes[:, 0:7])
+                #     preds_iou_max, assigned_gt_inds = overlap.max(dim=1)
+                #     self.val_dict['iou_roi_gt'].append(preds_iou_max) #100 at a time
+                #     self.val_dict['assigned_gt_inds'].append(assigned_gt_inds) 
+                #     assigned_iou_class = []
+                #     for ind in assigned_gt_inds:
+                #         assigned_iou_class.append(valid_gt_boxes[ind][-1].cpu())
+                #     self.val_dict['assigned_iou_class'].append(assigned_iou_class) # 100 at a time
 
-                if num_pls > 0 and num_preds > 0:
-                    overlap = iou3d_nms_utils.boxes_iou3d_gpu(valid_rois[:, 0:7], valid_pl_boxes[:, 0:7])
-                    preds_iou_max, assigned_pl_inds = overlap.max(dim=1)
-                    self.val_dict['iou_roi_pl'].append(preds_iou_max)
-                    self.val_dict['assigned_pl_inds'].append(assigned_pl_inds)
-                    assigned_iou_class = []
-                    for ind in assigned_pl_inds:
-                        assigned_iou_class.append(valid_pl_boxes[ind][-1].cpu())
-                    self.val_dict['assigned_iou_pl_class'].append(assigned_iou_class)
-
+                # if num_pls > 0 and num_preds > 0:
+                #     overlap = iou3d_nms_utils.boxes_iou3d_gpu(valid_rois[:, 0:7], valid_pl_boxes[:, 0:7])
+                #     preds_iou_max, assigned_pl_inds = overlap.max(dim=1)
+                #     self.val_dict['iou_roi_pl'].append(preds_iou_max)
+                #     self.val_dict['assigned_pl_inds'].append(assigned_pl_inds)
+                #     assigned_iou_class = []
+                #     for ind in assigned_pl_inds:
+                #         assigned_iou_class.append(valid_pl_boxes[ind][-1].cpu())
+                #     self.val_dict['assigned_iou_pl_class'].append(assigned_iou_class)
 
                 if num_pls > 0 and num_gts > 0:
-                    overlap = iou3d_nms_utils.boxes_iou3d_gpu(valid_pl_boxes[:, 0:7], valid_gt_boxes[:, 0:7])
-                    preds_iou_max, assigned_pl_inds = overlap.max(dim=1)
-                    self.val_dict['iou_pl_gt'].append(preds_iou_max) # Append matched GT indices and boxes
-                    # self.val_dict['assigned_plgt_inds'].append(assigned_pl_inds)
-                    assigned_iou_class = []
-                    for ind in assigned_pl_inds:
-                        assigned_iou_class.append(valid_gt_boxes[ind][-1].cpu())
-                    self.val_dict['assigned_iou_plgt_class'].append(assigned_iou_class)
+                    sample_gts_labels = valid_gt_boxes[:, -1].long()
+                    sample_roi_labels = valid_pl_boxes[:, -1].long()
+                    matched_threshold = torch.tensor(self.min_overlaps, dtype=torch.float, device=sample_roi_labels.device)[sample_roi_labels]
+                    sample_roi_iou_wrt_gt, assigned_label, gt_to_roi_max_iou = get_max_iou(valid_pl_boxes[:, 0:7], valid_gt_boxes[:, 0:7],
+                                                                                            sample_gts_labels, matched_threshold=matched_threshold)
+                    print("Overlaps calculated")
+                
+                elif num_pls > 0 and num_gts == 0:
+                    sample_roi_labels = valid_pl_boxes[:, -1].long()
+                    sample_roi_iou_wrt_gt = torch.zeros_like(valid_pl_boxes[:, 0])
+                    assigned_label = torch.ones_like(sample_roi_iou_wrt_gt, dtype=torch.int64) * -1
+                    
+                self.val_dict['IOU_assigned_label'].append(assigned_label)
+                
+                # self.num_gts += torch.bincount(sample_gts_labels, minlength=3)
+
+                # for t, thresh in enumerate([0.3, 0.5, 0.7]):
+                #     for c in range(3):
+                #         self.num_gts_matched[t, c] += gt_to_roi_max_iou[sample_gts_labels == c].ge(thresh).sum()
+
+                # if num_pls > 0 and num_gts > 0:
+                #     overlap = iou3d_nms_utils.boxes_iou3d_gpu(valid_pl_boxes[:, 0:7], valid_gt_boxes[:, 0:7])
+                #     preds_iou_max, assigned_pl_inds = overlap.max(dim=1)
+                #     self.val_dict['iou_pl_gt'].append(preds_iou_max) # Append matched GT indices and boxes
+                #     # self.val_dict['assigned_plgt_inds'].append(assigned_pl_inds)
+                #     assigned_iou_class = []
+                #     for ind in assigned_pl_inds:
+                #         assigned_iou_class.append(valid_gt_boxes[ind][-1].cpu())
+                #     self.val_dict['assigned_iou_plgt_class'].append(assigned_iou_class)
 
                 cur_pred_score  = cur_pred_score_list[i][valid_rois_mask]
-                self.val_dict['obj_scores'].append(cur_pred_score) # 16(100)
+                self.val_dict['obj_scores'].append(cur_pred_score) # 8(100)
 
                 cur_roi_score = cur_roi_score_list[i][valid_rois_mask]
                 self.val_dict['roi_scores'].append(cur_roi_score)
@@ -486,7 +507,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                 self.val_dict['class_labels'].append(cur_roi_label)
 
                 cur_gt_pred_score =  cur_gt_pred_score_list[i][valid_pl_boxes_mask]
-                self.val_dict['gt_obj_scores'].append(cur_gt_pred_score)
+                self.val_dict['gt_obj_scores'].append(cur_gt_pred_score) #
 
         cur_epoch = batch_dict['cur_epoch']
         return cur_epoch

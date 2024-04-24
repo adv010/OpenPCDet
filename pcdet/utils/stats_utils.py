@@ -254,7 +254,6 @@ class PredQualityMetrics(Metric):
         classwise_metrics['label_hist'] = _arr2dict(label_hist.cpu().numpy(), ignore_zeros=True)
         precision = precision_score(y_labels, pred_labels, sample_weight=weights.cpu().numpy(), average=None, labels=range(3), zero_division=np.nan)
         classwise_metrics['avg_precision_sem_score'] = _arr2dict(precision[:3], ignore_nan=True)
-
         # sim_scores = accumulated_metrics["roi_sim_scores"]
         # sim_labels = torch.argmax(sim_scores, dim=-1)
         # y_sim_scores = np.zeros((len(y_labels), 4))
@@ -304,7 +303,7 @@ class PredQualityMetrics(Metric):
             # recall
             for t, thresh in enumerate([0.3, 0.5, 0.7]):
                 classwise_metrics[f'recall_{thresh}'][cls] = self.num_gts_matched[t, cind] / torch.clip(self.num_gts[cind], min=1)
-
+                classwise_metrics[f'num_gts_matched{thresh}'][cls] = self.num_gts_matched[t, cind]
             # y_sim_scores = sim_scores[:, cind].cpu().numpy()
             # sem_clf_pr_curve_sim_score_data = {'labels': cls_label_mask, 'predictions': y_sim_scores}
             # classwise_metrics['sem_clf_pr_curve_sim_score'][cls] = sem_clf_pr_curve_sim_score_data

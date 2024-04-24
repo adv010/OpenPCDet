@@ -81,9 +81,9 @@ class PVRCNNHead(RoIHeadTemplate):
         """
         batch_size = batch_dict['batch_size']
         if not student:
-            rois = batch_dict['gt_boxes'][..., 0:7] if use_gtboxes else batch_dict['rois']
-        else:
-            rois = batch_dict['gt_boxes'][..., 0:7] if use_gtboxes else batch_dict['rois']
+            rois = batch_dict['gt_boxes'][..., 0:7]if use_gtboxes else batch_dict['rois']
+        # else:
+        #     rois = batch_dict['gt_boxes'][..., 0:7] if use_gtboxes else batch_dict['rois']
         point_coords = batch_dict["point_coords"]
         point_features = batch_dict["point_features"]
         point_cls_scores = batch_dict["point_cls_scores"]
@@ -157,6 +157,7 @@ class PVRCNNHead(RoIHeadTemplate):
         """
 
         nms_config = self.model_cfg.NMS_CONFIG['TRAIN' if self.training and not test_only else 'TEST']
+        unlabeled_inds = batch_dict['unlabeled_inds']
         # proposal_layer doesn't continue if the rois are already in the batch_dict.
         # However, for labeled data proposal layer should continue!
         targets_dict = self.proposal_layer(batch_dict, nms_config=nms_config)
@@ -180,14 +181,14 @@ class PVRCNNHead(RoIHeadTemplate):
 
         batch_size_rcnn = pooled_features.shape[0]
         shared_features = self.shared_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1))
-        batch_dict['shared_features'] =  shared_features.squeeze().detach().cpu().numpy()
+        batch_dict['shared_features'] =  shared_features.squeeze().detach()
         rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
         rcnn_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
 
         batch_size_rcnn_gt = pooled_features_gt.shape[0]
         shared_features_gt = self.shared_fc_layer(pooled_features_gt.view(batch_size_rcnn_gt, -1, 1))
         # shared_features_copy = shared_features.squeeze().view(*batch_dict['rois'].shape[:2],-1).clone()
-        batch_dict['shared_features_gt'] =  shared_features_gt.squeeze().detach().cpu().numpy() # Obtaining shared_features_gt over PLs
+        batch_dict['shared_features_gt'] =  shared_features_gt.squeeze().detach()# Obtaining shared_features_gt over PLs
         batch_cls_preds_gt = self.cls_layers(shared_features_gt).transpose(1, 2).contiguous().squeeze(dim=1)
         batch_dict['batch_cls_preds_gt'] = batch_cls_preds_gt # Confidence scores for PLs
         del batch_size_rcnn_gt, pooled_features_gt, shared_features_gt
