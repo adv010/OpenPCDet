@@ -81,7 +81,7 @@ class PVRCNNHead(RoIHeadTemplate):
         """
         batch_size = batch_dict['batch_size']
         if not student:
-            rois = batch_dict['ori_gt_boxes'][..., 0:7] if use_gtboxes else batch_dict['rois']
+            rois = batch_dict['gt_boxes'][..., 0:7] if use_gtboxes else batch_dict['rois']
         else:
             rois = batch_dict['gt_boxes'][..., 0:7] if use_gtboxes else batch_dict['rois']
         point_coords = batch_dict["point_coords"]
@@ -187,12 +187,11 @@ class PVRCNNHead(RoIHeadTemplate):
         batch_size_rcnn_gt = pooled_features_gt.shape[0]
         shared_features_gt = self.shared_fc_layer(pooled_features_gt.view(batch_size_rcnn_gt, -1, 1))
         # shared_features_copy = shared_features.squeeze().view(*batch_dict['rois'].shape[:2],-1).clone()
-        batch_dict['shared_features_gt'] =  shared_features_gt.squeeze().detach().cpu().numpy()
+        batch_dict['shared_features_gt'] =  shared_features_gt.squeeze().detach().cpu().numpy() # Obtaining shared_features_gt over PLs
         batch_cls_preds_gt = self.cls_layers(shared_features_gt).transpose(1, 2).contiguous().squeeze(dim=1)
-        batch_dict['batch_cls_preds_gt'] = batch_cls_preds_gt
-        del batch_size_rcnn_gt
-        del pooled_features_gt
-        del shared_features_gt
+        batch_dict['batch_cls_preds_gt'] = batch_cls_preds_gt # Confidence scores for PLs
+        del batch_size_rcnn_gt, pooled_features_gt, shared_features_gt
+
 
         if (self.training or self.print_loss_when_eval) and not test_only:
             # RoI-level similarity.
