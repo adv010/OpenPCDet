@@ -138,7 +138,7 @@ class PVRCNNHead(RoIHeadTemplate):
         return roi_grid_points
 
     def pool_features(self, batch_dict, use_gtboxes=False):
-        pooled_features = self.roi_grid_pool(batch_dict, use_gtboxes=use_gtboxes)  # (BxN, 6x6x6, C)
+        pooled_features = self.roi_grid_pool(batch_dict,use_gtboxes=use_gtboxes)  # (BxN, 6x6x6, C)
         grid_size = self.model_cfg.ROI_GRID_POOL.GRID_SIZE
         batch_size_rcnn = pooled_features.shape[0]
         pooled_features = pooled_features.permute(0, 2, 1). \
@@ -173,10 +173,24 @@ class PVRCNNHead(RoIHeadTemplate):
             targets_dict['points'] = batch_dict['points']
 
         pooled_features = self.pool_features(batch_dict)
+        pooled_features_gt = self.pool_features(batch_dict, use_gtboxes  = True)  # (BxN, 6x6x6, C)
+
         batch_size_rcnn = pooled_features.shape[0]
         shared_features = self.shared_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1))
+        batch_dict['shared_features'] =  shared_features.squeeze().detach()
+
         rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
         rcnn_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
+
+
+        batch_size_rcnn_gt = pooled_features_gt.shape[0]
+        shared_features_gt = self.shared_fc_layer(pooled_features_gt.view(batch_size_rcnn_gt, -1, 1))
+        shared_features_copy = shared_features.squeeze().view(*batch_dict['rois'].shape[:2],-1).clone()
+        batch_dict['shared_features_gt'] =  shared_features_gt.squeeze().detach()# Obtaining shared_features_gt over PLs
+        batch_cls_preds_gt = self.cls_layers(shared_features_gt).transpose(1, 2).contiguous().squeeze(dim=1)
+        batch_dict['batch_cls_preds_gt'] = batch_cls_preds_gt # Confidence scores for PLs
+        del batch_size_rcnn_gt, pooled_features_gt, shared_features_gt
+
 
         if (self.training or self.print_loss_when_eval) and not test_only:
             # RoI-level similarity.

@@ -39,6 +39,7 @@ def vis(points, gt_boxes, pred_boxes=None, pred_scores=None, pred_labels=None, f
     """A simple/temporary visualization for debugging"""
     draw_scenes(points=points, gt_boxes=gt_boxes,
                   ref_boxes=pred_boxes, ref_scores=pred_scores, ref_labels=pred_labels)
+    # headless_server = True
     if headless_server:
         mlab.savefig(filename=os.path.join(vis_dir, filename))
         print("Saved Visualisation at {}".format(os.path.join(vis_dir, filename)))
