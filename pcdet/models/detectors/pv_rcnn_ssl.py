@@ -167,6 +167,8 @@ class PVRCNN_SSL(Detector3DTemplate):
     @staticmethod
     def _split_batch(batch_dict, tag='ema'):
         assert tag in ['ema', 'pre_gt_sample'], f'{tag} not in list [ema, pre_gt_sample]'
+        batch_dict['frame_id_ema'] = batch_dict['frame_id']
+        batch_dict['ori_gt_boxes_ema'] = batch_dict['gt_boxes_ema']
         batch_dict_out = {}
         keys = list(batch_dict.keys())
         for k in keys:
@@ -221,10 +223,8 @@ class PVRCNN_SSL(Detector3DTemplate):
     def _forward_training(self, batch_dict):
         # batch_dict = self._get_fixed_batch_dict()
         lbl_inds, ulb_inds = self._prep_batch_dict(batch_dict)
+        copy_ori_gt = batch_dict['gt_boxes_ema'].clone()
         batch_dict_ema = self._split_batch(batch_dict, tag='ema')
-        batch_dict_ema['ori_gt_boxes'] = batch_dict['gt_boxes']
-        batch_dict_new = copy.deepcopy(batch_dict_ema)
-        batch_dict_new['labeled_mask'] = batch_dict['labeled_mask']
 
         if self.supervise_mode == 1:
             pl_boxes, pl_conf_scores, pl_sem_scores, pl_sem_logits, pl_rect_scores, masks = self._get_gt_pls(batch_dict_ema, ulb_inds)
@@ -232,11 +232,11 @@ class PVRCNN_SSL(Detector3DTemplate):
             pl_weights = [scores.new_ones(scores.shape[0], 1) for scores in pl_conf_scores]  # No weights for now
         else:
             self._gen_pseudo_labels(batch_dict_ema)
-            pls_teacher_wa, _ = self.pv_rcnn_ema.post_processing(batch_dict_ema, no_recall_dict=True)
-            ulb_pred_labels = torch.cat([pl['pred_labels'] for pl in pls_teacher_wa]).int().detach()
-            pl_cls_count_pre_filter = torch.bincount(ulb_pred_labels, minlength=4)[1:]
+            pls_teacher_wa, _ = self.pv_rcnn_ema.post_processing(batch_dict_ema, no_recall_dict=True) # NMS, 
+            ulb_pred_labels = torch.cat([pl['pred_labels'] for pl in pls_teacher_wa]).int().detach() 
+            pl_cls_count_pre_filter = torch.bincount(ulb_pred_labels, minlength=4)[1:] 
             (pl_boxes, pl_conf_scores, pl_sem_scores, pl_sem_logits,
-             pl_rect_scores, masks, pl_weights) = self._filter_pls(pls_teacher_wa, batch_dict_ema, ulb_inds)
+             pl_rect_scores, masks, pl_weights) = self._filter_pls(pls_teacher_wa, batch_dict_ema, ulb_inds) # thresholding
             pl_weights = [scores.new_ones(scores.shape[0], 1) for scores in pl_conf_scores]  # No weights for now
 
             if self.thresh_alg is not None:
@@ -244,25 +244,23 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         if 'pl_metrics' in metrics_registry.tags():
             self._update_pl_metrics(pl_boxes, pl_rect_scores, pl_weights, masks, batch_dict_ema['gt_boxes'][ulb_inds])
-
+        batch_dict_new = copy.deepcopy(batch_dict_ema)
+        batch_dict_new['labeled_mask'] = batch_dict['labeled_mask']
+        self._fill_with_pls(batch_dict_new, pl_boxes, masks, ulb_inds, lbl_inds) #Replace batch_dict_ema['gt_boxes'] with filtered PL boxes
+        with torch.no_grad():
+            self.pv_rcnn_ema.roi_head.forward(batch_dict_new, test_only=True)
+            
         if self.model_cfg.get('STORE_SCORES_IN_PKL', False):
-            # self.pv_rcnn_ema.dense_head.forward(batch_dict_ema, test_only=True)
             batch_dict_new['pl_conf_scores'] = pl_conf_scores
-            batch_dict_new['pl_sem_scores'] = pl_conf_scores
-            batch_dict_new['pl_sem_logits'] = pl_sem_logits
-            self._fill_with_pls(batch_dict_new, pl_boxes, masks, ulb_inds, lbl_inds) #Replace batch_dict_ema['gt_boxes'] with filtered PL boxes
-            with torch.no_grad():
-                for cur_module in self.pv_rcnn_ema.module_list:
-                    try:
-                        batch_dict_new = cur_module(batch_dict_new, test_only=True)
-                    except TypeError as e:
-                        batch_dict_new = cur_module(batch_dict_new)
+            batch_dict_new['pl_sem_scores'] = pl_sem_scores
+
+
             if not self.pkl_init or batch_dict_new['cur_epoch'] == self.cur_epoch + 1 :
                 use_new_pkl = True
                 self.pkl_init = True
             else:
                 use_new_pkl = False
-            self.cur_epoch = self.dump_statistics(batch_dict_new, ulb_inds, lbl_inds, use_new_pkl) # Dump stats for tsne pkl
+            self.cur_epoch = self.dump_statistics(batch_dict_new, ulb_inds, lbl_inds, copy_ori_gt, use_new_pkl) # Dump stats for tsne pkl
 
         
         # TODO(farzad): Check if commenting the following line and apply_augmentation is equal to a fully supervised setting
@@ -354,7 +352,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         }
         return ret_dict, tb_dict_, disp_dict
 
-    def dump_statistics(self, batch_dict, unlabeled_inds, labeled_inds, use_new_pkl = False):
+    def dump_statistics(self, batch_dict, unlabeled_inds, labeled_inds, ori_gt_boxes,use_new_pkl = False):
         ckpt = 80
         epoch_data_of = batch_dict['cur_epoch'] - 1
         if use_new_pkl: #dumping statistics pkl
@@ -377,19 +375,19 @@ class PVRCNN_SSL(Detector3DTemplate):
         # batch_rois = self.pv_rcnn_ema.roi_head.forward_ret_dict['rois']
         # batch_rois = [rois.clone().detach() for rois in batch_rois]
 
-        batch_ori_gt_boxes = batch_dict['ori_gt_boxes']
+        batch_ori_gt_boxes = ori_gt_boxes
         batch_ori_gt_boxes = [ori_gt_boxes.clone().detach() for ori_gt_boxes in batch_ori_gt_boxes]
 
         batch_pl_boxes = batch_dict['gt_boxes']
         batch_pl_boxes = [boxes.clone().detach() for boxes in batch_pl_boxes] #Filtered PLs at end of Teacher
 
-        shared_features = batch_dict['shared_features'].reshape(batch_size,-1,embed_size).cpu() #16,100,256
-        shared_features = shared_features
+        # shared_features = batch_dict['shared_features'].reshape(batch_size,-1,embed_size).cpu() #16,100,256
+        # shared_features = shared_features
         shared_features_gt = batch_dict['shared_features_gt'].reshape(batch_size,-1,embed_size).cpu() #16,28,256
         shared_features_gt = shared_features_gt
 
-        cur_pred_score_tensor = torch.sigmoid(batch_dict['batch_cls_preds']).squeeze()
-        cur_pred_score_list = [pred_score.clone().detach() for pred_score in cur_pred_score_tensor]
+        # cur_pred_score_tensor = torch.sigmoid(batch_dict['batch_cls_preds']).squeeze()
+        # cur_pred_score_list = [pred_score.clone().detach() for pred_score in cur_pred_score_tensor]
 
         # cur_roi_score_tensor = torch.sigmoid(self.pv_rcnn_ema.roi_head.forward_ret_dict['roi_scores'])
         # cur_roi_score_list = [roi_score.clone().detach() for roi_score in cur_roi_score_tensor]
@@ -397,9 +395,9 @@ class PVRCNN_SSL(Detector3DTemplate):
         # cur_roi_label_tensor = self.pv_rcnn_ema.roi_head.forward_ret_dict['roi_labels'].squeeze()
         # cur_roi_label_list = [roi_label.clone().detach() for roi_label in cur_roi_label_tensor]
 
-        cur_gt_pred_score_tensor= torch.sigmoid(batch_dict['batch_cls_preds_gt']).squeeze()
-        cur_gt_pred_score_tensor = cur_gt_pred_score_tensor.reshape(batch_size,-1)
-        cur_gt_pred_score_list = [gt_pred_score.clone().detach() for gt_pred_score in cur_gt_pred_score_tensor]
+        # cur_gt_pred_score_tensor= torch.sigmoid(batch_dict['batch_cls_preds_gt']).squeeze()
+        # cur_gt_pred_score_tensor = cur_gt_pred_score_tensor.reshape(batch_size,-1)
+        # cur_gt_pred_score_list = [gt_pred_score.clone().detach() for gt_pred_score in cur_gt_pred_score_tensor]
 
         # Store different types of scores over all itrs and epochs and dump them in a pickle for offline modeling
         # TODO (shashank) : Can be optimized later to save computational time, currently takes about 0.002sec
@@ -413,11 +411,9 @@ class PVRCNN_SSL(Detector3DTemplate):
                 continue
             else:
                 # if batch_dict['frame_id'][i] not in self.frame_ids_dumped:
-                # self.val_dict['frame_id'].append(batch_dict['frame_id'][i])
-                # self.frame_ids_dumped.append(batch_dict['frame_id'][i])
-                
+                self.val_dict['frame_id'].append(batch_dict['frame_id'][i])                
                 # self.total_frames_dumped = len(self.frame_ids_dumped)
-                self.val_dict['instance_idx'].append(batch_dict['instance_idx'][i].cpu())
+                # self.val_dict['instance_idx'].append(batch_dict['instance_idx'][i].cpu())
                 self.val_dict['labeled_mask'].append(labeled_mask[i])
                 self.val_dict['unlabeled_mask'].append(unlabeled_mask[i])
                 # valid_rois_mask = torch.logical_not(torch.all(batch_rois[i] == 0, dim=-1)).cpu()
@@ -428,11 +424,9 @@ class PVRCNN_SSL(Detector3DTemplate):
                 valid_gt_boxes_mask = torch.logical_not(torch.all(batch_ori_gt_boxes[i] == 0, dim=-1)).cpu()
                 valid_gt_boxes = batch_ori_gt_boxes[i][valid_gt_boxes_mask]
                 valid_gt_boxes[:, -1] -= 1  # Starting class indices from zero
+
                 sample_gts_labels = valid_gt_boxes[:, -1].long()
 
-                valid_pl_boxes_mask = torch.logical_not(torch.all(batch_pl_boxes[i] == 0, dim=-1)).cpu()
-                valid_pl_boxes = batch_pl_boxes[i][valid_pl_boxes_mask]
-                valid_pl_boxes[:, -1] -= 1  # Starting class indices from zero
 
                 # sh_ft =  shared_features[i][valid_rois_mask] #100 at a time
                 # self.val_dict['shared_features'].append(sh_ft) # 100 indices, each with 256 shape tensor
@@ -440,7 +434,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                 sh_ft_gt =  shared_features_gt[i][valid_pl_boxes_mask]  # X at a time
                 self.val_dict['shared_features_gt'].append(sh_ft_gt)  # 100 indices, each with 256 shape tensor
 
-                self.val_dict['gt_boxes'].append(valid_pl_boxes.cpu())  # 27(8)
+                self.val_dict['pl_boxes'].append(valid_pl_boxes.cpu())  # 27(8)
                 self.val_dict['ori_gt_boxes'].append(valid_gt_boxes.cpu()) #27(8)
 
                 num_gts = valid_gt_boxes_mask.sum()
@@ -470,8 +464,8 @@ class PVRCNN_SSL(Detector3DTemplate):
 
                 if num_pls > 0 and num_gts > 0:
                     sample_gts_labels = valid_gt_boxes[:, -1].long()
-                    sample_roi_labels = valid_pl_boxes[:, -1].long()
-                    matched_threshold = torch.tensor(self.min_overlaps, dtype=torch.float, device=sample_roi_labels.device)[sample_roi_labels]
+                    sample_pl_labels = valid_pl_boxes[:, -1].long()
+                    matched_threshold = torch.tensor(self.min_overlaps, dtype=torch.float, device=sample_pl_labels.device)[sample_pl_labels]
                     sample_roi_iou_wrt_gt, assigned_label, gt_to_roi_max_iou = get_max_iou(valid_pl_boxes[:, 0:7], valid_gt_boxes[:, 0:7],
                                                                                             sample_gts_labels, matched_threshold=matched_threshold)
                     print("Overlaps calculated")
@@ -487,7 +481,7 @@ class PVRCNN_SSL(Detector3DTemplate):
 
                 self.val_dict['iou_values'].append(sample_roi_iou_wrt_gt.cpu())
                 self.val_dict['iou_assigned_label'].append(assigned_label.cpu())
-                self.val_dict['gt_labels'].append(torch.bincount(sample_gts_labels.cpu(), minlength=3))
+                # self.val_dict['gt_labels'].append(torch.bincount(sample_gts_labels.cpu(), minlength=3))
                 
 
                 # cur_pred_score  = cur_pred_score_list[i][valid_rois_mask]
@@ -499,12 +493,12 @@ class PVRCNN_SSL(Detector3DTemplate):
                 # cur_roi_label =  cur_roi_label_list[i][valid_rois_mask]
                 # self.val_dict['class_labels'].append(cur_roi_label)
 
-                cur_gt_pred_score =  cur_gt_pred_score_list[i][valid_pl_boxes_mask]
-                self.val_dict['gt_obj_scores'].append(cur_gt_pred_score) 
+                # cur_gt_pred_score =  cur_gt_pred_score_list[i][valid_pl_boxes_mask]
+                # self.val_dict['gt_obj_scores'].append(cur_gt_pred_score) 
 
                 self.val_dict['pl_conf_scores'].append(batch_dict['pl_conf_scores'])
                 self.val_dict['pl_sem_scores'].append(batch_dict['pl_sem_scores'])
-                self.val_dict['pl_sem_logits'].append(batch_dict['pl_sem_logits'])
+                # self.val_dict['pl_sem_logits'].append(batch_dict['pl_sem_logits'])
 
         cur_epoch = batch_dict['cur_epoch']
         return cur_epoch
