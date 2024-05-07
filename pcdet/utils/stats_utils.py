@@ -87,7 +87,7 @@ def get_max_iou(anchors, gt_boxes, gt_classes, matched_threshold=0.6):
         labels[pos_inds] = gt_classes[gt_inds_over_thresh]
         ious[:] = anchor_to_gt_max
 
-    return ious, labels, gt_to_anchor_max
+    return ious, labels, gt_to_anchor_max, gt_classes, gt_inds_over_thresh
 
 def plot_confusion_matrix(cm, class_names):
   """
@@ -170,7 +170,7 @@ class PredQualityMetrics(Metric):
                 sample_gts_labels = sample_gts[:, -1].long() - 1
                 sample_roi_labels = sample_rois[:, -1].long() - 1
                 matched_threshold = torch.tensor(self.min_overlaps, dtype=torch.float, device=sample_roi_labels.device)[sample_roi_labels]
-                sample_roi_iou_wrt_gt, assigned_label, gt_to_roi_max_iou = get_max_iou(sample_rois[:, 0:7], sample_gts[:, 0:7],
+                sample_roi_iou_wrt_gt, assigned_label, gt_to_roi_max_iou,_,_ = get_max_iou(sample_rois[:, 0:7], sample_gts[:, 0:7],
                                                                                        sample_gts_labels, matched_threshold=matched_threshold)
                 self.num_gts += torch.bincount(sample_gts_labels, minlength=3)
 

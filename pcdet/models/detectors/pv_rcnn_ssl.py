@@ -17,7 +17,8 @@ from collections import defaultdict
 from visual_utils import visualize_utils as V
 # from visualize_utils import open3d_vis_utils as V
 from pcdet.utils.stats_utils import get_max_iou
-
+# from eval_utils import eval_utils as E
+from pathlib import Path
 
 class PVRCNN_SSL(Detector3DTemplate):
     def __init__(self, model_cfg, num_class, dataset):
@@ -44,6 +45,8 @@ class PVRCNN_SSL(Detector3DTemplate):
         self.no_nms = model_cfg.NO_NMS
         self.supervise_mode = model_cfg.SUPERVISE_MODE
         self.min_overlaps = np.array([0.7, 0.5, 0.5])        
+        self.class_names = ['Car','Pedestrian','Cyclist']
+        self.PL_txt_output_dir = Path('/mnt/data/adat01/adv_OpenPCDet/output/kitti_models/pv_rcnn_ssl_60/PL_Viz_format/final_result/data')
         # try:
         #     self.fixed_batch_dict = torch.load("batch_dict.pth")
         # except:
@@ -62,6 +65,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         vals_to_store = ['iou_roi_pl', 'iou_roi_gt', 'pred_scores', 'teacher_pred_scores',
                          'weights', 'roi_scores', 'pcv_scores', 'num_points_in_roi', 'class_labels', 'iteration']
         self.val_dict = {val: [] for val in vals_to_store}
+        self.dataset = dataset
 
     @staticmethod
     def _clone_gt_boxes_and_feats(batch_dict):
@@ -236,7 +240,24 @@ class PVRCNN_SSL(Detector3DTemplate):
             ulb_pred_labels = torch.cat([pl['pred_labels'] for pl in pls_teacher_wa]).int().detach() 
             pl_cls_count_pre_filter = torch.bincount(ulb_pred_labels, minlength=4)[1:] 
             (pl_boxes, pl_conf_scores, pl_sem_scores, pl_sem_logits,
-             pl_rect_scores, masks, pl_weights) = self._filter_pls(pls_teacher_wa, batch_dict_ema, ulb_inds) # thresholding
+             pl_rect_scores, masks, pl_weights , pl_labels) = self._filter_pls(pls_teacher_wa, batch_dict_ema, ulb_inds) # thresholding
+            # E.eval_one_epoch()
+            pls_teacher_filtered_dict = []
+            keys = ['pred_boxes','pred_scores','pred_sem_scores','pred_sem_logits','pred_labels']
+            for i in range(len(pl_boxes)):
+                print("appending", i)
+                pred_dict = dict.fromkeys(keys)
+                pred_dict['pred_boxes'] = pl_boxes[i]
+                pred_dict['pred_scores'] = pl_conf_scores[i]
+                pred_dict['pred_sem_scores'] = pl_sem_scores[i]
+                pred_dict['pred_sem_logits'] = pl_sem_logits[i]
+                pred_dict['pred_labels'] = pl_labels[i]
+                pls_teacher_filtered_dict.append(pred_dict)
+
+            batch_dict['frame_id'] = batch_dict['frame_id'][ulb_inds]
+            annos = self.dataset.generate_PL_prediction_dicts(batch_dict, pls_teacher_filtered_dict, self.class_names, self.PL_txt_output_dir)  #PLs written as texts
+            # Check PL_output_Dir for PL txts
+
             pl_weights = [scores.new_ones(scores.shape[0], 1) for scores in pl_conf_scores]  # No weights for now
 
             if self.thresh_alg is not None:
@@ -466,7 +487,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                     sample_gts_labels = valid_gt_boxes[:, -1].long()
                     sample_pl_labels = valid_pl_boxes[:, -1].long()
                     matched_threshold = torch.tensor(self.min_overlaps, dtype=torch.float, device=sample_pl_labels.device)[sample_pl_labels]
-                    sample_roi_iou_wrt_gt, assigned_label, gt_to_roi_max_iou = get_max_iou(valid_pl_boxes[:, 0:7], valid_gt_boxes[:, 0:7],
+                    sample_roi_iou_wrt_gt, assigned_label, gt_to_roi_max_iou, gt_classes, gt_inds_over_thresh = get_max_iou(valid_pl_boxes[:, 0:7], valid_gt_boxes[:, 0:7],
                                                                                             sample_gts_labels, matched_threshold=matched_threshold)
                     print("Overlaps calculated")
                 
@@ -481,8 +502,9 @@ class PVRCNN_SSL(Detector3DTemplate):
 
                 self.val_dict['iou_values'].append(sample_roi_iou_wrt_gt.cpu())
                 self.val_dict['iou_assigned_label'].append(assigned_label.cpu())
+                self.val_dict['gt_classes'].append(gt_classes.cpu())
+                self.val_dict['gt_inds_over_thresh'].append(gt_inds_over_thresh.cpu())
                 # self.val_dict['gt_labels'].append(torch.bincount(sample_gts_labels.cpu(), minlength=3))
-                
 
                 # cur_pred_score  = cur_pred_score_list[i][valid_rois_mask]
                 # self.val_dict['obj_scores'].append(cur_pred_score) # 8(100)
@@ -684,6 +706,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         pl_sem_logits = []
         pl_rect_scores = []
         pl_weights = []
+        pl_labels = []
         masks = []
 
         def _fill_with_zeros():
@@ -693,6 +716,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             pl_sem_logits.append(labels.new_zeros((1, 3)).float())
             pl_rect_scores.append(labels.new_zeros((1, 3)).float())
             pl_weights.append(labels.new_ones((1,)))
+            pl_labels.append(labels.new_zeros((1,)).float())
             masks.append(labels.new_ones((1,), dtype=torch.bool))
 
         for ind in ulb_inds:
@@ -731,9 +755,10 @@ class PVRCNN_SSL(Detector3DTemplate):
                 pl_sem_logits.append(sem_logits)
                 pl_rect_scores.append(rect_scores)
                 pl_weights.append(weights)
+                pl_labels.append(labels)
                 masks.append(mask)
 
-        return pl_boxes, pl_scores, pl_sem_scores, pl_sem_logits, pl_rect_scores, masks, pl_weights
+        return pl_boxes, pl_scores, pl_sem_scores, pl_sem_logits, pl_rect_scores, masks, pl_weights,pl_labels
 
     @staticmethod
     def _fill_with_pls(batch_dict, pseudo_boxes, masks, ulb_inds, lb_inds, key=None):
