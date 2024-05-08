@@ -381,7 +381,7 @@ class KittiDatasetSSL(DatasetTemplate):
                 'occluded': np.zeros(num_samples), 'alpha': np.zeros(num_samples),
                 'bbox': np.zeros([num_samples, 4]), 'dimensions': np.zeros([num_samples, 3]),
                 'location': np.zeros([num_samples, 3]), 'rotation_y': np.zeros(num_samples),
-                'score': np.zeros(num_samples), 'boxes_lidar': np.zeros([num_samples, 7])
+                'score': np.zeros(num_samples), 'boxes_lidar': np.zeros([num_samples, 7]),'sem_score':np.zeros(num_samples)
             }
             return ret_dict
 
@@ -389,6 +389,8 @@ class KittiDatasetSSL(DatasetTemplate):
             pred_scores = box_dict['pred_scores'].cpu().numpy()
             pred_boxes = box_dict['pred_boxes'].cpu().numpy()
             pred_labels = box_dict['pred_labels'].cpu().numpy()
+            # pred_conf_scores = box_dict['pred_labels'].cpu().numpy()
+            pred_sem_score = box_dict['pred_sem_scores'].cpu().numpy()
             pred_dict = get_template_prediction(pred_scores.shape[0])
             if pred_scores.shape[0] == 0:
                 return pred_dict
@@ -411,10 +413,12 @@ class KittiDatasetSSL(DatasetTemplate):
             pred_dict['rotation_y'] = pred_boxes_camera[:, 6]
             pred_dict['score'] = pred_scores
             pred_dict['boxes_lidar'] = pred_boxes
-
+            pred_dict['sem_score'] = pred_sem_score
             return pred_dict
 
         annos = []
+        PL_uids = []
+
         for index, box_dict in enumerate(pred_dicts):
             frame_id = batch_dict['frame_id'] #always run with bsz 1
             single_pred_dict = generate_single_sample_dict(index, box_dict)
@@ -435,8 +439,11 @@ class KittiDatasetSSL(DatasetTemplate):
                                  dims[idx][1], dims[idx][2], dims[idx][0], loc[idx][0],
                                  loc[idx][1], loc[idx][2], single_pred_dict['rotation_y'][idx],
                                  single_pred_dict['score'][idx]), file=f)
+        
+            for i in range(len(annos[0]['name'])):
+                PL_uids.append(int(annos[0]['frame_id']) * 1000 + i) # Append PL Uids
 
-        return annos
+        return annos, PL_uids
     def evaluation(self, det_annos, class_names, **kwargs):
         if 'annos' not in self.kitti_infos[0].keys():
             return None, {}

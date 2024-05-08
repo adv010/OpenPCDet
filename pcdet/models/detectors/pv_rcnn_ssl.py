@@ -62,8 +62,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             if metrics_configs.ENABLE:
                 metrics_registry.register(tag=metrics_configs["NAME"], dataset=self.dataset, **metrics_configs)
 
-        vals_to_store = ['iou_roi_pl', 'iou_roi_gt', 'pred_scores', 'teacher_pred_scores',
-                         'weights', 'roi_scores', 'pcv_scores', 'num_points_in_roi', 'class_labels', 'iteration']
+        vals_to_store = ['iou_roi_pl', 'iou_roi_gt', 'pred_scores', 'roi_scores', 'class_labels', 'iteration']
         self.val_dict = {val: [] for val in vals_to_store}
         self.dataset = dataset
 
@@ -255,7 +254,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                 pls_teacher_filtered_dict.append(pred_dict)
 
             batch_dict['frame_id'] = batch_dict['frame_id'][ulb_inds]
-            annos = self.dataset.generate_PL_prediction_dicts(batch_dict, pls_teacher_filtered_dict, self.class_names, self.PL_txt_output_dir)  #PLs written as texts
+            _ , PL_uids = self.dataset.generate_PL_prediction_dicts(batch_dict, pls_teacher_filtered_dict, self.class_names, self.PL_txt_output_dir)  #PLs written as texts
             # Check PL_output_Dir for PL txts
 
             pl_weights = [scores.new_ones(scores.shape[0], 1) for scores in pl_conf_scores]  # No weights for now
@@ -274,7 +273,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         if self.model_cfg.get('STORE_SCORES_IN_PKL', False):
             batch_dict_new['pl_conf_scores'] = pl_conf_scores
             batch_dict_new['pl_sem_scores'] = pl_sem_scores
-
+            batch_dict_new['pl_uids'] = np.array(PL_uids)
 
             if not self.pkl_init or batch_dict_new['cur_epoch'] == self.cur_epoch + 1 :
                 use_new_pkl = True
@@ -382,7 +381,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             pickle.dump(self.val_dict, open(file_path, 'wb'))
             self.val_dict = defaultdict(list) 
             vals_to_store = ['iou_roi_pl', 'iou_roi_gt', 'obj_scores','gt_boxes','assigned_gt_inds','assigned_iou_class','iou_values','pl_conf_scores',
-                    'roi_scores','num_points_in_roi', 'pl_sem_scores','class_labels', 'iteration', 'shared_features','frame_id', 'shared_features_gt']
+                    'roi_scores','num_points_in_roi', 'pl_sem_scores', 'iteration', 'shared_features','frame_id', 'shared_features_gt', 'pl_uids']
             for val in vals_to_store:
                 self.val_dict[val] = []    
         
@@ -406,6 +405,8 @@ class PVRCNN_SSL(Detector3DTemplate):
         # shared_features = shared_features
         shared_features_gt = batch_dict['shared_features_gt'].reshape(batch_size,-1,embed_size).cpu() #16,28,256
         shared_features_gt = shared_features_gt
+
+        pl_uids = batch_dict['pl_uids']
 
         # cur_pred_score_tensor = torch.sigmoid(batch_dict['batch_cls_preds']).squeeze()
         # cur_pred_score_list = [pred_score.clone().detach() for pred_score in cur_pred_score_tensor]
@@ -457,6 +458,7 @@ class PVRCNN_SSL(Detector3DTemplate):
 
                 self.val_dict['pl_boxes'].append(valid_pl_boxes.cpu())  # 27(8)
                 self.val_dict['ori_gt_boxes'].append(valid_gt_boxes.cpu()) #27(8)
+                self.val_dict['pl_uids'].append(pl_uids)
 
                 num_gts = valid_gt_boxes_mask.sum()
                 # num_preds = valid_rois_mask.sum()
@@ -504,6 +506,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                 self.val_dict['iou_assigned_label'].append(assigned_label.cpu())
                 self.val_dict['gt_classes'].append(gt_classes.cpu())
                 self.val_dict['gt_inds_over_thresh'].append(gt_inds_over_thresh.cpu())
+                self.val_dict['pl_labels'].append(sample_pl_labels.cpu())
                 # self.val_dict['gt_labels'].append(torch.bincount(sample_gts_labels.cpu(), minlength=3))
 
                 # cur_pred_score  = cur_pred_score_list[i][valid_rois_mask]
