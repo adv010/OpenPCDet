@@ -48,6 +48,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         self.class_names = ['Car','Pedestrian','Cyclist']
         self.ckpt_initialized = False
         self.ckpt_save_dir = None
+        self.frame_ids_dumped = []
         # try:
         #     self.fixed_batch_dict = torch.load("batch_dict.pth")
         # except:
@@ -286,8 +287,13 @@ class PVRCNN_SSL(Detector3DTemplate):
                 self.pkl_init = True
             else:
                 use_new_pkl = False
-            self.cur_epoch = self.dump_statistics(batch_dict_new, ulb_inds, lbl_inds, copy_ori_gt, use_new_pkl) # Dump stats for tsne pkl
-
+            self.cur_epoch, finalep_val_dict = self.dump_statistics(batch_dict_new, ulb_inds, lbl_inds, copy_ori_gt, use_new_pkl) # Dump stats for tsne pkl
+           
+            if batch_dict_new['total_epochs'] == batch_dict_new['cur_epoch'] + 1 :
+                epoch_data_of = batch_dict_new['total_epochs']
+                output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
+                file_path = os.path.join(output_dir, f'Tsne_ulb_80ep_secndstg_{epoch_data_of}.pkl')
+                pickle.dump(finalep_val_dict, open(file_path, 'wb'))
         
         # TODO(farzad): Check if commenting the following line and apply_augmentation is equal to a fully supervised setting
         self._fill_with_pls(batch_dict, pl_boxes, masks, ulb_inds, lbl_inds)
@@ -380,7 +386,7 @@ class PVRCNN_SSL(Detector3DTemplate):
 
     def dump_statistics(self, batch_dict, unlabeled_inds, labeled_inds, ori_gt_boxes, use_new_pkl = False):
         ckpt = 80
-        epoch_data_of = batch_dict['cur_epoch'] - 1
+        epoch_data_of = batch_dict['cur_epoch']
         if use_new_pkl: #dumping statistics pkl
             output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
             file_path = os.path.join(output_dir, f'Tsne_ulb_{ckpt}ep_secndstg_{epoch_data_of}.pkl')
@@ -440,6 +446,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             else:
                 # if batch_dict['frame_id'][i] not in self.frame_ids_dumped:
                 self.val_dict['frame_id'].append(batch_dict['frame_id'][i])                
+                self.frame_ids_dumped.append(batch_dict['frame_id'][i])
                 # self.total_frames_dumped = len(self.frame_ids_dumped)
                 # self.val_dict['instance_idx'].append(batch_dict['instance_idx'][i].cpu())
                 self.val_dict['labeled_mask'].append(labeled_mask[i])
@@ -532,7 +539,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                 # self.val_dict['pl_sem_logits'].append(batch_dict['pl_sem_logits'])
 
         cur_epoch = batch_dict['cur_epoch']
-        return cur_epoch
+        return cur_epoch, self.val_dict
 
 
     def get_max_iou(self, anchors, gt_boxes, gt_classes, matched_threshold=0.6):

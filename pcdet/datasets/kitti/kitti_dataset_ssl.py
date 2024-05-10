@@ -1,7 +1,7 @@
 import copy
 import pickle
 from collections import defaultdict
-
+import os
 import numpy as np
 from skimage import io
 
@@ -385,12 +385,11 @@ class KittiDatasetSSL(DatasetTemplate):
             }
             return ret_dict
 
-        def generate_single_sample_dict(batch_index, box_dict):
+        def generate_single_sample_dict(batch_index, box_dict): #NOTE: Uses bsz 1
             masks = box_dict['masks'].cpu().numpy()
             pred_scores = box_dict['pred_scores'][masks].cpu().numpy()
             pred_boxes = box_dict['pred_boxes'][masks].cpu().numpy()
             pred_labels = box_dict['pred_labels'][masks].cpu().numpy()
-            # pred_conf_scores = box_dict['pred_labels'].cpu().numpy()
             pred_sem_score = box_dict['pred_sem_scores'][masks].cpu().numpy()
             # masks = box_dict['masks'].cpu().numpy()
             pred_dict = get_template_prediction(pred_scores.shape[0])
@@ -426,9 +425,11 @@ class KittiDatasetSSL(DatasetTemplate):
             single_pred_dict = generate_single_sample_dict(index, box_dict)
             single_pred_dict['frame_id'] = frame_id
             annos.append(single_pred_dict)
-
             if output_path is not None:
-                cur_det_file = output_path / ('%s.txt' % frame_id)
+                final_result_dir = output_path / 'final_result' / 'data'
+                if not os.path.exists(final_result_dir):
+                    os.makedirs(final_result_dir)                
+                cur_det_file = final_result_dir / ('%s.txt' % frame_id)
                 with open(cur_det_file, 'w') as f:
                     bbox = single_pred_dict['bbox']
                     loc = single_pred_dict['location']
@@ -443,7 +444,7 @@ class KittiDatasetSSL(DatasetTemplate):
                                  single_pred_dict['score'][idx]), file=f)
         
             for i in range(len(annos[0]['name'])):
-                PL_uids.append(int(annos[0]['frame_id']) * 1000 + i) # Append PL Uids
+                PL_uids.append(int(annos[0]['frame_id']) * 100 + i) # Append PL Uids
 
         return annos, PL_uids
     def evaluation(self, det_annos, class_names, **kwargs):
