@@ -46,7 +46,8 @@ class PVRCNN_SSL(Detector3DTemplate):
         self.supervise_mode = model_cfg.SUPERVISE_MODE
         self.min_overlaps = np.array([0.7, 0.5, 0.5])        
         self.class_names = ['Car','Pedestrian','Cyclist']
-        self.PL_txt_output_dir = Path('/mnt/data/adat01/adv_OpenPCDet/output/kitti_models/pv_rcnn_ssl_60/PL_Viz_format/final_result/data')
+        self.ckpt_initialized = False
+        self.ckpt_save_dir = None
         # try:
         #     self.fixed_batch_dict = torch.load("batch_dict.pth")
         # except:
@@ -118,6 +119,9 @@ class PVRCNN_SSL(Detector3DTemplate):
         return bank_inputs
 
     def forward(self, batch_dict):
+        if not self.ckpt_initialized:  # Check if ckpt_save_dir is not already set
+            self.ckpt_save_dir = batch_dict['ckpt_save_dir'].parent
+            self.ckpt_initialized = True 
         if self.training:
             return self._forward_training(batch_dict)
         for cur_module in self.pv_rcnn.module_list:
@@ -223,7 +227,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                 batch_dict_out[k] = copy.deepcopy(v)
         return batch_dict_out
 
-    def _forward_training(self, batch_dict):
+    def _forward_training(self, batch_dict, dir=None):
         # batch_dict = self._get_fixed_batch_dict()
         lbl_inds, ulb_inds = self._prep_batch_dict(batch_dict)
         copy_ori_gt = batch_dict['gt_boxes_ema'].clone()
@@ -242,19 +246,21 @@ class PVRCNN_SSL(Detector3DTemplate):
              pl_rect_scores, masks, pl_weights , pl_labels) = self._filter_pls(pls_teacher_wa, batch_dict_ema, ulb_inds) # thresholding
             # E.eval_one_epoch()
             pls_teacher_filtered_dict = []
-            keys = ['pred_boxes','pred_scores','pred_sem_scores','pred_sem_logits','pred_labels']
+            keys = ['pred_boxes','pred_scores','pred_sem_scores','pred_sem_logits','pred_labels','masks']
             for i in range(len(pl_boxes)):
-                print("appending", i)
                 pred_dict = dict.fromkeys(keys)
                 pred_dict['pred_boxes'] = pl_boxes[i]
                 pred_dict['pred_scores'] = pl_conf_scores[i]
                 pred_dict['pred_sem_scores'] = pl_sem_scores[i]
                 pred_dict['pred_sem_logits'] = pl_sem_logits[i]
                 pred_dict['pred_labels'] = pl_labels[i]
+                pred_dict['masks'] = masks[i]
                 pls_teacher_filtered_dict.append(pred_dict)
 
+            assert np.array_equal(batch_dict['frame_id'],batch_dict_ema['frame_id'])
             batch_dict['frame_id'] = batch_dict['frame_id'][ulb_inds]
-            _ , PL_uids = self.dataset.generate_PL_prediction_dicts(batch_dict, pls_teacher_filtered_dict, self.class_names, self.PL_txt_output_dir)  #PLs written as texts
+            # cur_det_file = self.ckpt_save_dir / ('%s.txt' % frame_id)
+            _ , PL_uids = self.dataset.generate_PL_prediction_dicts(batch_dict, pls_teacher_filtered_dict, self.class_names, self.ckpt_save_dir)  #PLs written as texts
             # Check PL_output_Dir for PL txts
 
             pl_weights = [scores.new_ones(scores.shape[0], 1) for scores in pl_conf_scores]  # No weights for now
@@ -372,7 +378,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         }
         return ret_dict, tb_dict_, disp_dict
 
-    def dump_statistics(self, batch_dict, unlabeled_inds, labeled_inds, ori_gt_boxes,use_new_pkl = False):
+    def dump_statistics(self, batch_dict, unlabeled_inds, labeled_inds, ori_gt_boxes, use_new_pkl = False):
         ckpt = 80
         epoch_data_of = batch_dict['cur_epoch'] - 1
         if use_new_pkl: #dumping statistics pkl

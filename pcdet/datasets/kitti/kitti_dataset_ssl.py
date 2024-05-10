@@ -367,8 +367,8 @@ class KittiDatasetSSL(DatasetTemplate):
                 frame_id:
             pred_dicts: list of pred_dicts
                 pred_boxes: (N, 7), Tensor
-                pred_scores: (N), Tensor
-                pred_labels: (N), Tensor
+                predpred_labels_scores: (N), Tensor
+                : (N), Tensor
             class_names:
             output_path:
 
@@ -386,11 +386,13 @@ class KittiDatasetSSL(DatasetTemplate):
             return ret_dict
 
         def generate_single_sample_dict(batch_index, box_dict):
-            pred_scores = box_dict['pred_scores'].cpu().numpy()
-            pred_boxes = box_dict['pred_boxes'].cpu().numpy()
-            pred_labels = box_dict['pred_labels'].cpu().numpy()
+            masks = box_dict['masks'].cpu().numpy()
+            pred_scores = box_dict['pred_scores'][masks].cpu().numpy()
+            pred_boxes = box_dict['pred_boxes'][masks].cpu().numpy()
+            pred_labels = box_dict['pred_labels'][masks].cpu().numpy()
             # pred_conf_scores = box_dict['pred_labels'].cpu().numpy()
-            pred_sem_score = box_dict['pred_sem_scores'].cpu().numpy()
+            pred_sem_score = box_dict['pred_sem_scores'][masks].cpu().numpy()
+            # masks = box_dict['masks'].cpu().numpy()
             pred_dict = get_template_prediction(pred_scores.shape[0])
             if pred_scores.shape[0] == 0:
                 return pred_dict
