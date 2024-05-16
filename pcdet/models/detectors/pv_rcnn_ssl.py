@@ -44,11 +44,12 @@ class PVRCNN_SSL(Detector3DTemplate):
         self.unlabeled_weight = model_cfg.UNLABELED_WEIGHT
         self.no_nms = model_cfg.NO_NMS
         self.supervise_mode = model_cfg.SUPERVISE_MODE
-        self.min_overlaps = np.array([0.7, 0.5, 0.5])        
+        self.min_overlaps = np.array([0.7, 0.5, 0.5])
+        self.min_overlaps2 = np.array([0.65, 0.45, 0.4])         
         self.class_names = ['Car','Pedestrian','Cyclist']
         self.ckpt_initialized = False
         self.ckpt_save_dir = None
-        self.frame_ids_dumped = []
+        self.frame_id_frequency = defaultdict(int)
         # try:
         #     self.fixed_batch_dict = torch.load("batch_dict.pth")
         # except:
@@ -260,8 +261,9 @@ class PVRCNN_SSL(Detector3DTemplate):
 
             assert np.array_equal(batch_dict['frame_id'],batch_dict_ema['frame_id'])
             batch_dict['frame_id'] = batch_dict['frame_id'][ulb_inds]
+            self.frame_id_frequency[int(batch_dict['frame_id'])] += 1
             # cur_det_file = self.ckpt_save_dir / ('%s.txt' % frame_id)
-            _ , PL_uids = self.dataset.generate_PL_prediction_dicts(batch_dict, pls_teacher_filtered_dict, self.class_names, self.ckpt_save_dir)  #PLs written as texts
+            _ , PL_uids = self.dataset.generate_PL_prediction_dicts(batch_dict, pls_teacher_filtered_dict, self.class_names, self.ckpt_save_dir, self.frame_id_frequency[int(batch_dict['frame_id'])])  #PLs written as texts
             # Check PL_output_Dir for PL txts
 
             pl_weights = [scores.new_ones(scores.shape[0], 1) for scores in pl_conf_scores]  # No weights for now
@@ -393,7 +395,8 @@ class PVRCNN_SSL(Detector3DTemplate):
             pickle.dump(self.val_dict, open(file_path, 'wb'))
             self.val_dict = defaultdict(list) 
             vals_to_store = ['iou_roi_pl', 'iou_roi_gt', 'obj_scores','gt_boxes','assigned_gt_inds','assigned_iou_class','iou_values','pl_conf_scores',
-                    'roi_scores','num_points_in_roi', 'pl_sem_scores', 'iteration', 'shared_features','frame_id', 'shared_features_gt', 'pl_uids']
+                    'roi_scores','num_points_in_roi', 'pl_sem_scores', 'iteration', 'shared_features','frame_id', 'shared_features_gt', 'pl_uids',
+                    'iou_values2','iou_assigned_label2','gt_classes2','gt_inds_over_thresh2']
             for val in vals_to_store:
                 self.val_dict[val] = []    
         
@@ -446,7 +449,6 @@ class PVRCNN_SSL(Detector3DTemplate):
             else:
                 # if batch_dict['frame_id'][i] not in self.frame_ids_dumped:
                 self.val_dict['frame_id'].append(batch_dict['frame_id'][i])                
-                self.frame_ids_dumped.append(batch_dict['frame_id'][i])
                 # self.total_frames_dumped = len(self.frame_ids_dumped)
                 # self.val_dict['instance_idx'].append(batch_dict['instance_idx'][i].cpu())
                 self.val_dict['labeled_mask'].append(labeled_mask[i])
@@ -502,9 +504,12 @@ class PVRCNN_SSL(Detector3DTemplate):
                     sample_gts_labels = valid_gt_boxes[:, -1].long()
                     sample_pl_labels = valid_pl_boxes[:, -1].long()
                     matched_threshold = torch.tensor(self.min_overlaps, dtype=torch.float, device=sample_pl_labels.device)[sample_pl_labels]
+                    matched_threshold2 = torch.tensor(self.min_overlaps2, dtype=torch.float, device=sample_pl_labels.device)[sample_pl_labels]
+
                     sample_roi_iou_wrt_gt, assigned_label, gt_to_roi_max_iou, gt_classes, gt_inds_over_thresh = get_max_iou(valid_pl_boxes[:, 0:7], valid_gt_boxes[:, 0:7],
                                                                                             sample_gts_labels, matched_threshold=matched_threshold)
-                    print("Overlaps calculated")
+                    sample_roi_iou_wrt_gt2, assigned_label2, gt_to_roi_max_iou2, gt_classes2, gt_inds_over_thresh2 = get_max_iou(valid_pl_boxes[:, 0:7], valid_gt_boxes[:, 0:7],
+                                                                                            sample_gts_labels, matched_threshold=matched_threshold2)
                 
                 elif num_pls > 0 and num_gts == 0:
                     sample_roi_labels = valid_pl_boxes[:, -1].long()
@@ -520,7 +525,12 @@ class PVRCNN_SSL(Detector3DTemplate):
                 self.val_dict['gt_classes'].append(gt_classes.cpu())
                 self.val_dict['gt_inds_over_thresh'].append(gt_inds_over_thresh.cpu())
                 self.val_dict['pl_labels'].append(sample_pl_labels.cpu())
-                # self.val_dict['gt_labels'].append(torch.bincount(sample_gts_labels.cpu(), minlength=3))
+
+                self.val_dict['iou_values2'].append(sample_roi_iou_wrt_gt2.cpu())
+                self.val_dict['iou_assigned_label2'].append(assigned_label2.cpu())
+                self.val_dict['gt_classes2'].append(gt_classes2.cpu())
+                self.val_dict['gt_inds_over_thresh2'].append(gt_inds_over_thresh2.cpu())
+              # self.val_dict['gt_labels'].append(torch.bincount(sample_gts_labels.cpu(), minlength=3))
 
                 # cur_pred_score  = cur_pred_score_list[i][valid_rois_mask]
                 # self.val_dict['obj_scores'].append(cur_pred_score) # 8(100)

@@ -360,7 +360,7 @@ class KittiDatasetSSL(DatasetTemplate):
         return annos
 
     @staticmethod
-    def generate_PL_prediction_dicts(batch_dict, pred_dicts, class_names, output_path=None): #NOTE: Run with bsz 1
+    def generate_PL_prediction_dicts(batch_dict, pred_dicts, class_names, output_path=None, frame_freq=1): #NOTE: Run with bsz 1
         """
         Args:
             batch_dict:
@@ -430,21 +430,33 @@ class KittiDatasetSSL(DatasetTemplate):
                 if not os.path.exists(final_result_dir):
                     os.makedirs(final_result_dir)                
                 cur_det_file = final_result_dir / ('%s.txt' % frame_id)
-                with open(cur_det_file, 'w') as f:
+                if os.path.exists(cur_det_file): #append to file
+                    mode = 'a'
+                    with open(cur_det_file, 'r') as f:
+                        lines = f.readlines()
+                        if lines:
+                            last_PL_uid = int(lines[-1].strip().split()[-2])  # Extracting the PL-UID from the last line
+                else:
+                    mode = 'w' #create new file
+                    last_PL_uid = -1
+                with open(cur_det_file, mode) as f:
                     bbox = single_pred_dict['bbox']
                     loc = single_pred_dict['location']
                     dims = single_pred_dict['dimensions']  # lhw -> hwl
 
                     for idx in range(len(bbox)):
-                        print('%s -1 -1 %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f'
+                        if last_PL_uid == -1:
+                            PL_uid = int(single_pred_dict['frame_id']) * 100 + idx
+                        else:
+                            PL_uid = last_PL_uid +  1
+                        print('%s -1 -1 %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %d %d'
                               % (single_pred_dict['name'][idx], single_pred_dict['alpha'][idx],
                                  bbox[idx][0], bbox[idx][1], bbox[idx][2], bbox[idx][3],
                                  dims[idx][1], dims[idx][2], dims[idx][0], loc[idx][0],
                                  loc[idx][1], loc[idx][2], single_pred_dict['rotation_y'][idx],
-                                 single_pred_dict['score'][idx]), file=f)
-        
-            for i in range(len(annos[0]['name'])):
-                PL_uids.append(int(annos[0]['frame_id']) * 100 + i) # Append PL Uids
+                                 single_pred_dict['score'][idx], PL_uid, frame_freq), file=f)
+                        last_PL_uid = PL_uid
+                        PL_uids.append(PL_uid)
 
         return annos, PL_uids
     def evaluation(self, det_annos, class_names, **kwargs):
