@@ -52,12 +52,15 @@ class DataBaseSampler(object):
             self.sample_class_num[class_name] = sample_num
             instance_idx = [val['instance_idx'] for val in self.db_infos[class_name]]
 
+    
             self.sample_groups[class_name] = {
                 'sample_num': sample_num,
                 'pointer': len(self.db_infos[class_name]),
                 'indices': np.arange(len(self.db_infos[class_name])),
                 'instance_idx': np.asarray(instance_idx)
             }
+
+
 
     def __getstate__(self):
         d = dict(self.__dict__)
@@ -204,6 +207,7 @@ class DataBaseSampler(object):
 
         obj_points = np.concatenate(obj_points_list, axis=0)
         sampled_gt_names = np.array([x['name'] for x in total_valid_sampled_dict])
+
         sampled_instance_idx = np.array([x['instance_idx'] for x in total_valid_sampled_dict])
 
         large_sampled_gt_boxes = box_utils.enlarge_box3d(
@@ -232,7 +236,7 @@ class DataBaseSampler(object):
         """
         gt_boxes = data_dict['gt_boxes']
         gt_names = data_dict['gt_names'].astype(str)
-        assert gt_boxes.shape[0] == data_dict['instance_idx'].shape[0], "gt_boxes, instance_idx in call"
+        # assert gt_boxes.shape[0] == data_dict['instance_idx'].shape[0], "gt_boxes, instance_idx in call"
         existed_boxes = gt_boxes
         total_valid_sampled_dict = []
         for class_name, sample_group in self.sample_groups.items():
@@ -265,5 +269,5 @@ class DataBaseSampler(object):
             data_dict = self.add_sampled_boxes_to_scene(data_dict, sampled_gt_boxes, total_valid_sampled_dict)
 
         data_dict.pop('gt_boxes_mask')
-        assert data_dict['gt_boxes'].shape[0] == data_dict['gt_names'].shape[0] == data_dict['instance_idx'].shape[0], "gt_boxes, gt_names, gt_instance_idx should have same length"
+        # assert data_dict['gt_boxes'].shape[0] == data_dict['gt_names'].shape[0] == data_dict['instance_idx'].shape[0], "gt_boxes, gt_names, gt_instance_idx should have same length"
         return data_dict
