@@ -135,6 +135,8 @@ class DatasetTemplate(torch_data.Dataset):
             selected = common_utils.keep_arrays_by_name(data_dict['gt_names'], self.class_names)
             data_dict['gt_boxes'] = data_dict['gt_boxes'][selected]
             data_dict['gt_names'] = data_dict['gt_names'][selected]
+            data_dict['instance_idx'] = data_dict['instance_idx'][selected]
+
             gt_classes = np.array([self.class_names.index(n) + 1 for n in data_dict['gt_names']], dtype=np.int32)
             gt_boxes = np.concatenate((data_dict['gt_boxes'], gt_classes.reshape(-1, 1).astype(np.float32)), axis=1)
             data_dict['gt_boxes'] = gt_boxes
@@ -219,6 +221,12 @@ class DatasetTemplate(torch_data.Dataset):
 
                         images.append(image_pad)
                     ret[key] = np.stack(images, axis=0)
+                elif key in ['instance_idx', 'instance_idx_ema', 'instance_idx_pre_gt_sample']:
+                    max_ind = max([len(x) for x in val])
+                    batch_ind = np.zeros((batch_size, max_ind), dtype=np.int32)
+                    for k in range(batch_size):
+                        batch_ind[k, :val[k].__len__()] = val[k]
+                    ret[key] = batch_ind.astype(np.int32)
                 else:
                     ret[key] = np.stack(val, axis=0)
             except:

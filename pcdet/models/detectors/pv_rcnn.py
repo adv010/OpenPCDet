@@ -35,17 +35,15 @@ class PVRCNN(Detector3DTemplate):
             labeled_mask = batch_dict['labeled_mask'].view(-1)
             labeled_inds = torch.nonzero(labeled_mask).squeeze(1).long()
             batch_dict['labeled_inds'] = labeled_inds
-            if self.model_cfg['ROI_HEAD'].get('ENABLE_INSTANCE_SUP_LOSS', False):
-                batch_dict_aug = self.apply_augmentation(batch_dict, batch_dict, labeled_inds, key='gt_boxes')
-                with torch.no_grad():
-                    for cur_module in self.module_list:
-                        batch_dict_aug = cur_module(batch_dict_aug)
-                lbl_inst_cont_loss, tb_dict = self._get_instance_contrastive_loss(tb_dict,batch_dict,batch_dict_aug,labeled_inds)
+            batch_dict_aug = self.apply_augmentation(batch_dict, batch_dict, labeled_inds, key='gt_boxes')
 
-        
-            loss, tb_dict, disp_dict = self.get_training_loss(batch_dict)
-            if self.model_cfg['ROI_HEAD'].get('ENABLE_INSTANCE_SUP_LOSS', False) and lbl_inst_cont_loss is not None:
-                loss +=  lbl_inst_cont_loss * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT']
+            if self.model_cfg['ROI_HEAD'].get('ENABLE_INSTANCE_SUP_LOSS', False):
+                    batch_dict_aug = cur_module.forward(batch_dict_aug,disable_gt_roi_when_pseudo_labeling=True,inst_loss=True)
+
+            if self.model_cfg['ROI_HEAD'].get('ENABLE_INSTANCE_SUP_LOSS', False):
+                loss, tb_dict, disp_dict = self.get_training_loss(batch_dict, batch_dict_aug, labeled_inds)
+            else:
+                loss, tb_dict, disp_dict = self.get_training_loss(batch_dict)
 
             ret_dict = {
                     'loss': loss
@@ -58,12 +56,18 @@ class PVRCNN(Detector3DTemplate):
             pred_dicts, recall_dicts = self.post_processing(batch_dict)
             return pred_dicts, recall_dicts, {}
 
-    def get_training_loss(self,batch_dict):
+    def get_training_loss(self,batch_dict, batch_dict_aug = None, labeled_inds = None):
         disp_dict = {}
+
         loss_rpn, tb_dict = self.dense_head.get_loss()
         loss_point, tb_dict = self.point_head.get_loss(tb_dict)
         loss_rcnn, tb_dict = self.roi_head.get_loss(tb_dict)
+
         loss = loss_rpn + loss_point + loss_rcnn
+        if self.model_cfg['ROI_HEAD'].get('ENABLE_INSTANCE_SUP_LOSS', False):
+                lbl_inst_cont_loss, tb_dict = self._get_instance_contrastive_loss(tb_dict, batch_dict, batch_dict_aug, labeled_inds)
+                loss +=  lbl_inst_cont_loss * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT']
+
         return loss, tb_dict, disp_dict
 
     def _get_instance_contrastive_loss(self, tb_dict,batch_dict,batch_dict_aug,lbl_inds,temperature=1.0,base_temperature=1.0):
@@ -103,7 +107,7 @@ class PVRCNN(Detector3DTemplate):
         contrast_feature = F.normalize(contrast_feature.view(-1,combined_embed_features.shape[-1])) # normalized features before masking. original code does it earlier : https://github.com/HobbitLong/SupContrast/blob/ae5da977b0abd4bdc1a6fd4ec4ba2c3655a1879f/networks/resnet_big.py#L185C51-L185C51
         anchor_dot_contrast = torch.div(torch.matmul(contrast_feature, contrast_feature.T),temperature)
         logits_max, _ = torch.max(anchor_dot_contrast, dim=1, keepdim=True)
-        logits = anchor_dot_contrast - logits_max.detach()
+        logits = anchor_dot_contrast - logits_max
 
         exp_logits = torch.exp(logits) * logits_mask # compute log_prob
         log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True))
@@ -118,10 +122,10 @@ class PVRCNN(Detector3DTemplate):
         instloss_all = instance_loss.mean()
 
         inst_tb_dict = {
-            'inst_loss_car': instloss_car.unsqueeze(-1),
-            'inst_loss_cyc': instloss_cyc.unsqueeze(-1),
-            'inst_loss_ped': instloss_ped.unsqueeze(-1),
-            'inst_loss_total' : instloss_all.unsqueeze(-1),
+            'inst_loss_car': instloss_car,
+            'inst_loss_cyc': instloss_cyc,
+            'inst_loss_ped': instloss_ped,
+            'inst_loss_total' : instloss_all,
         }
         tb_dict.update(inst_tb_dict)
 
@@ -133,7 +137,7 @@ class PVRCNN(Detector3DTemplate):
 
     def _align_instance_pairs(self, batch_dict, batch_dict_aug, indices):
         
-        embed_size = 256 if not self.model_cfg['ROI_HEAD']['PROJECTOR'] else 256 # if possible, 128
+        embed_size = 256
         shared_ft_sa = batch_dict['projected_features_gt'].view(batch_dict['batch_size'],-1,embed_size)[indices]
         shared_ft_wa = batch_dict_aug['projected_features_gt'].view(batch_dict['batch_size'],-1,embed_size)[indices]
         device = shared_ft_sa.device
@@ -144,11 +148,11 @@ class PVRCNN(Detector3DTemplate):
         shared_ft_sa = shared_ft_sa.view(-1,embed_size)
         shared_ft_wa = shared_ft_wa.view(-1,embed_size)
         
-        prefinal_mask_sa = labels_sa!=0
-        prefinal_mask_wa = labels_wa!=0
+        valid_mask_sa = labels_sa!=0
+        valid_mask_wa = labels_wa!=0
 
-        instance_idx_sa = instance_idx_sa[prefinal_mask_sa]
-        instance_idx_wa = instance_idx_wa[prefinal_mask_wa]
+        instance_idx_sa = instance_idx_sa[valid_mask_sa]
+        instance_idx_wa = instance_idx_wa[valid_mask_wa]
 
         meta_data = {'to_mask':''}
         valid_instances = np.intersect1d(instance_idx_sa.cpu().numpy(),instance_idx_wa.cpu().numpy()) #
@@ -161,11 +165,11 @@ class PVRCNN(Detector3DTemplate):
         instance_idx_sa = instance_idx_sa[intersect_mask_sa]
         instance_idx_wa = instance_idx_wa[intersect_mask_wa]
 
-        labels_sa = (labels_sa[prefinal_mask_sa])[intersect_mask_sa]
-        labels_wa =(labels_wa[prefinal_mask_wa])[intersect_mask_wa]
+        labels_sa = (labels_sa[valid_mask_sa])[intersect_mask_sa]
+        labels_wa =(labels_wa[valid_mask_wa])[intersect_mask_wa]
 
-        shared_ft_sa = (shared_ft_sa[prefinal_mask_sa])[intersect_mask_sa]
-        shared_ft_wa = (shared_ft_wa[prefinal_mask_wa])[intersect_mask_wa]
+        shared_ft_sa = (shared_ft_sa[valid_mask_sa])[intersect_mask_sa]
+        shared_ft_wa = (shared_ft_wa[valid_mask_wa])[intersect_mask_wa]
 
         # remove duplicates
         if len(labels_sa) <= len(labels_wa):
@@ -177,17 +181,15 @@ class PVRCNN(Detector3DTemplate):
             tmp_big = instance_idx_sa
             meta_data['to_mask'] = 'ft'
 
-        '''Edge case - Handle more labeled indices in batch_dict_aug's dataloader batch than batch_dict's dataloader(or vice-versa)'''        
         final_mask = []
         for idx, item in enumerate(tmp_big,0):
             if item in tmp:
                 final_mask.append(idx)
                 tmp[torch.where(tmp==item)[0][0]] = -1
-                
-
         final_mask = torch.tensor(final_mask, device=device)
-
         final_mask = final_mask.long()
+
+        # If misaligned, apply mask
         if meta_data['to_mask'] == 'ft':
             instance_idx_sa = tmp_big[final_mask]   
             labels_sa = labels_sa[final_mask]
@@ -209,7 +211,7 @@ class PVRCNN(Detector3DTemplate):
         shared_ft_sa = shared_ft_sa[sorted_sa]
         shared_ft_wa = shared_ft_wa[sorted_wa]
 
-        return labels_sa,labels_wa,instance_idx_sa,instance_idx_wa,shared_ft_sa, shared_ft_wa
+        return labels_sa, labels_wa, instance_idx_sa, instance_idx_wa, shared_ft_sa, shared_ft_wa
 
 
     def dump_statistics(self, batch_dict, labeled_inds):
