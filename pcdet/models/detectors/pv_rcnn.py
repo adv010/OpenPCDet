@@ -50,8 +50,8 @@ class PVRCNN(Detector3DTemplate):
             ret_dict = {
                     'loss': loss
                 }
-            if self.model_cfg.get('STORE_SCORES_IN_PKL', False):
-                self.dump_statistics(batch_dict, labeled_inds)
+            # if self.model_cfg.get('STORE_SCORES_IN_PKL', False):
+            #     self.dump_statistics(batch_dict, labeled_inds)
 
             return ret_dict, tb_dict, disp_dict
         else:
@@ -134,8 +134,8 @@ class PVRCNN(Detector3DTemplate):
     def _align_instance_pairs(self, batch_dict, batch_dict_aug, indices):
         
         embed_size = 256 if not self.model_cfg['ROI_HEAD']['PROJECTOR'] else 256 # if possible, 128
-        shared_ft_sa = batch_dict['shared_features_gt'].view(batch_dict['batch_size'],-1,embed_size)[indices]
-        shared_ft_wa = batch_dict_aug['shared_features_gt'].view(batch_dict['batch_size'],-1,embed_size)[indices]
+        shared_ft_sa = batch_dict['projected_features_gt'].view(batch_dict['batch_size'],-1,embed_size)[indices]
+        shared_ft_wa = batch_dict_aug['projected_features_gt'].view(batch_dict['batch_size'],-1,embed_size)[indices]
         device = shared_ft_sa.device
         labels_sa = batch_dict['gt_boxes'][:,:,7][indices].view(-1)
         labels_wa = batch_dict_aug['gt_boxes'][:,:,7][indices].view(-1)

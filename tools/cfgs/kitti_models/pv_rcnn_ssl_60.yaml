@@ -159,8 +159,8 @@ MODEL:
     ROI_HEAD:
         NAME: PVRCNNHead
         CLASS_AGNOSTIC: True
-
         SHARED_FC: [256, 256]
+        PROJECTED_FC: [256, 256]   
         CLS_FC: [256, 256]
         REG_FC: [256, 256]
         DP_RATIO: 0.3

@@ -166,6 +166,7 @@ MODEL:
         CLASS_AGNOSTIC: True
         ENABLE_PROTOTYPING: False
         SHARED_FC: [256, 256]
+        PROJECTED_FC: [256, 256]
         CLS_FC: [256, 256]
         REG_FC: [256, 256]
         DP_RATIO: 0.3
