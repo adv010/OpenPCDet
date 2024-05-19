@@ -88,7 +88,7 @@ class DataProcessor(object):
                 data_dict['gt_boxes'], self.point_cloud_range, min_num_corners=config.get('min_num_corners', 1)
             )
             data_dict['gt_boxes'] = data_dict['gt_boxes'][mask]
-        if data_dict.get("instance_idx", None) is not None:
+        if data_dict.get("instance_idx", None) is not None and self.training:
             data_dict['instance_idx'] = data_dict['instance_idx'][mask]
         return data_dict
 
