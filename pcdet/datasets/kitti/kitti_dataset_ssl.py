@@ -359,6 +359,107 @@ class KittiDatasetSSL(DatasetTemplate):
 
         return annos
 
+    @staticmethod
+    def generate_PL_prediction_dicts(batch_dict, pred_dicts, class_names, output_path=None, frame_freq=1): #NOTE: Run with bsz 1
+        """
+        Args:
+            batch_dict:
+                frame_id:
+            pred_dicts: list of pred_dicts
+                pred_boxes: (N, 7), Tensor
+                predpred_labels_scores: (N), Tensor
+                : (N), Tensor
+            class_names:
+            output_path:
+
+        Returns:
+
+        """
+        def get_template_prediction(num_samples):
+            ret_dict = {
+                'name': np.zeros(num_samples), 'truncated': np.zeros(num_samples),
+                'occluded': np.zeros(num_samples), 'alpha': np.zeros(num_samples),
+                'bbox': np.zeros([num_samples, 4]), 'dimensions': np.zeros([num_samples, 3]),
+                'location': np.zeros([num_samples, 3]), 'rotation_y': np.zeros(num_samples),
+                'score': np.zeros(num_samples), 'boxes_lidar': np.zeros([num_samples, 7]),'sem_score':np.zeros(num_samples)
+            }
+            return ret_dict
+
+        def generate_single_sample_dict(batch_index, box_dict): #NOTE: Uses bsz 1
+            masks = box_dict['masks'].cpu().numpy()
+            pred_scores = box_dict['pred_scores'][masks].cpu().numpy()
+            pred_boxes = box_dict['pred_boxes'][masks].cpu().numpy()
+            pred_labels = box_dict['pred_labels'][masks].cpu().numpy()
+            pred_sem_score = box_dict['pred_sem_scores'][masks].cpu().numpy()
+            # masks = box_dict['masks'].cpu().numpy()
+            pred_dict = get_template_prediction(pred_scores.shape[0])
+            if pred_scores.shape[0] == 0:
+                return pred_dict
+
+            calib = batch_dict['calib'][batch_index]
+            image_shape = batch_dict['image_shape'][batch_index]
+            pred_boxes_camera = box_utils.boxes3d_lidar_to_kitti_camera(pred_boxes, calib)
+            pred_boxes_img = box_utils.boxes3d_kitti_camera_to_imageboxes(
+                pred_boxes_camera, calib, image_shape=image_shape
+            )
+
+            if np.any(pred_labels == 0):
+                pred_dict['name'] = "Empty PLs"
+            else:
+                pred_dict['name'] = np.array(class_names)[pred_labels - 1] 
+            pred_dict['alpha'] = -np.arctan2(-pred_boxes[:, 1], pred_boxes[:, 0]) + pred_boxes_camera[:, 6]
+            pred_dict['bbox'] = pred_boxes_img
+            pred_dict['dimensions'] = pred_boxes_camera[:, 3:6]
+            pred_dict['location'] = pred_boxes_camera[:, 0:3]
+            pred_dict['rotation_y'] = pred_boxes_camera[:, 6]
+            pred_dict['score'] = pred_scores
+            pred_dict['boxes_lidar'] = pred_boxes
+            pred_dict['sem_score'] = pred_sem_score
+            return pred_dict
+
+        annos = []
+        PL_uids = []
+
+        for index, box_dict in enumerate(pred_dicts):
+            frame_id = batch_dict['frame_id'] #always run with bsz 1
+            single_pred_dict = generate_single_sample_dict(index, box_dict)
+            single_pred_dict['frame_id'] = frame_id
+            annos.append(single_pred_dict)
+            if output_path is not None:
+                final_result_dir = output_path / 'final_result' / 'data'
+                if not os.path.exists(final_result_dir):
+                    os.makedirs(final_result_dir)                
+                cur_det_file = final_result_dir / ('%s.txt' % frame_id)
+                if os.path.exists(cur_det_file): #append to file
+                    mode = 'a'
+                    with open(cur_det_file, 'r') as f:
+                        lines = f.readlines()
+                        if lines:
+                            last_PL_uid = int(lines[-1].strip().split()[-2])  # Extracting the PL-UID from the last line
+                else:
+                    mode = 'w' #create new file
+                    last_PL_uid = -1
+                with open(cur_det_file, mode) as f:
+                    bbox = single_pred_dict['bbox']
+                    loc = single_pred_dict['location']
+                    dims = single_pred_dict['dimensions']  # lhw -> hwl
+
+                    for idx in range(len(bbox)):
+                        if last_PL_uid == -1:
+                            PL_uid = int(single_pred_dict['frame_id']) * 100 + idx
+                        else:
+                            PL_uid = last_PL_uid +  1
+                        print('%s -1 -1 %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %d %d'
+                              % (single_pred_dict['name'][idx], single_pred_dict['alpha'][idx],
+                                 bbox[idx][0], bbox[idx][1], bbox[idx][2], bbox[idx][3],
+                                 dims[idx][1], dims[idx][2], dims[idx][0], loc[idx][0],
+                                 loc[idx][1], loc[idx][2], single_pred_dict['rotation_y'][idx],
+                                 single_pred_dict['score'][idx], PL_uid, frame_freq), file=f)
+                        last_PL_uid = PL_uid
+                        PL_uids.append(PL_uid)
+
+        return annos, PL_uids
+
     def evaluation(self, det_annos, class_names, **kwargs):
         if 'annos' not in self.kitti_infos[0].keys():
             return None, {}

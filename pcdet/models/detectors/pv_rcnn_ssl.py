@@ -3,6 +3,7 @@ import os
 import pickle
 import numpy as np
 import torch
+import torch.nn.functional as F
 from pcdet.datasets.augmentor import augmentor_utils
 from pcdet.ops.iou3d_nms import iou3d_nms_utils
 from pcdet.ops.roiaware_pool3d import roiaware_pool3d_utils
@@ -13,7 +14,7 @@ from pcdet.utils import common_utils
 from pcdet.utils.stats_utils import metrics_registry
 from pcdet.utils.prototype_utils import feature_bank_registry
 from collections import defaultdict
-from ssod import AdaptiveThresholding
+# from ssod import AdaptiveThresholding
 #from visual_utils import open3d_vis_utils as V
 
 
@@ -38,7 +39,9 @@ class PVRCNN_SSL(Detector3DTemplate):
         self.unlabeled_supervise_refine = model_cfg.UNLABELED_SUPERVISE_REFINE
         self.unlabeled_weight = model_cfg.UNLABELED_WEIGHT
         self.no_nms = model_cfg.NO_NMS
+        self.frame_id_frequency = defaultdict(int)
         self.supervise_mode = model_cfg.SUPERVISE_MODE
+        self.ckpt_save_dir = None
         try:
             self.fixed_batch_dict = torch.load("batch_dict.pth")
         except:
@@ -131,6 +134,7 @@ class PVRCNN_SSL(Detector3DTemplate):
     @staticmethod
     def _split_batch(batch_dict, tag='ema'):
         assert tag in ['ema', 'pre_gt_sample'], f'{tag} not in list [ema, pre_gt_sample]'
+        batch_dict['frame_id_ema'] = batch_dict['frame_id']
         batch_dict_out = {}
         keys = list(batch_dict.keys())
         for k in keys:
@@ -185,6 +189,8 @@ class PVRCNN_SSL(Detector3DTemplate):
     def _forward_training(self, batch_dict):
         # batch_dict = self._get_fixed_batch_dict()
         lbl_inds, ulb_inds = self._prep_batch_dict(batch_dict)
+        self.ckpt_save_dir = batch_dict['ckpt_save_dir']
+        copy_ori_gt = batch_dict['gt_boxes_ema'].clone()
         batch_dict_ema = self._split_batch(batch_dict, tag='ema')
 
         if self.supervise_mode == 1:
@@ -197,17 +203,47 @@ class PVRCNN_SSL(Detector3DTemplate):
             ulb_pred_labels = torch.cat([pl['pred_labels'] for pl in pls_teacher_wa]).int().detach()
             pl_cls_count_pre_filter = torch.bincount(ulb_pred_labels, minlength=4)[1:]
             (pl_boxes, pl_conf_scores, pl_sem_scores, pl_sem_logits,
-             pl_rect_scores, masks, pl_weights) = self._filter_pls(pls_teacher_wa, batch_dict_ema, ulb_inds)
-            pl_weights = [scores.new_ones(scores.shape[0], 1) for scores in pl_conf_scores]  # No weights for now
+             pl_rect_scores, masks, pl_weights , pl_labels) = self._filter_pls(pls_teacher_wa, batch_dict_ema, ulb_inds) # thresholding
+            # pls_teacher_filtered_dict = []
+            # keys = ['pred_boxes','pred_scores','pred_sem_scores','pred_sem_logits','pred_labels','masks']
+            # for i in range(len(pl_boxes)):
+            #     pred_dict = dict.fromkeys(keys)
+            #     pred_dict['pred_boxes'] = pl_boxes[i]
+            #     pred_dict['pred_scores'] = pl_conf_scores[i]
+            #     pred_dict['pred_sem_scores'] = pl_sem_scores[i]
+            #     pred_dict['pred_sem_logits'] = pl_sem_logits[i]
+            #     pred_dict['pred_labels'] = pl_labels[i]
+            #     pred_dict['masks'] = masks[i]
+            #     pls_teacher_filtered_dict.append(pred_dict)
 
+            # # assert np.array_equal(batch_dict['frame_id'],batch_dict_ema['frame_id'])
+            # ulb_inds = ulb_inds.to('cpu')
+            # batch_dict['frame_id'] = batch_dict['frame_id'][ulb_inds]
+            # PL_uid_list = []
+            # for frame_id in batch_dict['frame_id']:
+            #     self.frame_id_frequency[int(frame_id)] += 1   
+            #     _ , PL_uids = self.dataset.generate_PL_prediction_dicts(batch_dict, pls_teacher_filtered_dict, self.class_names, self.ckpt_save_dir, self.frame_id_frequency[frame_id])  #PLs written as texts
+            #     PL_uid_list.append(PL_uids)
+            # Check PL_output_Dir for PL txts
+            # from ulb_pred_labels to pl_labels
+            pl_weights = [scores.new_ones(scores.shape[0], 1) for scores in pl_conf_scores]  # No weights for now
+            pl_conf_scores = [conf_score[mask] for conf_score, mask in zip(pl_conf_scores, masks)]
+            pl_sem_scores = [sem_score[mask] for sem_score, mask in zip(pl_sem_scores, masks)]            
+            # pl_labels = [pl_label[mask] for pl_label, mask in zip(pl_labels, masks)]
             if self.thresh_alg is not None:
                 self._update_thresh_alg(pl_conf_scores, pl_sem_logits, pl_rect_scores, batch_dict_ema, pls_teacher_wa, lbl_inds)
 
         if 'pl_metrics' in metrics_registry.tags():
             self._update_pl_metrics(pl_boxes, pl_rect_scores, pl_weights, masks, batch_dict_ema['gt_boxes'][ulb_inds])
 
+        # batch_dict_quality = copy.deepcopy(batch_dict_ema)
+        # assert torch.equal(batch_dict_quality['gt_boxes'][:8], batch_dict_ema['gt_boxes'][:8])
+        self._fill_with_pls(batch_dict_ema, pl_boxes, masks, ulb_inds, lbl_inds)
+        with torch.no_grad():
+            self.pv_rcnn_ema.roi_head.forward(batch_dict_ema, test_only=True,inst_loss=True)
+        
         # TODO(farzad): Check if commenting the following line and apply_augmentation is equal to a fully supervised setting
-        self._fill_with_pls(batch_dict, pl_boxes, masks, ulb_inds, lbl_inds)
+        self._fill_with_pls(batch_dict, pl_boxes,  masks, ulb_inds, lbl_inds)
 
         pl_cls_count_post_filter = torch.bincount(batch_dict['gt_boxes'][ulb_inds][...,7].view(-1).int().detach(), minlength=4)[1:]
         gt_cls_count = torch.bincount(batch_dict['ori_unlabeled_boxes'][...,-1].view(-1).int().detach(), minlength=4)[1:]
@@ -219,9 +255,78 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         # apply student's augs on teacher's pseudo-labels (filtered) only (not points)
         batch_dict = self.apply_augmentation(batch_dict, batch_dict, ulb_inds, key='gt_boxes')
-
+        
         for cur_module in self.pv_rcnn.module_list:
             batch_dict = cur_module(batch_dict)
+
+        if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTOTYPING', False):        
+            # Extract frame IDs
+            ulb_inds_np = np.array(ulb_inds.cpu())
+            assert np.array_equal(batch_dict['frame_id'], batch_dict_ema['frame_id'])
+            frame_ids = batch_dict['frame_id'][ulb_inds_np]
+            frame_ids_ema = batch_dict_ema['frame_id'][ulb_inds_np]
+            assert np.array_equal(frame_ids, frame_ids_ema)
+            aligned_features = []
+            aligned_features_ema = []
+            aligned_labels = []
+            aligned_labels_ema = []
+            inst_pl_confs = []
+            indices =[]
+
+            for frame_id in frame_ids:
+                idx = np.where(batch_dict['frame_id'] == frame_id)[0]
+                # idx_ema = np.where(frame_ids_ema == frame_id)[0]
+
+                if len(idx) >0:
+                    frame_idx = idx[0]
+                    frame_idx_ema = idx[0]
+                    
+                    gt_boxes = batch_dict['gt_boxes'][frame_idx]
+                    valid_mask = torch.logical_not(torch.eq(gt_boxes, 0).all(dim=-1))
+                    gt_boxes = gt_boxes[valid_mask]
+
+                    if (pl_conf_scores[(idx[0])-8]).all()==0:
+                        continue
+                    else:
+                        inst_pl_confs.append(pl_conf_scores[idx[0]-8])
+
+                    gt_boxes_ema = batch_dict_ema['gt_boxes'][frame_idx]
+                    valid_mask_ema = torch.logical_not(torch.eq(gt_boxes_ema, 0).all(dim=-1))
+                    gt_boxes_ema = gt_boxes_ema[valid_mask_ema]
+                    features = batch_dict['projected_features_gt'][frame_idx]
+                    features = features[valid_mask]
+                    features_ema = batch_dict_ema['projected_features_gt'][frame_idx]
+                    features_ema = features_ema[valid_mask_ema]
+                    # Find common gt_boxes
+                    # self.find_common_boxes(gt_boxes, gt_boxes_ema) #Implement logic for greedy matching here
+                    aligned_features.append(features)
+                    aligned_features_ema.append(features_ema)
+                    aligned_labels.append(gt_boxes[...,-1].long() - 1)
+                    aligned_labels_ema.append(gt_boxes_ema[...,-1].long() - 1)
+                    indices.append(int(idx[0]))
+
+            q_s = torch.cat(aligned_features)
+            q_w = torch.cat(aligned_features_ema)
+            indices = torch.tensor(indices, device=q_s.device)
+            aligned_labels = torch.cat(aligned_labels)
+            aligned_labels_ema = torch.cat(aligned_labels_ema)
+            assert torch.equal(aligned_labels, aligned_labels_ema)
+            valid_mask = torch.logical_not(torch.eq(batch_dict['gt_boxes'], 0).all(dim=-1))
+            valid_mask = valid_mask[indices]
+            valid_mask_ema = torch.logical_not(torch.eq(batch_dict_ema['gt_boxes'], 0).all(dim=-1))
+            valid_mask_ema = valid_mask_ema[indices]
+                              
+            reliable_thresh = self.model_cfg['ROI_HEAD']['PL_PROTO_RELIABILITY_THRESH']
+            clswise_filter_thresh = torch.tensor(reliable_thresh, device = q_s.device)[aligned_labels]
+            indices = indices - 8
+            # pl_conf_scores = [pl_conf_scores[i] for i in indices]
+            inst_pl_conf_scores = torch.cat(inst_pl_confs)
+            reliable_protocon_pls = (inst_pl_conf_scores >= clswise_filter_thresh)
+            unreliable_protocon_pls = (inst_pl_conf_scores < clswise_filter_thresh)
+            if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTOCON_CONTRASTIVE', False):
+                temperature = self.model_cfg['ROI_HEAD']['PROTOCON_CONTRASTIVE_TEMP']
+                protocon_contrastive_loss = self.protocon_contrastive_loss(q_w, q_s, temperature, unreliable_protocon_pls) * self.model_cfg['ROI_HEAD']['PROTO_INST_CONTRASTIVE_LOSS_WEIGHT']
+
 
         if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTOTYPING', False):
             # Update the bank with student's features from augmented labeled data
@@ -257,11 +362,14 @@ class PVRCNN_SSL(Detector3DTemplate):
             loss += reduce_loss_fn(loss_rcnn_cls[ulb_inds, ...]) * self.unlabeled_weight
         if self.unlabeled_supervise_refine:
             loss += reduce_loss_fn(loss_rcnn_box[ulb_inds, ...]) * self.unlabeled_weight
-        if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTO_CONTRASTIVE_LOSS', False):
-            proto_cont_loss = self._get_proto_contrastive_loss(batch_dict, bank, ulb_inds)
-            if proto_cont_loss is not None:
-                loss += proto_cont_loss * self.model_cfg['ROI_HEAD']['PROTO_CONTRASTIVE_LOSS_WEIGHT']
-                tb_dict['proto_cont_loss'] = proto_cont_loss.item()
+        # if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTO_CONTRASTIVE_LOSS', False):
+        #     proto_cont_loss = self._get_proto_contrastive_loss(batch_dict, bank, ulb_inds)
+        #     if proto_cont_loss is not None:
+        #         loss += proto_cont_loss * self.model_cfg['ROI_HEAD']['PROTO_CONTRASTIVE_LOSS_WEIGHT']
+        #         tb_dict['proto_cont_loss'] = proto_cont_loss.item()
+        if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTOCON_CONTRASTIVE', False):
+                loss += protocon_contrastive_loss
+                tb_dict['protocon_contrastive_loss'] = protocon_contrastive_loss.item()
 
         tb_dict_ = self._prep_tb_dict(tb_dict, lbl_inds, ulb_inds, reduce_loss_fn)
         tb_dict_.update(**pl_count_dict)
@@ -364,6 +472,21 @@ class PVRCNN_SSL(Detector3DTemplate):
     def _arr2dict(self, array):
         return {cls: array[cind] for cind, cls in enumerate(self.class_names)}
 
+
+    def protocon_contrastive_loss(self, q_s, q_w, temperature, unreliable_mask):
+        # Calculate the sharpened softmax of q_s and q_w
+        soft_q_s = F.softmax(q_s / temperature, dim=-1)
+        soft_q_w = F.softmax(q_w / 5 * temperature, dim=-1) # if temperature=0.1, use 1/2 as multiplier
+        
+        # Apply the unreliable mask to get unreliable features
+        unreliable_soft_q_s = soft_q_s[unreliable_mask]
+        unreliable_soft_q_w = soft_q_w[unreliable_mask]
+        unreliable_samples = (unreliable_mask==True).sum()
+        
+        # Calculate the cross-entropy loss between the sharpened softmax distributions
+        ce_loss = unreliable_samples *  F.cross_entropy(unreliable_soft_q_w, unreliable_soft_q_s.argmax(dim=-1), reduction='mean')
+        return ce_loss
+
     def _get_proto_contrastive_loss(self, batch_dict, bank, ulb_inds):
         gt_boxes = batch_dict['gt_boxes']
         B, N = gt_boxes.shape[:2]
@@ -383,7 +506,7 @@ class PVRCNN_SSL(Detector3DTemplate):
     def _prep_tb_dict(tb_dict, lbl_inds, ulb_inds, reduce_loss_fn):
         tb_dict_ = {}
         for key in tb_dict.keys():
-            if key == 'proto_cont_loss':
+            if key == 'proto_cont_loss' or key == 'protocon_contrastive_loss':
                 tb_dict_[key] = tb_dict[key]
             elif 'loss' in key or 'acc' in key or 'point_pos_num' in key:
                 tb_dict_[f"{key}_labeled"] = reduce_loss_fn(tb_dict[key][lbl_inds, ...])
@@ -392,6 +515,22 @@ class PVRCNN_SSL(Detector3DTemplate):
                 tb_dict_[key] = tb_dict[key]
 
         return tb_dict_
+
+        # Function to find common gt_boxes between two sets
+    def find_common_boxes(self, gt_boxes1, gt_boxes2):
+        common_indices1 = []
+        common_indices2 = []
+        if gt_boxes1.shape[0]!= gt_boxes2.shape[0]:
+            return False
+        else:
+            return True
+        # for i, box1 in enumerate(gt_boxes1):
+        #     for j, box2 in enumerate(gt_boxes2):
+        #         if torch.allclose(box1[-1], box2[-1]):  # Adjust the tolerance as needed
+        #             common_indices1.append(i)
+        #             common_indices2.append(j)
+        # return common_indices1, common_indices2
+
 
     def _add_teacher_scores(self, batch_dict, batch_dict_ema, ulb_inds):
         batch_dict_std = {'unlabeled_inds': batch_dict['unlabeled_inds'],
@@ -471,6 +610,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         pl_sem_logits = []
         pl_rect_scores = []
         pl_weights = []
+        pl_labels = []
         masks = []
 
         def _fill_with_zeros():
@@ -483,7 +623,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             masks.append(labels.new_ones((1,), dtype=torch.bool))
 
         for ind in ulb_inds:
-            # scores = pls_dict[ind]['pred_scores']  # Using gt scores for now
+            scores = pls_dict[ind]['pred_scores']  # Using gt scores for now
             boxs = pls_dict[ind]['pred_boxes']
             labels = pls_dict[ind]['pred_labels']
             sem_scores = pls_dict[ind]['pred_sem_scores']
@@ -518,12 +658,13 @@ class PVRCNN_SSL(Detector3DTemplate):
                 pl_sem_logits.append(sem_logits)
                 pl_rect_scores.append(rect_scores)
                 pl_weights.append(weights)
+                pl_labels.append(labels)
                 masks.append(mask)
 
-        return pl_boxes, pl_scores, pl_sem_scores, pl_sem_logits, pl_rect_scores, masks, pl_weights
+        return pl_boxes, pl_scores, pl_sem_scores, pl_sem_logits, pl_rect_scores, masks, pl_weights,pl_labels
 
     @staticmethod
-    def _fill_with_pls(batch_dict, pseudo_boxes, masks, ulb_inds, lb_inds, key=None):
+    def _fill_with_pls(batch_dict, pseudo_boxes,  masks, ulb_inds, lb_inds, key=None):
         key = 'gt_boxes' if key is None else key
         max_box_num = batch_dict[key].shape[1]
         pseudo_boxes = [pboxes[mask] for pboxes, mask in zip(pseudo_boxes, masks)]

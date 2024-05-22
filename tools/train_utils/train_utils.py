@@ -66,7 +66,7 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
 
         # adding iteration, epoch number in batch dict
         batch['cur_iteration'], batch['cur_epoch'] = accumulated_iter, cur_epoch
-        batch['ckpt_save_dir'] = ckpt_save_dir
+        batch['ckpt_save_dir'], batch['ckpt_save_dir_ema']= ckpt_save_dir, ckpt_save_dir
 
         data_timer = time.time()
         cur_data_time = data_timer - end

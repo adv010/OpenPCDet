@@ -34,6 +34,22 @@ class PVRCNNHead(RoIHeadTemplate):
 
         self.shared_fc_layer = nn.Sequential(*shared_fc_list)
 
+        if model_cfg.ENABLE_PROTOTYPING:
+            pre_channel_proj =  GRID_SIZE * GRID_SIZE * GRID_SIZE * num_c_out
+            projected_fc_list = []
+            for k in range(0, self.model_cfg.PROJECTED_FC.__len__()):
+                projected_fc_list.extend([
+                    nn.Conv1d(pre_channel_proj, self.model_cfg.PROJECTED_FC[k], kernel_size=1, bias=False),
+                    nn.BatchNorm1d(self.model_cfg.PROJECTED_FC[k]),
+                    nn.ReLU()
+                ])
+                pre_channel_proj = self.model_cfg.PROJECTED_FC[k]
+
+                # if k != self.model_cfg.PROJECTED_FC.__len__() - 1 and self.model_cfg.DP_RATIO > 0:
+                #     shared_fc_list.append(nn.Dropout(self.model_cfg.DP_RATIO))
+            self.projection_layer = nn.Sequential(*projected_fc_list)
+
+
         self.cls_layers = self.make_fc_layers(
             input_channels=pre_channel, output_channels=self.num_class, fc_list=self.model_cfg.CLS_FC
         )
@@ -147,12 +163,13 @@ class PVRCNNHead(RoIHeadTemplate):
         return pooled_features
     
 
-    def forward(self, batch_dict, test_only=False):
+    def forward(self, batch_dict, test_only=False, inst_loss=False): #use inst_loss when retrieving augmented batch_dict's projected features
         """
         :param input_data: input dict
         :return:
         """
-
+        B,N = batch_dict['gt_boxes'].shape[:2]
+        grid_size = self.model_cfg.ROI_GRID_POOL.GRID_SIZE
         nms_config = self.model_cfg.NMS_CONFIG['TRAIN' if self.training and not test_only else 'TEST']
         # proposal_layer doesn't continue if the rois are already in the batch_dict.
         # However, for labeled data proposal layer should continue!
@@ -177,7 +194,16 @@ class PVRCNNHead(RoIHeadTemplate):
         shared_features = self.shared_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1))
         rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
         rcnn_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
-
+        if self.model_cfg.ENABLE_PROTOTYPING:
+            pooled_features_gt = self.roi_grid_pool(batch_dict, use_gtboxes  = True)  # (BxN, 6x6x6, C)
+            batch_size_rcnn_gt = pooled_features_gt.shape[0]
+            pooled_features_gt = pooled_features_gt.permute(0, 2, 1).\
+                contiguous().view(batch_size_rcnn_gt, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
+            projected_features_gt = self.projection_layer(pooled_features_gt.view(batch_size_rcnn_gt, -1, 1))
+            batch_dict['projected_features_gt'] = projected_features_gt.squeeze()
+            batch_dict['projected_features_gt'] = projected_features_gt.view(B,N,-1)
+            if inst_loss:
+                return batch_dict
         if (self.training or self.print_loss_when_eval) and not test_only:
             # RoI-level similarity.
             # calculate cosine similarity between unlabeled augmented RoI features and labeled augmented prototypes.

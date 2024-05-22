@@ -260,10 +260,10 @@ class PredQualityMetrics(Metric):
         # y_sim_scores = np.zeros((len(y_labels), 4))
         # y_sim_scores[:, :3] = sim_scores.cpu().numpy()
 
-        # cm = confusion_matrix(y_labels, pred_labels)
-        # print("\n Confusion Matrix: \n", cm)
-        # figure = plot_confusion_matrix(cm, class_names=['Car', 'Pedestrian', 'Cyclist', 'BG'])
-        # classwise_metrics['matrix'] = figure
+        cm = confusion_matrix(y_labels, pred_labels)
+        print("\n Confusion Matrix: \n", cm)
+        figure = plot_confusion_matrix(cm, class_names=['Car', 'Pedestrian', 'Cyclist', 'BG'])
+        classwise_metrics['matrix'] = figure
 
         for cind, cls in enumerate(self.dataset.class_names):
             cls_label_mask = y_labels == cind
@@ -273,6 +273,8 @@ class PredQualityMetrics(Metric):
 
             sem_clf_pr_curve_data = {'labels': cls_label_mask, 'predictions': scores[:, cind].cpu().numpy()}
             classwise_metrics['sem_clf_pr_curve'][cls] = sem_clf_pr_curve_data
+
+            classwise_metrics['avg_precision_sim_score'][cls] = average_precision_score(cls_label_mask, scores[:, cind].cpu().numpy())
 
             cls_roi_scores = max_scores[cls_pred_mask]
             cls_roi_iou_wrt_gt = iou_wrt_gt[cls_pred_mask]
