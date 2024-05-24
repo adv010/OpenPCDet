@@ -280,6 +280,8 @@ class PVRCNN_SSL(Detector3DTemplate):
             self.pv_rcnn_ema.roi_head.forward(batch_dict_new, test_only=True)
             
         if self.model_cfg.get('STORE_SCORES_IN_PKL', False):
+            pl_conf_scores = [p[i] for p,i in zip(pl_conf_scores,masks)]
+            pl_sem_scores = [p[i] for p,i in zip(pl_sem_scores,masks)]
             batch_dict_new['pl_conf_scores'] = pl_conf_scores
             batch_dict_new['pl_sem_scores'] = pl_sem_scores
             batch_dict_new['pl_uids'] = np.array(PL_uids)
