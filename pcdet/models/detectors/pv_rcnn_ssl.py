@@ -524,14 +524,16 @@ class PVRCNN_SSL(Detector3DTemplate):
 
                 self.val_dict['iou_values'].append(sample_roi_iou_wrt_gt.cpu())
                 self.val_dict['iou_assigned_label'].append(assigned_label.cpu())
-                self.val_dict['gt_classes'].append(gt_classes.cpu())
-                self.val_dict['gt_inds_over_thresh'].append(gt_inds_over_thresh.cpu())
-                self.val_dict['pl_labels'].append(sample_pl_labels.cpu())
+                if num_gts>0:
+                    self.val_dict['gt_classes'].append(gt_classes.cpu())
+                    self.val_dict['gt_inds_over_thresh'].append(gt_inds_over_thresh.cpu())
+                    self.val_dict['iou_values2'].append(sample_roi_iou_wrt_gt2.cpu())
+                    self.val_dict['iou_assigned_label2'].append(assigned_label2.cpu())
+                    self.val_dict['gt_classes2'].append(gt_classes2.cpu())
+                    self.val_dict['gt_inds_over_thresh2'].append(gt_inds_over_thresh2.cpu())
+                if num_pls>0:
+                    self.val_dict['pl_labels'].append(sample_pl_labels.cpu())
 
-                self.val_dict['iou_values2'].append(sample_roi_iou_wrt_gt2.cpu())
-                self.val_dict['iou_assigned_label2'].append(assigned_label2.cpu())
-                self.val_dict['gt_classes2'].append(gt_classes2.cpu())
-                self.val_dict['gt_inds_over_thresh2'].append(gt_inds_over_thresh2.cpu())
               # self.val_dict['gt_labels'].append(torch.bincount(sample_gts_labels.cpu(), minlength=3))
 
                 # cur_pred_score  = cur_pred_score_list[i][valid_rois_mask]
