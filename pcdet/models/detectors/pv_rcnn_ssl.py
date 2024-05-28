@@ -551,7 +551,15 @@ class PVRCNN_SSL(Detector3DTemplate):
                 self.val_dict['pl_conf_scores'].append(batch_dict['pl_conf_scores'])
                 self.val_dict['pl_sem_scores'].append(batch_dict['pl_sem_scores'])
                 # self.val_dict['pl_sem_logits'].append(batch_dict['pl_sem_logits'])
-
+        
+        for i in labeled_inds:
+            valid_pl_boxes_mask = torch.logical_not(torch.all(batch_pl_boxes[i] == 0, dim=-1)).cpu()
+            valid_pl_boxes = batch_pl_boxes[i][valid_pl_boxes_mask]            
+            valid_pl_boxes[:, -1] -= 1  # Starting class indices from zero
+            sh_ft_gt =  shared_features_gt[i][valid_pl_boxes_mask]  # X at a time
+            self.val_dict['lbl_shared_features_gt'].append(sh_ft_gt)  # 100 indices, each with 256 shape tensor
+            lbl_pl_labels = valid_pl_boxes[:, -1].long()
+            self.val_dict['lbl_pl_labels'].append(lbl_pl_labels.cpu())
         cur_epoch = batch_dict['cur_epoch']
         return cur_epoch, self.val_dict
 
