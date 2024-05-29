@@ -13,7 +13,7 @@ from pcdet.utils import common_utils
 from pcdet.utils.stats_utils import metrics_registry
 from pcdet.utils.prototype_utils import feature_bank_registry
 from collections import defaultdict
-from ssod import AdaptiveThresholding
+# from ssod import AdaptiveThresholding
 #from visual_utils import open3d_vis_utils as V
 
 
@@ -109,6 +109,49 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         return bank_inputs
 
+    def _prep_wa_bank_inputs(self, batch_dict, inds, num_points_threshold=20):
+        selected_batch_dict = self._clone_gt_boxes_and_feats(batch_dict)
+        
+        ## Discuss - should shared features be used for storing within bank, and projections for ulb?
+        # Discuss - earlier prototype out of pooled_fts (27648) ... current prototype out of shared/projections (256)
+        
+        with torch.no_grad():
+            projections_gt = self.pv_rcnn_ema.roi_head.pool_features(selected_batch_dict, use_gtboxes=True, shared=False, projector=True) 
+
+        projections_gt = projections_gt.view(*batch_dict['gt_boxes'].shape[:2], -1)
+        bank_inputs = defaultdict(list)
+        for ix in inds:
+            gt_boxes = selected_batch_dict['gt_boxes'][ix]
+            nonzero_mask = torch.logical_not(torch.eq(gt_boxes, 0).all(dim=-1))
+            if nonzero_mask.sum() == 0:
+                print(f"no gt instance in frame {batch_dict['frame_id'][ix]}")
+                continue
+            gt_boxes = gt_boxes[nonzero_mask]
+            sample_mask = batch_dict['points'][:, 0].int() == ix
+            points = batch_dict['points'][sample_mask, 1:4]
+            gt_feat = projections_gt[ix][nonzero_mask]
+            # gt_labels = gt_boxes[:, 7].int() - 1
+            gt_labels = gt_boxes[:, 7].int()
+            gt_boxes = gt_boxes[:, :7]
+            ins_idxs = batch_dict['instance_idx'][ix][nonzero_mask].int()
+            smpl_id = torch.from_numpy(batch_dict['frame_id'].astype(np.int32))[ix].to(gt_boxes.device)
+
+            # filter out gt instances with too few points when updating the bank
+            num_points_in_gt = roiaware_pool3d_utils.points_in_boxes_cpu(points.cpu(), gt_boxes.cpu()).sum(dim=-1)
+            valid_gts_mask = (num_points_in_gt >= num_points_threshold)
+            # print(f"{(~valid_gts_mask).sum()} gt instance(s) with id(s) {ins_idxs[~valid_gts_mask].tolist()}"
+            #       f" and num points {num_points_in_gt[~valid_gts_mask].tolist()} are filtered")
+            if valid_gts_mask.sum() == 0:
+                print(f"no valid gt instances with enough points in frame {batch_dict['frame_id'][ix]}")
+                continue
+            bank_inputs['feats'].append(gt_feat[valid_gts_mask])
+            bank_inputs['labels'].append(gt_labels[valid_gts_mask])
+            bank_inputs['ins_ids'].append(ins_idxs[valid_gts_mask])
+            bank_inputs['smpl_ids'].append(smpl_id)
+
+        return bank_inputs
+
+
     def forward(self, batch_dict):
         if self.training:
             return self._forward_training(batch_dict)
@@ -131,6 +174,8 @@ class PVRCNN_SSL(Detector3DTemplate):
     @staticmethod
     def _split_batch(batch_dict, tag='ema'):
         assert tag in ['ema', 'pre_gt_sample'], f'{tag} not in list [ema, pre_gt_sample]'
+        # batch_dict['instance_idx_ema'] = batch_dict['instance_idx']
+        batch_dict['frame_id_ema'] = batch_dict['frame_id']
         batch_dict_out = {}
         keys = list(batch_dict.keys())
         for k in keys:
@@ -198,6 +243,11 @@ class PVRCNN_SSL(Detector3DTemplate):
             pl_cls_count_pre_filter = torch.bincount(ulb_pred_labels, minlength=4)[1:]
             (pl_boxes, pl_conf_scores, pl_sem_scores, pl_sem_logits,
              pl_rect_scores, masks, pl_weights) = self._filter_pls(pls_teacher_wa, batch_dict_ema, ulb_inds)
+            pl_conf_scores_tensor = torch.cat((pl_conf_scores),dim=0)
+            pl_sem_scores_tensor = torch.cat((pl_sem_scores),dim=0)
+            pl_labels_tensor =  torch.cat((pl_boxes),dim=0)[:,-1]
+            masks_tensor = torch.cat((masks),dim=0)
+            assert pl_conf_scores_tensor.shape[0] == pl_labels_tensor.shape[0] == pl_sem_scores_tensor.shape[0] == masks_tensor.shape[0]
             pl_weights = [scores.new_ones(scores.shape[0], 1) for scores in pl_conf_scores]  # No weights for now
 
             if self.thresh_alg is not None:
@@ -225,9 +275,9 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTOTYPING', False):
             # Update the bank with student's features from augmented labeled data
-            bank = feature_bank_registry.get('gt_aug_lbl_prototypes')
-            sa_gt_lbl_inputs = self._prep_bank_inputs(batch_dict, lbl_inds, bank.num_points_thresh)
-            bank.update(**sa_gt_lbl_inputs, iteration=batch_dict['cur_iteration'])
+            bank = feature_bank_registry.get('gt_wa_lbl_prototypes')
+            wa_gt_lbl_inputs = self._prep_wa_bank_inputs(batch_dict_ema, lbl_inds, bank.num_points_thresh)
+            bank.update(**wa_gt_lbl_inputs, iteration=batch_dict['cur_iteration'])
 
         # For metrics calculation
         self.pv_rcnn.roi_head.forward_ret_dict['unlabeled_inds'] = ulb_inds
@@ -262,7 +312,11 @@ class PVRCNN_SSL(Detector3DTemplate):
             if proto_cont_loss is not None:
                 loss += proto_cont_loss * self.model_cfg['ROI_HEAD']['PROTO_CONTRASTIVE_LOSS_WEIGHT']
                 tb_dict['proto_cont_loss'] = proto_cont_loss.item()
-
+        if self.model_cfg['ROI_HEAD'].get('ENABLE_LPCONT_LOSS', False):
+            lpcont_loss = self._get_lpcont_loss(batch_dict, bank, ulb_inds, pl_conf_scores_tensor, pl_sem_scores_tensor, pl_labels_tensor,masks_tensor)
+            if lpcont_loss is not None:
+                loss += lpcont_loss * self.model_cfg['ROI_HEAD']['LPCONT_LOSS_WEIGHT']
+                tb_dict['lpcont_loss'] = lpcont_loss.item()
         tb_dict_ = self._prep_tb_dict(tb_dict, lbl_inds, ulb_inds, reduce_loss_fn)
         tb_dict_.update(**pl_count_dict)
 
@@ -379,11 +433,51 @@ class PVRCNN_SSL(Detector3DTemplate):
             return
         return proto_cont_loss.view(B, N)[ulb_inds][ulb_nonzero_mask].mean()
 
+    def _get_lpcont_loss(self, batch_dict, bank, ulb_inds, pl_conf_scores, pl_sem_scores, pl_labels, masks):
+        gt_boxes = batch_dict['gt_boxes']
+        nonzero_ulb_mask = torch.logical_not(torch.eq(gt_boxes, 0).all(dim=-1))[ulb_inds]
+        if nonzero_ulb_mask.sum() == 0:
+            print(f"No pl instances predicted for strongly augmented frame(s) {batch_dict['frame_id'][ulb_inds]}")
+            return
+        B, N = gt_boxes.shape[:2]
+        pl_conf_scores = pl_conf_scores[masks]
+        pl_sem_scores = pl_sem_scores[masks]
+        pl_labels = pl_labels[masks]
+        # undo fill_with_zeros during filter_pls
+        pl_conf_scores = pl_conf_scores[pl_conf_scores>0]
+        pl_sem_scores = pl_sem_scores[pl_sem_scores>0]
+        pl_labels = pl_labels[pl_labels>0]
+
+        if len(torch.unique(pl_labels)) < 3:
+            print("Less than 3 classes in pl_labels")
+            return
+        student_pl_projections = self.pv_rcnn.roi_head.pool_features(batch_dict, use_gtboxes=True, shared=False, projector = True)
+        student_pl_projections = student_pl_projections.squeeze(-1).reshape(B,-1,256)
+        student_pl_projections = student_pl_projections[ulb_inds][nonzero_ulb_mask]
+        assert student_pl_projections.shape[0] == pl_conf_scores.shape[0] == pl_sem_scores.shape[0] == pl_labels.shape[0]
+        topk_list = [1,1,1]
+        topk_features = []
+        topk_labels = []
+        for i,c in enumerate(topk_list):
+            cls_indices = torch.topk(pl_conf_scores[pl_labels==(i+1)],c)[1]
+            topk_features.extend(student_pl_projections[cls_indices])
+            topk_labels.extend(pl_labels[cls_indices])
+        lp_cont_loss = bank.get_lpcont_loss(topk_features, topk_labels, topk_list)
+        if lp_cont_loss is None:
+            return
+        return lp_cont_loss
+        # nonzero_mask = torch.logical_not(torch.eq(gt_boxes, 0).all(dim=-1))
+        # ulb_nonzero_mask = nonzero_mask[ulb_inds]
+        # if ulb_nonzero_mask.sum() == 0:
+        #     print(f"No pl instances predicted for strongly augmented frame(s) {batch_dict['frame_id'][ulb_inds]}")
+        #     return
+        # return lp_cont_loss.view(B, N)[ulb_inds][ulb_nonzero_mask].mean()
+
     @staticmethod
     def _prep_tb_dict(tb_dict, lbl_inds, ulb_inds, reduce_loss_fn):
         tb_dict_ = {}
         for key in tb_dict.keys():
-            if key == 'proto_cont_loss':
+            if key == 'proto_cont_loss' or key == 'lpcont_loss':
                 tb_dict_[key] = tb_dict[key]
             elif 'loss' in key or 'acc' in key or 'point_pos_num' in key:
                 tb_dict_[f"{key}_labeled"] = reduce_loss_fn(tb_dict[key][lbl_inds, ...])
@@ -483,7 +577,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             masks.append(labels.new_ones((1,), dtype=torch.bool))
 
         for ind in ulb_inds:
-            # scores = pls_dict[ind]['pred_scores']  # Using gt scores for now
+            scores = pls_dict[ind]['pred_scores']  # Using gt scores for now
             boxs = pls_dict[ind]['pred_boxes']
             labels = pls_dict[ind]['pred_labels']
             sem_scores = pls_dict[ind]['pred_sem_scores']

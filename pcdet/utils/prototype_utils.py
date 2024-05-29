@@ -14,6 +14,7 @@ class FeatureBank(Metric):
         self.tag = kwargs.get('NAME', None)
 
         self.temperature = kwargs.get('TEMPERATURE')
+        self.num_classes = 3
         self.feat_size = kwargs.get('FEATURE_SIZE')
         self.bank_size = kwargs.get('BANK_SIZE')  # e.g., num. of classes or labeled instances
         self.momentum = kwargs.get('MOMENTUM')
@@ -27,6 +28,7 @@ class FeatureBank(Metric):
         # Globally synchronized prototypes used in each process
         self.prototypes = None
         self.classwise_prototypes = None
+        self.classwise_meta_instance = None
         self.proto_labels = None
         self.num_updates = None
 
@@ -42,6 +44,7 @@ class FeatureBank(Metric):
         print(f"Initializing the feature bank with size {self.bank_size} and feature size {self.feat_size}")
         self.prototypes = torch.zeros((self.bank_size, self.feat_size)).cuda()
         self.classwise_prototypes = torch.zeros((3, self.feat_size)).cuda()
+        self.classwise_meta_instance= torch.zeros((3, self.feat_size)).cuda()
         self.proto_labels = labels
         self.num_updates = torch.zeros(self.bank_size).cuda()
         self.insId_protoId_mapping = {unique_ins_ids[i]: i for i in range(len(unique_ins_ids))}
@@ -91,17 +94,34 @@ class FeatureBank(Metric):
                     new_prototype = self.momentum * self.prototypes[proto_id] + (1 - self.momentum) * features[ind]
                     self.prototypes[proto_id] = new_prototype
         self._update_classwise_prototypes()
+        self._update_classwise_meta_instance()
         self.initialized = True
         self.reset()
         return self.prototypes, self.proto_labels, self.num_updates
 
     def _update_classwise_prototypes(self):
         classwise_prototypes = torch.zeros((3, self.feat_size)).cuda()
-        for i in range(3):  # TODO: refactor it
-            inds = torch.where(self.proto_labels == i)[0]
-            print(f"Update classwise prototypes for class {i} with {len(inds)} instances.")
+        for i in range(self.num_classes):  # TODO: refactor it
+            inds = torch.where(self.proto_labels == (i+1))[0]
+            print(f"Update classwise prototypes for class {(i+1)} with {len(inds)} instances.")
             classwise_prototypes[i] = torch.mean(self.prototypes[inds], dim=0)
         self.classwise_prototypes = self.momentum * self.classwise_prototypes + (1 - self.momentum) * classwise_prototypes
+
+        # prototype[256]
+        # prtotp[0]  + prptp[1] + .....
+
+    def _update_classwise_meta_instance(self): # E_{k} per Inf-Mining in CoIN
+
+        classwise_meta_instance = torch.zeros((3, self.feat_size)).cuda()
+        for i in range(self.num_classes):  # TODO: refactor it
+            inds = torch.where(self.proto_labels == (i+1))[0]
+            print(f"Update meta_instances for class {(i+1)}")
+            meta_result = (F.normalize(self.prototypes[inds], dim=-1) @ F.normalize(self.classwise_prototypes[i], dim=-1).t())
+            pad_length = self.feat_size - meta_result.size(0)
+            pad_tensor = torch.zeros((pad_length,) + meta_result.size()[1:]).to(self.prototypes.device)
+            padded_result = torch.cat((meta_result,pad_tensor),dim=0)
+            classwise_meta_instance[i] = padded_result
+        self.classwise_meta_instance = self.momentum * self.classwise_meta_instance + (1 - self.momentum) * classwise_meta_instance
 
     @torch.no_grad()
     def get_sim_scores(self, input_features, use_classwise_prototypes=True):
@@ -145,6 +165,57 @@ class FeatureBank(Metric):
         log_probs = F.log_softmax(sim_scores / self.temperature, dim=-1)
         return -log_probs[torch.arange(len(labels)), labels]
 
+    def get_lpcont_loss(self, pseudo_positives, topk_labels, topk_list):
+        """
+        :param feats: pseudo-box features of the strongly augmented unlabeled samples (N, C)
+        :param labels: pseudo-labels of the strongly augmented unlabeled samples (N,)
+        :return:
+        """
+        if not self.initialized:
+            return None
+        N = len(self.prototypes)
+        sorted_labels, sorted_args = torch.sort(self.proto_labels)
+        sorted_prototypes = self.prototypes[sorted_args] # sort prototypes to arrange classwise
+        pseudo_positives_meta = []
+        pseudo_positive_labels = []
+        for i in range(self.num_classes): # adding meta instance
+            pseudo_positives_meta.append(pseudo_positives[i])
+            pseudo_positive_labels.append(topk_labels[i])
+            pseudo_positives_meta.append(self.classwise_meta_instance[i]) # corresponding meta instance
+            pseudo_positive_labels.append(topk_labels[i])
+
+        pseudo_positives_meta = torch.stack(pseudo_positives_meta, dim=0)
+        sim_lpcont =F.normalize(sorted_prototypes,dim=-1) @ F.normalize(pseudo_positives_meta,dim=-1).t() / 0.07
+        sim_lpcont = torch.exp(sim_lpcont) # [N, k*m_k+1]
+
+        lbl_car_protos = sorted_args[sorted_labels==1]
+        lbl_ped_protos = sorted_args[sorted_labels==2]
+        lbl_cyc_protos = sorted_args[sorted_labels==3]
+        car_pseudo = 0
+        car_meta = 1
+        ped_pseudo = 2
+        ped_meta = 3
+        cyc_pseudo = 4
+        cyc_meta = 5
+        loss = 0
+
+        '''
+        161 labeled instances  <<----Car ---->> << ----- Ped ------>> << ----- Cyc ----->> : rows
+        6 pseudo positives : car_pseudo, car_meta, ped_pseudo, ped_meta, cyc_pseudo, cyc_meta : columns
+        '''
+        for idx_car in lbl_car_protos:
+            loss+=torch.log(sim_lpcont[idx_car,car_pseudo]/(sim_lpcont[idx_car,ped_pseudo] + sim_lpcont[idx_car, cyc_pseudo])) 
+            loss+=torch.log(sim_lpcont[idx_car,car_meta]/(sim_lpcont[idx_car,ped_meta] + sim_lpcont[idx_car, cyc_meta]))
+        for idx_ped in lbl_ped_protos:
+            loss+=torch.log(sim_lpcont[idx_ped,ped_pseudo]/sim_lpcont[idx_ped,car_pseudo] + sim_lpcont[idx_ped, cyc_pseudo])
+            loss+=torch.log(sim_lpcont[idx_ped,ped_meta]/sim_lpcont[idx_ped,car_meta] + sim_lpcont[idx_ped, cyc_meta])
+        for idx_cyc in lbl_cyc_protos:
+            loss+=torch.log(sim_lpcont[idx_cyc,cyc_pseudo]/sim_lpcont[idx_cyc,car_pseudo] + sim_lpcont[idx_cyc, ped_pseudo])
+            loss+=torch.log(sim_lpcont[idx_cyc,cyc_meta]/sim_lpcont[idx_cyc,car_meta] + sim_lpcont[idx_cyc, ped_meta])
+        
+        constant = -1 / (self.bank_size * 2 * self.num_classes) # m_k+1 = 2
+        loss = constant * loss
+        return loss
 
 class FeatureBankRegistry(object):
     def __init__(self, **kwargs):
