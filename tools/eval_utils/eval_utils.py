@@ -21,6 +21,7 @@ def statistics_info(cfg, ret_dict, metric, disp_dict):
 
 def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, save_to_file=False, result_dir=None):
     result_dir.mkdir(parents=True, exist_ok=True)
+    # print(result_dir)
 
     final_output_dir = result_dir / 'final_result' / 'data'
     if save_to_file:
@@ -62,7 +63,52 @@ def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, sa
             batch_dict, pred_dicts, class_names,
             output_path=final_output_dir if save_to_file else None
         )
+        # with open(result_dir / 'pseudo_database_student_rois_test.pkl', 'ab') as f: #inspired by semi-sampling
+        #     conf_mask = [0.7,0.5,0.5]
+        #     sem_mask = [0.5,0.5,0.5]
+        #     pred_dicts = pred_dicts
+        #     pseudo_database_dicts = [{} for _ in range(len(pred_dicts))]
+        #     for ind in range(len(pred_dicts)):
+        #         scores = pred_dicts[ind]['pred_scores']  # Using gt scores for now
+        #         boxes = pred_dicts[ind]['pred_boxes']
+        #         labels = pred_dicts[ind]['pred_labels']
+        #         sem_scores = pred_dicts[ind]['pred_sem_scores']
+        #         sem_logits = pred_dicts[ind]['pred_sem_logits']
+        #         projections = pred_dicts[ind]['projections']
+        #         frame_id = pred_dicts[ind]['frame_id']
+
+        #         conf_thresh = torch.tensor(conf_mask, device=labels.device).expand_as(
+        #                     sem_logits).gather(dim=1, index=(labels - 1).unsqueeze(-1)).squeeze()
+        #         sem_thresh = torch.tensor(sem_mask, device=labels.device).unsqueeze(0).expand_as(
+        #                     sem_logits).gather(dim=1, index=(labels - 1).unsqueeze(-1)).squeeze()
+        #         mask_conf = scores > conf_thresh
+        #         mask_sem = sem_scores > sem_thresh
+        #         pseudo_database_dicts[ind]['frame_id'] = frame_id 
+        #         scores = scores[mask_conf & mask_sem] 
+        #         if len(scores) ==0:
+        #             pseudo_database_dicts[ind]['pred_scores'] = labels.new_zeros((1,)).float()
+        #             pseudo_database_dicts[ind]['pred_boxes'] = labels.new_zeros((1,8)).float()
+        #             pseudo_database_dicts[ind]['pred_labels'] = labels.new_zeros((1,)).float()
+        #             pseudo_database_dicts[ind]['pred_sem_scores'] = labels.new_zeros((1,)).float()
+        #             pseudo_database_dicts[ind]['pred_sem_logits'] = labels.new_zeros((1,3)).float()
+        #             pseudo_database_dicts[ind]['projections'] = labels.new_zeros((1,256)).float()
+
+        #         else:
+        #             pseudo_database_dicts[ind]['pred_scores'] = scores
+        #             pseudo_database_dicts[ind]['pred_boxes'] = boxes[mask_conf & mask_sem]
+        #             pseudo_database_dicts[ind]['pred_labels'] = labels[mask_conf & mask_sem]
+        #             pseudo_database_dicts[ind]['pred_sem_scores'] = sem_scores[mask_conf & mask_sem]
+        #             pseudo_database_dicts[ind]['pred_sem_logits'] = sem_logits[mask_conf & mask_sem]
+        #             pseudo_database_dicts[ind]['projections'] = projections[mask_conf & mask_sem]              
+                
+        #     pickle.dump(pseudo_database_dicts, f)
+
+        # pseudo_database_annos = dataset.generate_prediction_dicts(
+        #     batch_dict, pseudo_database_dicts, class_names,
+        #     output_path=final_output_dir if save_to_file else None
+        # )
         det_annos += annos
+        # pseudo_det_annos += pseudo_database_annos
         if cfg.LOCAL_RANK == 0:
             progress_bar.set_postfix(disp_dict)
             progress_bar.update()
@@ -106,6 +152,14 @@ def eval_one_epoch(cfg, model, dataloader, epoch_id, logger, dist_test=False, sa
 
     with open(result_dir / 'result.pkl', 'wb') as f:
         pickle.dump(det_annos, f)
+
+    # for ps_anno in pseudo_det_annos:
+    #     total_pred_objects += ps_anno['name'].__len__()
+    # logger.info('Average predicted number of objects(%d samples): %.3f'
+    #             % (len(pseudo_det_annos), total_pred_objects / max(1, len(det_annos))))
+
+    # with open(result_dir / 'pseudo_result.pkl', 'wb') as f:
+    #     pickle.dump(pseudo_det_annos, f)
 
     result_str, result_dict = dataset.evaluation(
         det_annos, class_names,

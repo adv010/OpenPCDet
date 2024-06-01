@@ -15,11 +15,11 @@
                  "8",
                  "--pretrained_model",
                 "../../ckpt/pv_rcnn/checkpoint_epoch_80.pth",
-                // "--save_to_file",
+                "--save_to_file",
                 "--extra_tag",
-                "projector_LPCOnt_and_protcont",
+                "projector_LPCont_ORIGT_bounds",
                 "--epochs",
-                "5",
+                "60",
                  "--ckpt_save_interval",
                  "2",
                  "--repeat",
@@ -47,7 +47,7 @@
                 "MODEL.ROI_HEAD.ENABLE_LPCONT_LOSS",
                 "True",
                 "MODEL.ROI_HEAD.ENABLE_PROTO_CONTRASTIVE_LOSS",
-                "True",
+                "False",
                 ],
      }
     ]

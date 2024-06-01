@@ -254,6 +254,7 @@ class Detector3DTemplate(nn.Module):
                     label_preds = batch_dict[label_key][index]
                     sem_scores = torch.sigmoid(batch_dict['roi_scores'][index])
                     sem_logits = batch_dict['roi_scores_logits'][index]
+                    # projections = batch_dict['projections']
                 else:
                     label_preds = label_preds + 1
                 # Should be True to preserve the order of roi's passed from the student
@@ -276,6 +277,7 @@ class Detector3DTemplate(nn.Module):
                 final_sem_logits = sem_logits[selected]
                 final_labels = label_preds[selected]
                 final_boxes = box_preds[selected]
+                # final_projections = projections[selected,:,:]
 
             if not no_recall_dict:
                 recall_dict = self.generate_recall_record(
@@ -290,6 +292,8 @@ class Detector3DTemplate(nn.Module):
                 'pred_sem_scores': final_sem_scores,
                 'pred_sem_logits': final_sem_logits,
                 'pred_labels': final_labels,
+                'frame_id' : batch_dict['frame_id'][batch_mask],
+                # 'projections' : final_projections
             }
             pred_dicts.append(record_dict)
 

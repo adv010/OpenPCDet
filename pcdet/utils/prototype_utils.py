@@ -44,7 +44,6 @@ class FeatureBank(Metric):
         print(f"Initializing the feature bank with size {self.bank_size} and feature size {self.feat_size}")
         self.prototypes = torch.zeros((self.bank_size, self.feat_size)).cuda()
         self.classwise_prototypes = torch.zeros((3, self.feat_size)).cuda()
-        self.classwise_meta_instance= torch.zeros((3, self.feat_size)).cuda()
         self.proto_labels = labels
         self.num_updates = torch.zeros(self.bank_size).cuda()
         self.insId_protoId_mapping = {unique_ins_ids[i]: i for i in range(len(unique_ins_ids))}
@@ -94,7 +93,6 @@ class FeatureBank(Metric):
                     new_prototype = self.momentum * self.prototypes[proto_id] + (1 - self.momentum) * features[ind]
                     self.prototypes[proto_id] = new_prototype
         self._update_classwise_prototypes()
-        self._update_classwise_meta_instance()
         self.initialized = True
         self.reset()
         return self.prototypes, self.proto_labels, self.num_updates
@@ -107,22 +105,7 @@ class FeatureBank(Metric):
             classwise_prototypes[i] = torch.mean(self.prototypes[inds], dim=0)
         self.classwise_prototypes = self.momentum * self.classwise_prototypes + (1 - self.momentum) * classwise_prototypes
 
-        # prototype[256]
-        # prtotp[0]  + prptp[1] + .....
-
-    def _update_classwise_meta_instance(self): # E_{k} per Inf-Mining in CoIN
-
-        classwise_meta_instance = torch.zeros((3, self.feat_size)).cuda()
-        for i in range(self.num_classes):  # TODO: refactor it
-            inds = torch.where(self.proto_labels == (i+1))[0]
-            print(f"Update meta_instances for class {(i+1)}")
-            meta_result = (F.normalize(self.prototypes[inds], dim=-1) @ F.normalize(self.classwise_prototypes[i], dim=-1).t())
-            pad_length = self.feat_size - meta_result.size(0)
-            pad_tensor = torch.zeros((pad_length,) + meta_result.size()[1:]).to(self.prototypes.device)
-            padded_result = torch.cat((meta_result,pad_tensor),dim=0)
-            classwise_meta_instance[i] = padded_result
-        self.classwise_meta_instance = self.momentum * self.classwise_meta_instance + (1 - self.momentum) * classwise_meta_instance
-
+    
     @torch.no_grad()
     def get_sim_scores(self, input_features, use_classwise_prototypes=True):
         assert input_features.shape[1] == self.feat_size, "input feature size is not equal to the bank feature size"
@@ -174,48 +157,46 @@ class FeatureBank(Metric):
         if not self.initialized:
             return None
         N = len(self.prototypes)
+        contrastive_loss = 0
+        total_count = 0
         sorted_labels, sorted_args = torch.sort(self.proto_labels)
         sorted_prototypes = self.prototypes[sorted_args] # sort prototypes to arrange classwise
-        pseudo_positives_meta = []
-        pseudo_positive_labels = []
-        for i in range(self.num_classes): # adding meta instance
-            pseudo_positives_meta.append(pseudo_positives[i])
-            pseudo_positive_labels.append(topk_labels[i])
-            pseudo_positives_meta.append(self.classwise_meta_instance[i]) # corresponding meta instance
-            pseudo_positive_labels.append(topk_labels[i])
-
-        pseudo_positives_meta = torch.stack(pseudo_positives_meta, dim=0)
-        sim_lpcont =F.normalize(sorted_prototypes,dim=-1) @ F.normalize(pseudo_positives_meta,dim=-1).t() / 0.07
-        sim_lpcont = torch.exp(sim_lpcont) # [N, k*m_k+1]
-
-        lbl_car_protos = sorted_args[sorted_labels==1]
-        lbl_ped_protos = sorted_args[sorted_labels==2]
-        lbl_cyc_protos = sorted_args[sorted_labels==3]
-        car_pseudo = 0
-        car_meta = 1
-        ped_pseudo = 2
-        ped_meta = 3
-        cyc_pseudo = 4
-        cyc_meta = 5
-        loss = 0
-
-        '''
-        161 labeled instances  <<----Car ---->> << ----- Ped ------>> << ----- Cyc ----->> : rows
-        6 pseudo positives : car_pseudo, car_meta, ped_pseudo, ped_meta, cyc_pseudo, cyc_meta : columns
-        '''
-        for idx_car in lbl_car_protos:
-            loss+=torch.log(sim_lpcont[idx_car,car_pseudo]/(sim_lpcont[idx_car,ped_pseudo] + sim_lpcont[idx_car, cyc_pseudo])) 
-            loss+=torch.log(sim_lpcont[idx_car,car_meta]/(sim_lpcont[idx_car,ped_meta] + sim_lpcont[idx_car, cyc_meta]))
-        for idx_ped in lbl_ped_protos:
-            loss+=torch.log(sim_lpcont[idx_ped,ped_pseudo]/sim_lpcont[idx_ped,car_pseudo] + sim_lpcont[idx_ped, cyc_pseudo])
-            loss+=torch.log(sim_lpcont[idx_ped,ped_meta]/sim_lpcont[idx_ped,car_meta] + sim_lpcont[idx_ped, cyc_meta])
-        for idx_cyc in lbl_cyc_protos:
-            loss+=torch.log(sim_lpcont[idx_cyc,cyc_pseudo]/sim_lpcont[idx_cyc,car_pseudo] + sim_lpcont[idx_cyc, ped_pseudo])
-            loss+=torch.log(sim_lpcont[idx_cyc,cyc_meta]/sim_lpcont[idx_cyc,car_meta] + sim_lpcont[idx_cyc, ped_meta])
         
-        constant = -1 / (self.bank_size * 2 * self.num_classes) # m_k+1 = 2
-        loss = constant * loss
-        return loss
+        sorted_pp_labels, sorted_pp_args = torch.sort(topk_labels)
+        sorted_pp_features = pseudo_positives[sorted_pp_args] # sort pseudo positives to arrange classwise  
+
+        K = sorted_pp_labels.unique()
+            
+        for k in K:
+            mask_k = (sorted_pp_labels == k)
+            features_k = sorted_pp_features[mask_k]  # Pseudo-positive elements
+            mask_lbl_k = sorted_labels==k
+            features_lbl_k = sorted_prototypes[mask_lbl_k]  # Prototypes of the same class
+            n_k = features_k.shape[0]
+            
+            for i in range(n_k):
+                # Compute similarities between labeld and between all
+                dot_product_k = (torch.mm(features_k, features_k[i].view(-1, 1)).squeeze() / 0.07)
+                dot_product_all = (torch.mm(sorted_prototypes, features_k[i].view(-1, 1)).squeeze() / 0.07)
+                
+                # Denominator with K!=k
+                mask_others = (sorted_labels != k)
+                dot_product_others = dot_product_all[mask_others]
+                
+                # positive, negative terms for log softmax
+                combined_dot_product = torch.cat((dot_product_k, dot_product_others))
+                log_prob = F.log_softmax(combined_dot_product, dim=0)
+                
+                # log_probabilities for n_k labeled instances
+                contrastive_loss -= log_prob[:n_k].sum()
+                total_count += n_k
+
+        
+            if total_count > 0:  #  Divide by total_count
+                contrastive_loss /= total_count
+                contrastive_loss /= N
+
+            return contrastive_loss
 
 class FeatureBankRegistry(object):
     def __init__(self, **kwargs):
