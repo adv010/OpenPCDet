@@ -189,7 +189,8 @@ class FeatureBank(Metric):
             n_k = features_nk.shape[0]
             m_k = len(features_pp_k)
             sim_proto_pp_matrix = sorted_prototypes @ sorted_pp_features.T
-            scaled_sim_proto_pp_matrix = torch.log(sim_proto_pp_matrix/0.07) # temperature
+            scaled_sim_proto_pp_matrix = torch.exp(sim_proto_pp_matrix/0.07)
+            scaled_sim_proto_pp_matrix = torch.log(scaled_sim_proto_pp_matrix) # temperature
             clipped_sim_matrix = torch.clamp(scaled_sim_proto_pp_matrix, min=1e-6)
 
             loss_nk_mk_k = 0      
@@ -202,7 +203,7 @@ class FeatureBank(Metric):
             loss_nk_mk_k = loss_nk_mk_k/ n_k
             contrastive_loss += loss_nk_mk_k.sum(dim=0)
 
-        contrastive_loss = contrastive_loss/ 3  #num_classes
+        contrastive_loss = -contrastive_loss/ 3  #num_classes
         return contrastive_loss
 
 class FeatureBankRegistry(object):
