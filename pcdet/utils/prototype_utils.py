@@ -148,17 +148,27 @@ class FeatureBank(Metric):
         log_probs = F.log_softmax(sim_scores / self.temperature, dim=-1)
         return -log_probs[torch.arange(len(labels)), labels]
 
+    def lpcont_indices(self,nk_labels,mk_labels,k):
+        """
+        param mk_labels : Sorted labels of pseudo-positives
+        return:
+        """
+        mask = mk_labels == k
+        mask_others_denom = mk_labels != k
+        mk_first_idx = torch.where(mask)[0][0]
+        mk_last_idx = (torch.where(mask)[0][-1]) + 1
+        return mask,mask_others_denom, mk_first_idx, mk_last_idx
+    
     def get_lpcont_loss(self, pseudo_positives, topk_labels, topk_list):
         """
-        :param feats: pseudo-box features of the strongly augmented unlabeled samples (N, C)
-        :param labels: pseudo-labels of the strongly augmented unlabeled samples (N,)
-        :return:
+        param pseudo_positives: Pseudo positive student features(Mk, Channel=256)
+        param topk_labels: Labels for pseudo positive student features
+        return:
         """
         if not self.initialized:
             return None
         N = len(self.prototypes)
         contrastive_loss = 0
-        total_count = 0
         sorted_labels, sorted_args = torch.sort(self.proto_labels)
         sorted_prototypes = self.prototypes[sorted_args] # sort prototypes to arrange classwise
         
@@ -166,37 +176,32 @@ class FeatureBank(Metric):
         sorted_pp_features = pseudo_positives[sorted_pp_args] # sort pseudo positives to arrange classwise  
 
         K = sorted_pp_labels.unique()
-            
+        sorted_prototypes = F.normalize(sorted_prototypes, dim=-1)
+        sorted_pp_features = F.normalize(sorted_pp_features, dim=-1)
+
         for k in K:
-            mask_k = (sorted_pp_labels == k)
-            features_k = sorted_pp_features[mask_k]  # Pseudo-positive elements
-            mask_lbl_k = sorted_labels==k
-            features_lbl_k = sorted_prototypes[mask_lbl_k]  # Prototypes of the same class
-            n_k = features_k.shape[0]
-            
+            mask_mk, mask_others_denom, mk_first_idx, mk_last_idx = self.lpcont_indices(sorted_labels,sorted_pp_labels,k)
+            features_pp_k = sorted_pp_features[mask_mk]  # Sorted Pseudo-positive elements batchwise
+            mask_nk = sorted_labels==k
+            features_nk = sorted_prototypes[mask_nk]  # Sorted labeled prototype features from bank
+            n_k = features_nk.shape[0]
+            m_k = len(features_pp_k)
+            sim_proto_pp_matrix = sorted_prototypes @ sorted_pp_features.T
+            scaled_sim_proto_pp_matrix = torch.log(sim_proto_pp_matrix/0.07) # temperature
+            clipped_sim_matrix = torch.clamp(scaled_sim_proto_pp_matrix, min=1e-6)
+
+            loss_nk_mk_k = 0      
             for i in range(n_k):
-                # Compute similarities between labeld and between all
-                dot_product_k = (torch.mm(features_k, features_k[i].view(-1, 1)).squeeze() / 0.07)
-                dot_product_all = (torch.mm(sorted_prototypes, features_k[i].view(-1, 1)).squeeze() / 0.07)
+                numerator = clipped_sim_matrix[i][mk_first_idx:mk_last_idx]
+                denominator = clipped_sim_matrix[i][mask_others_denom]
+                loss_nk_mk_k += numerator/(torch.sum(denominator, dim=0) + 1e-8)
                 
-                # Denominator with K!=k
-                mask_others = (sorted_labels != k)
-                dot_product_others = dot_product_all[mask_others]
-                
-                # positive, negative terms for log softmax
-                combined_dot_product = torch.cat((dot_product_k, dot_product_others))
-                log_prob = F.log_softmax(combined_dot_product, dim=0)
-                
-                # log_probabilities for n_k labeled instances
-                contrastive_loss -= log_prob[:n_k].sum()
-                total_count += n_k
+            loss_nk_mk_k = loss_nk_mk_k / m_k
+            loss_nk_mk_k = loss_nk_mk_k/ n_k
+            contrastive_loss += loss_nk_mk_k.sum(dim=0)
 
-        
-            if total_count > 0:  #  Divide by total_count
-                contrastive_loss /= total_count
-                contrastive_loss /= N
-
-            return contrastive_loss
+        contrastive_loss = -contrastive_loss/ 3  #num_classes
+        return contrastive_loss
 
 class FeatureBankRegistry(object):
     def __init__(self, **kwargs):
