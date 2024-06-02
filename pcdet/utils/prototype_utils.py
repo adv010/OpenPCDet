@@ -157,7 +157,7 @@ class FeatureBank(Metric):
         mask_others_denom = mk_labels != k
         mk_first_idx = torch.where(mask)[0][0]
         mk_last_idx = (torch.where(mask)[0][-1]) + 1
-        return mask,mask_others_denom, mk_first_idx, mk_last_idx
+        return mask, mask_others_denom, mk_first_idx, mk_last_idx
     
     def get_lpcont_loss(self, pseudo_positives, topk_labels, topk_list):
         """
@@ -176,11 +176,13 @@ class FeatureBank(Metric):
         sorted_pp_features = pseudo_positives[sorted_pp_args] # sort pseudo positives to arrange classwise  
 
         K = sorted_pp_labels.unique()
+        K = dict(sorted_pp_labels)
+        
         sorted_prototypes = F.normalize(sorted_prototypes, dim=-1)
         sorted_pp_features = F.normalize(sorted_pp_features, dim=-1)
 
         for k in K:
-            mask_mk, mask_others_denom, mk_first_idx, mk_last_idx = self.lpcont_indices(sorted_labels,sorted_pp_labels,k)
+            mask_mk, mask_others_denom, mk_first_idx, mk_last_idx = self.lpcont_indices(sorted_labels, sorted_pp_labels, k)
             features_pp_k = sorted_pp_features[mask_mk]  # Sorted Pseudo-positive elements batchwise
             mask_nk = sorted_labels==k
             features_nk = sorted_prototypes[mask_nk]  # Sorted labeled prototype features from bank
@@ -200,7 +202,7 @@ class FeatureBank(Metric):
             loss_nk_mk_k = loss_nk_mk_k/ n_k
             contrastive_loss += loss_nk_mk_k.sum(dim=0)
 
-        contrastive_loss = -contrastive_loss/ 3  #num_classes
+        contrastive_loss = contrastive_loss/ 3  #num_classes
         return contrastive_loss
 
 class FeatureBankRegistry(object):
