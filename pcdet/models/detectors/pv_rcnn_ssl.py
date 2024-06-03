@@ -303,9 +303,9 @@ class PVRCNN_SSL(Detector3DTemplate):
             bank.update(**wa_gt_lbl_inputs, iteration=batch_dict['cur_iteration'])
             ori_pseudo_projections, ori_labels  = self.get_pseudo_projections(batch_dict, ulb_inds)
             if batch_dict['cur_iteration'] < 3 :
-                for ft,lbl in zip(ori_pseudo_projections,ori_labels):
-                    self.pseudo_projection_dict['projection'].append(ft.cpu())
-                    self.pseudo_projection_dict['label'].append(lbl.cpu())
+                for i in range(len(ori_pseudo_projections)):
+                    self.pseudo_projection_dict['projection'].append(ori_pseudo_projections[i].cpu())
+                    self.pseudo_projection_dict['label'].append(ori_labels[i].view(-1).cpu())
 
         # For metrics calculation
         self.pv_rcnn.roi_head.forward_ret_dict['unlabeled_inds'] = ulb_inds
@@ -340,10 +340,11 @@ class PVRCNN_SSL(Detector3DTemplate):
             if proto_cont_loss is not None:
                 loss += proto_cont_loss * self.model_cfg['ROI_HEAD']['PROTO_CONTRASTIVE_LOSS_WEIGHT']
                 tb_dict['proto_cont_loss'] = proto_cont_loss.item()
-        if self.model_cfg['ROI_HEAD'].get('ENABLE_LPCONT_LOSS', False) and batch_dict['cur_iteration'] > 4:
+        if self.model_cfg['ROI_HEAD'].get('ENABLE_LPCONT_LOSS', False) and batch_dict['cur_iteration'] > 15:
             # lpcont_loss = self._get_lpcont_loss(batch_dict, bank, ulb_inds, pl_conf_scores_tensor, pl_sem_scores_tensor, pl_labels_tensor,masks_tensor)
             ori_lpcont_loss = self._get_lpcont_loss(batch_dict, bank, ulb_inds,ori_pseudo_projections, ori_labels )
             if ori_lpcont_loss is not None:
+                assert ori_lpcont_loss>-1e+6, "Loss is not computed correctly"
                 loss += ori_lpcont_loss * self.model_cfg['ROI_HEAD']['LPCONT_LOSS_WEIGHT']
                 tb_dict['ori_lpcont_loss'] = ori_lpcont_loss.item()
         tb_dict_ = self._prep_tb_dict(tb_dict, lbl_inds, ulb_inds, reduce_loss_fn)
@@ -470,6 +471,12 @@ class PVRCNN_SSL(Detector3DTemplate):
             print(f"No pl instances predicted for strongly augmented frame(s) {batch_dict['frame_id'][ulb_inds]}")
             return
         B, N = gt_boxes.shape[:2]
+        # Sample pseudo projections to get uniform number 5,5,5 per batch
+        # sampled_projections, sampled_labels, topk_list = self.sample_pseudo_positives(self.pseudo_projection_dict, ori_pseudo_projections,ori_labels)
+        # ori_pseudo_projections = torch.stack(sampled_projections)
+        # ori_labels = [t if t.dim() > 0 else t.unsqueeze(0) for t in sampled_labels]
+        # ori_labels = torch.stack(ori_labels).squeeze()
+        
         # pl_conf_scores = pl_conf_scores[masks]
         # pl_sem_scores = pl_sem_scores[masks]
         # pl_labels = pl_labels[masks]
@@ -483,16 +490,8 @@ class PVRCNN_SSL(Detector3DTemplate):
         # student_pl_projections = student_pl_projections.squeeze(-1).reshape(B,-1,256)
         # student_pl_projections = student_pl_projections[ulb_inds][nonzero_ulb_mask]
         # assert student_pl_projections.shape[0] == pl_conf_scores.shape[0] == pl_sem_scores.shape[0] == pl_labels.shape[0]
-        # ori_pseudo_projections = 
-        # ori_labels =
 
-        topk_list = [1,1,1]
-        # topk_features = []
-        # topk_labels = []
-        # for i,c in enumerate(topk_list):
-        #     cls_indices = torch.topk(pl_conf_scores[pl_labels==(i+1)],c)[1]
-        #     topk_features.extend(student_pl_projections[cls_indices])
-        #     topk_labels.extend(pl_labels[cls_indices])
+        topk_list=[5,5,5]
         lp_cont_loss = bank.get_lpcont_loss(ori_pseudo_projections, ori_labels, topk_list)
         if lp_cont_loss is None:
             return
@@ -503,6 +502,41 @@ class PVRCNN_SSL(Detector3DTemplate):
         #     print(f"No pl instances predicted for strongly augmented frame(s) {batch_dict['frame_id'][ulb_inds]}")
         #     return
         # return lp_cont_loss.view(B, N)[ulb_inds][ulb_nonzero_mask].mean()
+
+    def sample_pseudo_positives(self, pseudo_projections_dict, features, labels):
+        topk_list = [3, 3, 3]
+        sorted_pp_labels, sorted_pp_args = torch.sort(labels)
+        sorted_pp_projections = features[sorted_pp_args]
+        sampled_features, sampled_labels = [], []
+
+        for k in range(3):
+            class_mask = sorted_pp_labels == (k + 1)
+            class_indices = torch.where(class_mask)[0]  # Get indices directly where class_mask is True
+            class_count = class_mask.sum().item()
+
+            if class_count >0:
+                selected_indices = class_indices
+                if class_indices.shape[0] >= topk_list[k]:
+                    selected_indices = class_indices[:topk_list[k]]
+
+                ft = sorted_pp_projections[selected_indices]
+                lbl = sorted_pp_labels[selected_indices]
+
+                for i in range(len(ft)):
+                    sampled_features.append(ft[i])
+                    sampled_labels.append(lbl[i])
+
+            if class_count < topk_list[k]: # sample from PP dict
+                bank_projections = pseudo_projections_dict['projection']
+                bank_labels = pseudo_projections_dict['label']
+                pp_bank_indices = [i for i, x in enumerate(bank_labels) if x == (k+1)]
+                num_to_fill = topk_list[k] - class_count
+                for i in range(num_to_fill):
+                    pp_idx = pp_bank_indices[i]
+                    sampled_features.append(bank_projections[pp_idx].to(sorted_pp_args.device))
+                    sampled_labels.append(bank_labels[pp_idx].to(sorted_pp_args.device))
+
+        return sampled_features, sampled_labels, topk_list
 
     @staticmethod
     def _prep_tb_dict(tb_dict, lbl_inds, ulb_inds, reduce_loss_fn):

@@ -168,20 +168,18 @@ class FeatureBank(Metric):
         if not self.initialized:
             return None
         N = len(self.prototypes)
-        contrastive_loss = 0
+        contrastive_loss = torch.tensor(0.0).cuda()
         sorted_labels, sorted_args = torch.sort(self.proto_labels)
         sorted_prototypes = self.prototypes[sorted_args] # sort prototypes to arrange classwise
         
         sorted_pp_labels, sorted_pp_args = torch.sort(topk_labels)
         sorted_pp_features = pseudo_positives[sorted_pp_args] # sort pseudo positives to arrange classwise  
 
-        K = sorted_pp_labels.unique()
-        K = dict(sorted_pp_labels)
-        
+        K = sorted_pp_labels.unique()        
         sorted_prototypes = F.normalize(sorted_prototypes, dim=-1)
         sorted_pp_features = F.normalize(sorted_pp_features, dim=-1)
 
-        for k in K:
+        for k in K: 
             mask_mk, mask_others_denom, mk_first_idx, mk_last_idx = self.lpcont_indices(sorted_labels, sorted_pp_labels, k)
             features_pp_k = sorted_pp_features[mask_mk]  # Sorted Pseudo-positive elements batchwise
             mask_nk = sorted_labels==k
@@ -189,21 +187,22 @@ class FeatureBank(Metric):
             n_k = features_nk.shape[0]
             m_k = len(features_pp_k)
             sim_proto_pp_matrix = sorted_prototypes @ sorted_pp_features.T
-            scaled_sim_proto_pp_matrix = torch.exp(sim_proto_pp_matrix/0.07)
-            scaled_sim_proto_pp_matrix = torch.log(scaled_sim_proto_pp_matrix) # temperature
-            clipped_sim_matrix = torch.clamp(scaled_sim_proto_pp_matrix, min=1e-6)
+            scaled_sim_proto_pp_matrix = torch.exp(sim_proto_pp_matrix/2.0)
+            # log_sim_proto_pp_matrix = torch.log(scaled_sim_proto_pp_matrix) # temperature
+            # clipped_sim_matrix = torch.clamp(log_sim_proto_pp_matrix, min=1e-4)
 
             loss_nk_mk_k = 0      
             for i in range(n_k):
-                numerator = clipped_sim_matrix[i][mk_first_idx:mk_last_idx]
-                denominator = clipped_sim_matrix[i][mask_others_denom]
-                loss_nk_mk_k += numerator/(torch.sum(denominator, dim=0) + 1e-8)
+                numerator = scaled_sim_proto_pp_matrix[i][mk_first_idx:mk_last_idx].clone()
+                denominator = scaled_sim_proto_pp_matrix[i][mask_others_denom].clone()
+                loss_nk_mk_k = loss_nk_mk_k + torch.log(numerator/(denominator.sum(dim=0) + 1e-8))
                 
-            loss_nk_mk_k = loss_nk_mk_k / m_k
-            loss_nk_mk_k = loss_nk_mk_k/ n_k
-            contrastive_loss += loss_nk_mk_k.sum(dim=0)
+            loss_nk_k = loss_nk_mk_k / m_k
+            loss_k = loss_nk_k/ n_k
+            contrastive_loss = contrastive_loss + loss_k.sum()
 
         contrastive_loss = -contrastive_loss/ 3  #num_classes
+        assert -10<contrastive_loss<10, "Loss is not computed correctly"
         return contrastive_loss
 
 class FeatureBankRegistry(object):
