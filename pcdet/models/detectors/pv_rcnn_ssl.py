@@ -58,8 +58,6 @@ class PVRCNN_SSL(Detector3DTemplate):
                          'weights', 'roi_scores', 'pcv_scores', 'num_points_in_roi', 'class_labels', 'iteration']
         self.val_dict = {val: [] for val in vals_to_store}
 
-        self.pseudo_projection_dict = {'projection':[], 'label':[]}
-
     @staticmethod
     def _clone_gt_boxes_and_feats(batch_dict):
         return {
@@ -112,7 +110,7 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         return bank_inputs
 
-    def get_pseudo_projections(self,batch_dict,inds):
+    def get_pseudo_projections(self,batch_dict):
         selected_batch_dict = self._clone_gt_boxes_and_feats(batch_dict)
         B,N = batch_dict['ori_gt_boxes'].shape[:2]
         ori_pooled_features = self.pv_rcnn.roi_head.roi_grid_pool(selected_batch_dict, use_gtboxes=False, use_ori_gtboxes=True)
@@ -122,14 +120,13 @@ class PVRCNN_SSL(Detector3DTemplate):
             contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
         ori_projections = self.pv_rcnn.roi_head.stg2_projector(ori_pooled_features.view(batch_size_rcnn,-1,1))
         ori_projections = ori_projections.view(B,-1,256)
-        ori_projections = ori_projections[inds]
-        ori_labels = selected_batch_dict['ori_gt_boxes'][..., 7][inds].int()
-        nonzero_mask = torch.logical_not(torch.eq(ori_labels, 0))
-        ori_labels = ori_labels[nonzero_mask]
-        ori_projections = ori_projections[nonzero_mask]
-        return ori_projections, ori_labels
+        ori_labels = selected_batch_dict['ori_gt_boxes'][..., 7].int()
+        ori_projections = ori_projections.cpu()
+        ori_labels = ori_labels.cpu()
+        ori_gt_boxes = selected_batch_dict['ori_gt_boxes'].cpu()
+        return ori_projections, ori_labels, ori_gt_boxes
 
-    def _prep_wa_bank_inputs(self, batch_dict, inds, num_points_threshold=20):
+    def _prep_wa_bank_inputs(self, batch_dict, inds,ulb_inds, pl_projections, pl_labels, ori_pl_boxes, iteration, num_points_threshold=20):
         selected_batch_dict_ema = self._clone_gt_boxes_and_feats(batch_dict)
 
         with torch.no_grad():
@@ -141,7 +138,10 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         projections_gt = projections_gt.view(*batch_dict['gt_boxes'].shape[:2], -1)
         bank_inputs = defaultdict(list)
-        for ix in inds:
+        for ix,jx in zip(inds,ulb_inds):
+            pl_boxes = ori_pl_boxes[jx]
+            pl_nonzero_mask = torch.logical_not(torch.eq(pl_boxes, 0).all(dim=-1))
+            pl_boxes = pl_boxes[pl_nonzero_mask]
             gt_boxes = selected_batch_dict_ema['gt_boxes'][ix]
             nonzero_mask = torch.logical_not(torch.eq(gt_boxes, 0).all(dim=-1))
             if nonzero_mask.sum() == 0:
@@ -157,11 +157,14 @@ class PVRCNN_SSL(Detector3DTemplate):
             ins_idxs = batch_dict['instance_idx'][ix][nonzero_mask].int()
             smpl_id = torch.from_numpy(batch_dict['frame_id'].astype(np.int32))[ix].to(gt_boxes.device)
 
-            # filter out gt instances with too few points when updating the bank
+            if iteration<2:
+                pl_feats = pl_projections[jx][pl_nonzero_mask] 
+                pl_label = pl_labels[jx][pl_nonzero_mask]
+            else:
+                pl_feats = []
+                pl_label = []
             num_points_in_gt = roiaware_pool3d_utils.points_in_boxes_cpu(points.cpu(), gt_boxes.cpu()).sum(dim=-1)
             valid_gts_mask = (num_points_in_gt >= num_points_threshold)
-            # print(f"{(~valid_gts_mask).sum()} gt instance(s) with id(s) {ins_idxs[~valid_gts_mask].tolist()}"
-            #       f" and num points {num_points_in_gt[~valid_gts_mask].tolist()} are filtered")
             if valid_gts_mask.sum() == 0:
                 print(f"no valid gt instances with enough points in frame {batch_dict['frame_id'][ix]}")
                 continue
@@ -169,8 +172,9 @@ class PVRCNN_SSL(Detector3DTemplate):
             bank_inputs['labels'].append(gt_labels[valid_gts_mask])
             bank_inputs['ins_ids'].append(ins_idxs[valid_gts_mask])
             bank_inputs['smpl_ids'].append(smpl_id)
-
-        return bank_inputs
+            bank_inputs['pl_feats'].append(pl_feats)
+            bank_inputs['pl_labels'].append(pl_label)
+        return bank_inputs    
 
 
     def forward(self, batch_dict):
@@ -299,13 +303,10 @@ class PVRCNN_SSL(Detector3DTemplate):
         if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTOTYPING', False):
             # Update the bank with student's features from augmented labeled data
             bank = feature_bank_registry.get('gt_wa_lbl_prototypes')
-            wa_gt_lbl_inputs = self._prep_wa_bank_inputs(batch_dict_ema, lbl_inds, bank.num_points_thresh)
-            bank.update(**wa_gt_lbl_inputs, iteration=batch_dict['cur_iteration'])
-            ori_pseudo_projections, ori_labels  = self.get_pseudo_projections(batch_dict, ulb_inds)
-            if batch_dict['cur_iteration'] < 3 :
-                for i in range(len(ori_pseudo_projections)):
-                    self.pseudo_projection_dict['projection'].append(ori_pseudo_projections[i].cpu())
-                    self.pseudo_projection_dict['label'].append(ori_labels[i].view(-1).cpu())
+            ori_pseudo_projections, ori_labels, ori_gt_boxes  = self.get_pseudo_projections(batch_dict)
+            wa_gt_lbl_inputs = self._prep_wa_bank_inputs(batch_dict_ema, lbl_inds, ulb_inds, ori_pseudo_projections, ori_labels, ori_gt_boxes, batch_dict['cur_iteration'], bank.num_points_thresh)
+            bank.update(**wa_gt_lbl_inputs,iteration=batch_dict['cur_iteration'])
+
 
         # For metrics calculation
         self.pv_rcnn.roi_head.forward_ret_dict['unlabeled_inds'] = ulb_inds
@@ -340,9 +341,9 @@ class PVRCNN_SSL(Detector3DTemplate):
             if proto_cont_loss is not None:
                 loss += proto_cont_loss * self.model_cfg['ROI_HEAD']['PROTO_CONTRASTIVE_LOSS_WEIGHT']
                 tb_dict['proto_cont_loss'] = proto_cont_loss.item()
-        if self.model_cfg['ROI_HEAD'].get('ENABLE_LPCONT_LOSS', False) and batch_dict['cur_iteration'] > 15:
+        if self.model_cfg['ROI_HEAD'].get('ENABLE_LPCONT_LOSS', False) and bank.is_initialized():
             # lpcont_loss = self._get_lpcont_loss(batch_dict, bank, ulb_inds, pl_conf_scores_tensor, pl_sem_scores_tensor, pl_labels_tensor,masks_tensor)
-            ori_lpcont_loss = self._get_lpcont_loss(batch_dict, bank, ulb_inds,ori_pseudo_projections, ori_labels )
+            ori_lpcont_loss = self._get_lpcont_loss(batch_dict, bank, ulb_inds,ori_pseudo_projections, ori_labels,ori_gt_boxes)
             if ori_lpcont_loss is not None:
                 assert ori_lpcont_loss>-1e+6, "Loss is not computed correctly"
                 loss += ori_lpcont_loss * self.model_cfg['ROI_HEAD']['LPCONT_LOSS_WEIGHT']
@@ -464,13 +465,15 @@ class PVRCNN_SSL(Detector3DTemplate):
         return proto_cont_loss.view(B, N)[ulb_inds][ulb_nonzero_mask].mean()
 
     # def _get_lpcont_loss(self, batch_dict, bank, ulb_inds, pl_conf_scores, pl_sem_scores, pl_labels, masks):
-    def _get_lpcont_loss(self, batch_dict, bank, ulb_inds, ori_pseudo_projections, ori_labels):
+    def _get_lpcont_loss(self, batch_dict, bank, ulb_inds, ori_pseudo_projections, ori_labels, ori_gt_boxes):
         gt_boxes = batch_dict['ori_gt_boxes']
         nonzero_ulb_mask = torch.logical_not(torch.eq(gt_boxes, 0).all(dim=-1))[ulb_inds]
         if nonzero_ulb_mask.sum() == 0:
             print(f"No pl instances predicted for strongly augmented frame(s) {batch_dict['frame_id'][ulb_inds]}")
             return
         B, N = gt_boxes.shape[:2]
+        ori_pseudo_projections = ori_pseudo_projections[ulb_inds][nonzero_ulb_mask]
+        ori_labels = ori_labels[ulb_inds][nonzero_ulb_mask]
         # Sample pseudo projections to get uniform number 5,5,5 per batch
         # sampled_projections, sampled_labels, topk_list = self.sample_pseudo_positives(self.pseudo_projection_dict, ori_pseudo_projections,ori_labels)
         # ori_pseudo_projections = torch.stack(sampled_projections)
@@ -484,12 +487,6 @@ class PVRCNN_SSL(Detector3DTemplate):
         # pl_conf_scores = pl_conf_scores[pl_conf_scores>0]
         # pl_sem_scores = pl_sem_scores[pl_sem_scores>0]
         # pl_labels = pl_labels[pl_labels>0]
-
-        
-        # student_pl_projections = self.pv_rcnn.roi_head.pool_features(batch_dict, use_gtboxes=True, shared=False, projector = True)
-        # student_pl_projections = student_pl_projections.squeeze(-1).reshape(B,-1,256)
-        # student_pl_projections = student_pl_projections[ulb_inds][nonzero_ulb_mask]
-        # assert student_pl_projections.shape[0] == pl_conf_scores.shape[0] == pl_sem_scores.shape[0] == pl_labels.shape[0]
 
         topk_list=[5,5,5]
         lp_cont_loss = bank.get_lpcont_loss(ori_pseudo_projections, ori_labels, topk_list)
