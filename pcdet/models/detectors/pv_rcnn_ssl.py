@@ -110,20 +110,30 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         return bank_inputs
 
-    def get_pseudo_projections(self,batch_dict):
+    def get_pseudo_projections(self,batch_dict, ulb_inds):
         selected_batch_dict = self._clone_gt_boxes_and_feats(batch_dict)
-        B,N = batch_dict['ori_gt_boxes'].shape[:2]
-        ori_pooled_features = self.pv_rcnn.roi_head.roi_grid_pool(selected_batch_dict, use_gtboxes=False, use_ori_gtboxes=True)
+        B,N = batch_dict['ori_gt_boxes'].shape[:2]   
+        # Generating mask to get ulb inds only... using [ulb_inds] breaking computation graph
+        maxval = ulb_inds[-1]+1
+        arange_values = torch.arange(maxval)
+        mask = torch.isin(arange_values, ulb_inds.cpu())
+        gt_mask = mask.unsqueeze(-1)
+        gt_mask = gt_mask.unsqueeze(-1)
+        ori_gt_boxes = torch.masked_select(batch_dict['ori_gt_boxes'],gt_mask.cuda())
+        ori_gt_boxes = ori_gt_boxes.reshape(B//2,N,-1)
+        ori_labels = ori_gt_boxes[...,7].int().cpu()
+        B1,N1 = ori_gt_boxes.shape[:2]
+        assert torch.equal(ori_gt_boxes,batch_dict['ori_gt_boxes'][ulb_inds])
+        with torch.no_grad():
+            ori_pooled_features = self.pv_rcnn.roi_head.roi_grid_pool(selected_batch_dict, use_gtboxes=False, use_ori_gtboxes=True).clone()
         grid_size = self.model_cfg.ROI_HEAD.ROI_GRID_POOL.GRID_SIZE
         batch_size_rcnn = ori_pooled_features.shape[0]
         ori_pooled_features = ori_pooled_features.permute(0, 2, 1). \
             contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
         ori_projections = self.pv_rcnn.roi_head.stg2_projector(ori_pooled_features.view(batch_size_rcnn,-1,1))
         ori_projections = ori_projections.view(B,-1,256)
-        ori_labels = selected_batch_dict['ori_gt_boxes'][..., 7].int()
-        ori_projections = ori_projections.cpu()
-        ori_labels = ori_labels.cpu()
-        ori_gt_boxes = selected_batch_dict['ori_gt_boxes'].cpu()
+        ori_projections = torch.masked_select(ori_projections,gt_mask.cuda())
+        ori_projections = ori_projections.reshape(B//2,N,-1).cpu()
         return ori_projections, ori_labels, ori_gt_boxes
 
     def _prep_wa_bank_inputs(self, batch_dict, inds,ulb_inds, pl_projections, pl_labels, ori_pl_boxes, iteration, num_points_threshold=20):
@@ -131,17 +141,11 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         with torch.no_grad():
             projections_gt = self.pv_rcnn_ema.roi_head.pool_features(selected_batch_dict_ema, use_gtboxes=True, shared=False, projector=True) 
-            # ori_pooled_ft_ema = self.pv_rcnn_ema.roi_head.ori_roi_grid_pool(selected_batch_dict_ema, use_gtboxes=True)
-            # ori_batch_size_rcnn = ori_pooled_ft_ema.shape[0]
-            # ori_projections = self.stg2_projector(ori_pooled_ft_ema.view(ori_batch_size_rcnn, -1, 1))
-            # batch_dict['ori_projections'] = ori_projections
-
+          
         projections_gt = projections_gt.view(*batch_dict['gt_boxes'].shape[:2], -1)
         bank_inputs = defaultdict(list)
-        for ix,jx in zip(inds,ulb_inds):
-            pl_boxes = ori_pl_boxes[jx]
-            pl_nonzero_mask = torch.logical_not(torch.eq(pl_boxes, 0).all(dim=-1))
-            pl_boxes = pl_boxes[pl_nonzero_mask]
+        for ix in inds:
+
             gt_boxes = selected_batch_dict_ema['gt_boxes'][ix]
             nonzero_mask = torch.logical_not(torch.eq(gt_boxes, 0).all(dim=-1))
             if nonzero_mask.sum() == 0:
@@ -150,19 +154,13 @@ class PVRCNN_SSL(Detector3DTemplate):
             gt_boxes = gt_boxes[nonzero_mask]
             sample_mask = batch_dict['points'][:, 0].int() == ix
             points = batch_dict['points'][sample_mask, 1:4]
-            gt_feat = projections_gt[ix][nonzero_mask]
+            gt_feat = projections_gt[ix][nonzero_mask] # labeled projections from teacher stored in bank
             # gt_labels = gt_boxes[:, 7].int() - 1
             gt_labels = gt_boxes[:, 7].int()
             gt_boxes = gt_boxes[:, :7]
             ins_idxs = batch_dict['instance_idx'][ix][nonzero_mask].int()
             smpl_id = torch.from_numpy(batch_dict['frame_id'].astype(np.int32))[ix].to(gt_boxes.device)
 
-            if iteration<2:
-                pl_feats = pl_projections[jx][pl_nonzero_mask] 
-                pl_label = pl_labels[jx][pl_nonzero_mask]
-            else:
-                pl_feats = []
-                pl_label = []
             num_points_in_gt = roiaware_pool3d_utils.points_in_boxes_cpu(points.cpu(), gt_boxes.cpu()).sum(dim=-1)
             valid_gts_mask = (num_points_in_gt >= num_points_threshold)
             if valid_gts_mask.sum() == 0:
@@ -172,8 +170,21 @@ class PVRCNN_SSL(Detector3DTemplate):
             bank_inputs['labels'].append(gt_labels[valid_gts_mask])
             bank_inputs['ins_ids'].append(ins_idxs[valid_gts_mask])
             bank_inputs['smpl_ids'].append(smpl_id)
+            
+        if iteration<2: #only first 2 due to memory issues
+            pl_nonzero_mask =  torch.logical_not(torch.eq(ori_pl_boxes, 0).all(dim=-1))
+            pl_nonzero_mask = pl_nonzero_mask.cpu()
+            B,N = ori_pl_boxes.shape[:2]
+            pl_nonzero_mask_proj = pl_nonzero_mask.unsqueeze(-1).expand(B,N,256)
+            pl_nonzero_mask_proj = pl_nonzero_mask_proj.cpu()
+            pl_feats = torch.masked_select(pl_projections,pl_nonzero_mask_proj)
+            pl_feats = pl_feats.reshape(-1,256)
+            pl_label = torch.masked_select(pl_labels,pl_nonzero_mask)
             bank_inputs['pl_feats'].append(pl_feats)
             bank_inputs['pl_labels'].append(pl_label)
+        else:
+            bank_inputs['pl_feats'] = []   
+            bank_inputs['pl_labels'] = []          
         return bank_inputs    
 
 
@@ -303,7 +314,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTOTYPING', False):
             # Update the bank with student's features from augmented labeled data
             bank = feature_bank_registry.get('gt_wa_lbl_prototypes')
-            ori_pseudo_projections, ori_labels, ori_gt_boxes  = self.get_pseudo_projections(batch_dict)
+            ori_pseudo_projections, ori_labels, ori_gt_boxes  = self.get_pseudo_projections(batch_dict,ulb_inds)
             wa_gt_lbl_inputs = self._prep_wa_bank_inputs(batch_dict_ema, lbl_inds, ulb_inds, ori_pseudo_projections, ori_labels, ori_gt_boxes, batch_dict['cur_iteration'], bank.num_points_thresh)
             bank.update(**wa_gt_lbl_inputs,iteration=batch_dict['cur_iteration'])
 
@@ -472,8 +483,8 @@ class PVRCNN_SSL(Detector3DTemplate):
             print(f"No pl instances predicted for strongly augmented frame(s) {batch_dict['frame_id'][ulb_inds]}")
             return
         B, N = gt_boxes.shape[:2]
-        ori_pseudo_projections = ori_pseudo_projections[ulb_inds][nonzero_ulb_mask]
-        ori_labels = ori_labels[ulb_inds][nonzero_ulb_mask]
+        ori_pseudo_projections = ori_pseudo_projections[nonzero_ulb_mask]
+        ori_labels = ori_labels[nonzero_ulb_mask]
         # Sample pseudo projections to get uniform number 5,5,5 per batch
         # sampled_projections, sampled_labels, topk_list = self.sample_pseudo_positives(self.pseudo_projection_dict, ori_pseudo_projections,ori_labels)
         # ori_pseudo_projections = torch.stack(sampled_projections)

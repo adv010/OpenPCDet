@@ -104,7 +104,7 @@ class PVRCNNHead(RoIHeadTemplate):
         if use_gtboxes:
             rois = batch_dict['gt_boxes'][..., 0:7] 
         elif use_ori_gtboxes:
-            rois = batch_dict['ori_gt_boxes'][..., 0:7]
+            rois = batch_dict['ori_gt_boxes'][..., 0:7].clone()
         else:
             rois = batch_dict['rois']
         point_coords = batch_dict["point_coords"]
