@@ -68,7 +68,10 @@ class FeatureBank(Metric):
                 self.pl_feats.extend(pl_feats)                 # (N, C)
                 self.pl_labels.extend(pl_labels)      # (N,)
     def compute(self):
-        unique_smpl_ids = torch.unique(torch.cat(self.smpl_ids))
+        try:
+            unique_smpl_ids = torch.unique(torch.cat((self.smpl_ids,), dim=0))
+        except:
+            unique_smpl_ids = torch.unique(torch.cat((self.smpl_ids), dim=0))
         if len(unique_smpl_ids) < self.reset_state_interval:
             return None
 
