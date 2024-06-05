@@ -113,15 +113,17 @@ class PVRCNN_SSL(Detector3DTemplate):
     def get_pseudo_projections(self,batch_dict, ulb_inds):
         selected_batch_dict = self._clone_gt_boxes_and_feats(batch_dict)
         B,N = batch_dict['ori_gt_boxes'].shape[:2]   
+        device = batch_dict['ori_gt_boxes'].device   
         # Generating mask to get ulb inds only... using [ulb_inds] breaking computation graph
-        maxval = ulb_inds[-1]+1
+        maxval = ulb_inds[-1] + 1
         arange_values = torch.arange(maxval)
+        mask = torch.any((arange_values[..., None] == ulb_inds.cpu()).view(-1, len(ulb_inds.cpu())), dim=-1)
         mask = torch.isin(arange_values, ulb_inds.cpu())
         gt_mask = mask.unsqueeze(-1)
         gt_mask = gt_mask.unsqueeze(-1)
-        ori_gt_boxes = torch.masked_select(batch_dict['ori_gt_boxes'],gt_mask.cuda())
+        ori_gt_boxes = torch.masked_select(batch_dict['ori_gt_boxes'],gt_mask.to(device))
         ori_gt_boxes = ori_gt_boxes.reshape(B//2,N,-1)
-        ori_labels = ori_gt_boxes[...,7].int().cpu()
+        ori_labels = ori_gt_boxes[...,7].int()
         B1,N1 = ori_gt_boxes.shape[:2]
         assert torch.equal(ori_gt_boxes,batch_dict['ori_gt_boxes'][ulb_inds])
         with torch.no_grad():
@@ -132,8 +134,8 @@ class PVRCNN_SSL(Detector3DTemplate):
             contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
         ori_projections = self.pv_rcnn.roi_head.stg2_projector(ori_pooled_features.view(batch_size_rcnn,-1,1))
         ori_projections = ori_projections.view(B,-1,256)
-        ori_projections = torch.masked_select(ori_projections,gt_mask.cuda())
-        ori_projections = ori_projections.reshape(B//2,N,-1).cpu()
+        ori_projections = torch.masked_select(ori_projections,gt_mask.to(device))
+        ori_projections = ori_projections.reshape(B//2,N,-1)
         return ori_projections, ori_labels, ori_gt_boxes
 
     def _prep_wa_bank_inputs(self, batch_dict, inds,ulb_inds, pl_projections, pl_labels, ori_pl_boxes, bank, iteration, num_points_threshold=20):
@@ -176,7 +178,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             
         # if bank.is_initialized():
         pl_nonzero_mask =  torch.logical_not(torch.eq(original_pl_boxes, 0).all(dim=-1))
-        pl_nonzero_mask = pl_nonzero_mask.cpu()
+        pl_nonzero_mask = pl_nonzero_mask.to(device=pl_projections.device)
         B,N = original_pl_boxes.shape[:2]
         pl_nonzero_mask_proj = pl_nonzero_mask.unsqueeze(-1).expand(B,N,256).clone()
         pl_feats = torch.masked_select(bank_pl_projections,pl_nonzero_mask_proj)
