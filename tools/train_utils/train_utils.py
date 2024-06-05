@@ -90,7 +90,8 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
         cur_forward_time = forward_timer - data_timer
 
         torch.autograd.set_detect_anomaly(True)
-        loss.backward(retain_graph=True)
+        loss.backward()
+        # loss.backward(retain_graph=True)
         clip_grad_norm_(model.parameters(), optim_cfg.GRAD_NORM_CLIP)
         optimizer.step()
 

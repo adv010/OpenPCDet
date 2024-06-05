@@ -136,13 +136,16 @@ class PVRCNN_SSL(Detector3DTemplate):
         ori_projections = ori_projections.reshape(B//2,N,-1).cpu()
         return ori_projections, ori_labels, ori_gt_boxes
 
-    def _prep_wa_bank_inputs(self, batch_dict, inds,ulb_inds, pl_projections, pl_labels, ori_pl_boxes, iteration, num_points_threshold=20):
+    def _prep_wa_bank_inputs(self, batch_dict, inds,ulb_inds, pl_projections, pl_labels, ori_pl_boxes, bank, iteration, num_points_threshold=20):
         selected_batch_dict_ema = self._clone_gt_boxes_and_feats(batch_dict)
+        original_pl_boxes = ori_pl_boxes.clone().detach()
 
         with torch.no_grad():
             projections_gt = self.pv_rcnn_ema.roi_head.pool_features(selected_batch_dict_ema, use_gtboxes=True, shared=False, projector=True) 
           
         projections_gt = projections_gt.view(*batch_dict['gt_boxes'].shape[:2], -1)
+        bank_pl_projections = pl_projections.clone()
+        bank_pl_labels = pl_labels.clone()
         bank_inputs = defaultdict(list)
         for ix in inds:
 
@@ -171,20 +174,20 @@ class PVRCNN_SSL(Detector3DTemplate):
             bank_inputs['ins_ids'].append(ins_idxs[valid_gts_mask])
             bank_inputs['smpl_ids'].append(smpl_id)
             
-        if iteration<2: #only first 2 due to memory issues
-            pl_nonzero_mask =  torch.logical_not(torch.eq(ori_pl_boxes, 0).all(dim=-1))
-            pl_nonzero_mask = pl_nonzero_mask.cpu()
-            B,N = ori_pl_boxes.shape[:2]
-            pl_nonzero_mask_proj = pl_nonzero_mask.unsqueeze(-1).expand(B,N,256)
-            pl_nonzero_mask_proj = pl_nonzero_mask_proj.cpu()
-            pl_feats = torch.masked_select(pl_projections,pl_nonzero_mask_proj)
-            pl_feats = pl_feats.reshape(-1,256)
-            pl_label = torch.masked_select(pl_labels,pl_nonzero_mask)
-            bank_inputs['pl_feats'].append(pl_feats)
-            bank_inputs['pl_labels'].append(pl_label)
-        else:
-            bank_inputs['pl_feats'] = []   
-            bank_inputs['pl_labels'] = []          
+        # if bank.is_initialized():
+        pl_nonzero_mask =  torch.logical_not(torch.eq(original_pl_boxes, 0).all(dim=-1))
+        pl_nonzero_mask = pl_nonzero_mask.cpu()
+        B,N = original_pl_boxes.shape[:2]
+        pl_nonzero_mask_proj = pl_nonzero_mask.unsqueeze(-1).expand(B,N,256).clone()
+        pl_feats = torch.masked_select(bank_pl_projections,pl_nonzero_mask_proj)
+        pl_feats_masked = pl_feats.reshape(-1,256).clone()
+        pl_label = torch.masked_select(bank_pl_labels,pl_nonzero_mask)
+        bank_inputs['pl_feats'].append(pl_feats_masked.clone())
+        bank_inputs['pl_labels'].append(pl_label.clone())
+        # else:
+        #     bank_inputs['pl_feats'] = []   
+        #     bank_inputs['pl_labels'] = []          
+    
         return bank_inputs    
 
 
@@ -315,7 +318,9 @@ class PVRCNN_SSL(Detector3DTemplate):
             # Update the bank with student's features from augmented labeled data
             bank = feature_bank_registry.get('gt_wa_lbl_prototypes')
             ori_pseudo_projections, ori_labels, ori_gt_boxes  = self.get_pseudo_projections(batch_dict,ulb_inds)
-            wa_gt_lbl_inputs = self._prep_wa_bank_inputs(batch_dict_ema, lbl_inds, ulb_inds, ori_pseudo_projections, ori_labels, ori_gt_boxes, batch_dict['cur_iteration'], bank.num_points_thresh)
+            batch_dict_ema['ori_pseudo_projections'] = ori_pseudo_projections.clone()
+            batch_dict_ema['ori_labels'] = ori_labels.clone()
+            wa_gt_lbl_inputs = self._prep_wa_bank_inputs(batch_dict_ema, lbl_inds, ulb_inds, ori_pseudo_projections, ori_labels, ori_gt_boxes, bank,batch_dict['cur_iteration'], bank.num_points_thresh)
             bank.update(**wa_gt_lbl_inputs,iteration=batch_dict['cur_iteration'])
 
 

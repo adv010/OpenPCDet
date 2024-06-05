@@ -63,6 +63,7 @@ class FeatureBank(Metric):
             self.smpl_ids.append(smpl_ids[i].view(-1))  # (1,)     
             rois_iter = torch.tensor(iteration, device=feats[0].device).expand_as(ins_ids[i].view(-1))
             self.iterations.append(rois_iter)           # (N,)
+        
         if not len(pl_feats)==0:
                 self.pl_feats.extend(pl_feats)                 # (N, C)
                 self.pl_labels.extend(pl_labels)      # (N,)

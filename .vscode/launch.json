@@ -17,7 +17,7 @@
                 "../../ckpt/pv_rcnn/checkpoint_epoch_80.pth",
                 "--save_to_file",
                 "--extra_tag",
-                "projector_LPCont_ORIGT_bounds_debug_simß",
+                "projector_LPCont_ORIGT_bounds_debug_sim",
                 "--epochs",
                 "60",
                  "--ckpt_save_interval",
