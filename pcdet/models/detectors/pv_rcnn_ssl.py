@@ -13,7 +13,7 @@ from pcdet.utils import common_utils
 from pcdet.utils.stats_utils import metrics_registry
 from pcdet.utils.prototype_utils import feature_bank_registry
 from collections import defaultdict
-from ssod import AdaptiveThresholding
+# from ssod import AdaptiveThresholding
 #from visual_utils import open3d_vis_utils as V
 
 
@@ -245,11 +245,11 @@ class PVRCNN_SSL(Detector3DTemplate):
         loss = 0
         # Use the same reduction method as the baseline model (3diou) by the default
         reduce_loss_fn = getattr(torch, self.model_cfg.REDUCE_LOSS, 'sum')
-        loss += reduce_loss_fn(loss_rpn_cls[lbl_inds, ...])
-        loss += reduce_loss_fn(loss_rpn_box[lbl_inds, ...]) + reduce_loss_fn(loss_rpn_box[ulb_inds, ...]) * self.unlabeled_weight
-        loss += reduce_loss_fn(loss_point[lbl_inds, ...])
-        loss += reduce_loss_fn(loss_rcnn_cls[lbl_inds, ...])
-        loss += reduce_loss_fn(loss_rcnn_box[lbl_inds, ...])
+        # loss += reduce_loss_fn(loss_rpn_cls[lbl_inds, ...])
+        loss += reduce_loss_fn(loss_rpn_box[ulb_inds, ...]) * self.unlabeled_weight #+ reduce_loss_fn(loss_rpn_box[lbl_inds, ...]) 
+        # loss += reduce_loss_fn(loss_point[lbl_inds, ...])
+        # loss += reduce_loss_fn(loss_rcnn_cls[lbl_inds, ...])
+        # loss += reduce_loss_fn(loss_rcnn_box[lbl_inds, ...])
 
         if self.unlabeled_supervise_cls:
             loss += reduce_loss_fn(loss_rpn_cls[ulb_inds, ...]) * self.unlabeled_weight
@@ -483,7 +483,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             masks.append(labels.new_ones((1,), dtype=torch.bool))
 
         for ind in ulb_inds:
-            # scores = pls_dict[ind]['pred_scores']  # Using gt scores for now
+            scores = pls_dict[ind]['pred_scores']  # Using gt scores for now
             boxs = pls_dict[ind]['pred_boxes']
             labels = pls_dict[ind]['pred_labels']
             sem_scores = pls_dict[ind]['pred_sem_scores']

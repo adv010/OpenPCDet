@@ -396,7 +396,7 @@ class KittiDatasetSSL(DatasetTemplate):
             info_unlabeled = np.random.choice(self.unlabeled_kitti_infos, 1)[0]
 
             data_dict_unlabeled = self.get_item_single(info_unlabeled, unlabeled=True)
-            return [data_dict_labeled, data_dict_unlabeled]
+            return data_dict_unlabeled            # return [data_dict_labeled, data_dict_unlabeled]
         else:
             return data_dict_labeled
 
