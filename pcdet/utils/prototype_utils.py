@@ -43,19 +43,19 @@ class FeatureBank(Metric):
         self.add_state('pl_feats', default=[], dist_reduce_fx='cat')
         self.add_state('pl_labels', default=[], dist_reduce_fx='cat')
 
-    def _init(self, unique_ins_ids, labels,pl_feats,pl_labels):
+    def _init(self, unique_ins_ids, labels):
         self.bank_size = len(unique_ins_ids)
         print(f"Initializing the feature bank with size {self.bank_size} and feature size {self.feat_size}")
         self.prototypes = torch.zeros((self.bank_size, self.feat_size)).cuda()
         self.classwise_prototypes = torch.zeros((3, self.feat_size)).cuda()
         self.proto_labels = labels
-        self.pp_feats = pl_feats
-        self.pp_labels = pl_labels
+        # self.pp_feats = pl_feats
+        # self.pp_labels = pl_labels
         self.num_updates = torch.zeros(self.bank_size).cuda()
         self.insId_protoId_mapping = {unique_ins_ids[i]: i for i in range(len(unique_ins_ids))}
 
     def update(self, feats: [torch.Tensor], labels: [torch.Tensor], ins_ids: [torch.Tensor], smpl_ids: torch.Tensor,
-               iteration: int, pl_feats: [torch.Tensor], pl_labels: [torch.Tensor],) -> None:
+               iteration: int) -> None:
         for i in range(len(feats)):
             self.feats.append(feats[i])                 # (N, C)
             self.labels.append(labels[i].view(-1))      # (N,)
@@ -64,9 +64,9 @@ class FeatureBank(Metric):
             rois_iter = torch.tensor(iteration, device=feats[0].device).expand_as(ins_ids[i].view(-1))
             self.iterations.append(rois_iter)           # (N,)
         
-        if not len(pl_feats)==0:
-                self.pl_feats.extend(pl_feats)                 # (N, C)
-                self.pl_labels.extend(pl_labels)      # (N,)
+        # if not len(pl_feats)==0:
+        #         self.pl_feats.extend(pl_feats)                 # (N, C)
+        #         self.pl_labels.extend(pl_labels)      # (N,)
     def compute(self):
         try:
             unique_smpl_ids = torch.unique(torch.cat((self.smpl_ids,), dim=0))
@@ -82,8 +82,8 @@ class FeatureBank(Metric):
             iterations = torch.cat((self.iterations,),dim=0).int().cpu().numpy()
             ins_ids = torch.cat((self.ins_ids,), dim=0).int().cpu().numpy()
             iterations = torch.cat((self.iterations,), dim=0).int().cpu().numpy()
-            pl_feats = torch.cat((self.pl_feats,),dim=0)
-            pl_labels = torch.cat((self.pl_labels,),dim=0).int()
+            # pl_feats = torch.cat((self.pl_feats,),dim=0)
+            # pl_labels = torch.cat((self.pl_labels,),dim=0).int()
         except:
             features = torch.cat((self.feats), dim=0)
             ins_ids = torch.cat(self.ins_ids).int().cpu().numpy()
@@ -91,8 +91,8 @@ class FeatureBank(Metric):
             iterations = torch.cat(self.iterations).int().cpu().numpy()
             ins_ids = torch.cat((self.ins_ids), dim=0).int().cpu().numpy()
             iterations = torch.cat((self.iterations), dim=0).int().cpu().numpy()            
-            pl_feats = torch.cat((self.pl_feats),dim=0)
-            pl_labels = torch.cat((self.pl_labels),dim=0).int()
+            # pl_feats = torch.cat((self.pl_feats),dim=0)
+            # pl_labels = torch.cat((self.pl_labels),dim=0).int()
 
         assert len(features) == len(labels) == len(ins_ids) == len(iterations), \
             "length of features, labels, ins_ids, and iterations should be the same"
@@ -100,7 +100,7 @@ class FeatureBank(Metric):
         unique_ins_ids, split_indices = np.unique(sorted_ins_ids, return_index=True)
 
         if not self.initialized:
-            self._init(unique_ins_ids, labels[arg_sorted_ins_ids[split_indices]],pl_feats,pl_labels)
+            self._init(unique_ins_ids, labels[arg_sorted_ins_ids[split_indices]])
 
         # Group by ins_ids
         inds_groupby_ins_ids = np.split(arg_sorted_ins_ids, split_indices[1:])
@@ -197,70 +197,94 @@ class FeatureBank(Metric):
         """
         N = len(self.prototypes)
         contrastive_loss = torch.tensor(0.0).to(pseudo_positives.device)
+        car_loss = torch.tensor(0.0).to(pseudo_positives.device)
+        ped_loss = torch.tensor(0.0).to(pseudo_positives.device)
+        cyc_loss = torch.tensor(0.0).to(pseudo_positives.device)
         sorted_labels, sorted_args = torch.sort(self.proto_labels)
         sorted_prototypes = self.prototypes[sorted_args] # sort prototypes to arrange classwise
         
         sorted_pp_labels, sorted_pp_args = torch.sort(topk_labels)
         sorted_pp_features = pseudo_positives[sorted_pp_args] # sort pseudo positives to arrange classwise  
 
-        '''Sampling bank pseudo positives so that pseudo positives balanced same as labeled bank instances'''
-        # for i in range(self.num_classes):
-        lbl_bank_elements = torch.where(sorted_labels==1)[0].size(0)        
-        ulb_batch_elements = torch.where(sorted_pp_labels==1)[0].size(0)
-        num_to_sample = max(lbl_bank_elements - ulb_batch_elements, 0)
-        pp_class_indices = torch.where(self.pp_labels == 1)[0]
-        # sampled_indices = torch.multinomial(torch.ones(class_indices.size(0)), num_to_sample, replacement=True)
-        car_sampled_indices = np.random.choice(pp_class_indices.cpu().numpy(),num_to_sample,replace=True)
-        car_sampled_feats = self.pp_feats[car_sampled_indices].clone()
-        car_sampled_labels = self.pp_labels[car_sampled_indices].clone()
-        sorted_pp_features= torch.cat((sorted_pp_features, car_sampled_feats),dim=0)
-        sorted_pp_labels = torch.cat((sorted_pp_labels, car_sampled_labels),dim=0)
+        # '''Sampling bank pseudo positives so that pseudo positives balanced same as labeled bank instances'''
+        # # for i in range(self.num_classes):
+        # lbl_bank_elements = torch.where(sorted_labels==1)[0].size(0)        
+        # ulb_batch_elements = torch.where(sorted_pp_labels==1)[0].size(0)
+        # num_to_sample = max(lbl_bank_elements - ulb_batch_elements, 0)
+        # pp_class_indices = torch.where(self.pp_labels == 1)[0]
+        # # sampled_indices = torch.multinomial(torch.ones(class_indices.size(0)), num_to_sample, replacement=True)
+        # car_sampled_indices = np.random.choice(pp_class_indices.cpu().numpy(),num_to_sample,replace=True)
+        # car_sampled_feats = self.pp_feats[car_sampled_indices].clone()
+        # car_sampled_labels = self.pp_labels[car_sampled_indices].clone()
+        # sorted_pp_features= torch.cat((sorted_pp_features, car_sampled_feats),dim=0)
+        # sorted_pp_labels = torch.cat((sorted_pp_labels, car_sampled_labels),dim=0)
 
-        lbl_bank_elements_2 = torch.where(sorted_labels==2)[0].size(0)        
-        ulb_batch_elements_2 = torch.where(sorted_pp_labels==2)[0].size(0)
-        num_to_sample_2 = max(lbl_bank_elements_2 - ulb_batch_elements_2, 0)
-        ped_pp_class_indices = torch.where(self.pp_labels == 2)[0]
-        # sampled_indices = torch.multinomial(torch.ones(class_indices.size(0)), num_to_sample, replacement=True)
-        ped_sampled_indices = np.random.choice(ped_pp_class_indices.cpu().numpy(),num_to_sample_2,replace=True)
-        ped_sampled_feats = self.pp_feats[ped_sampled_indices].clone()
-        ped_sampled_labels = self.pp_labels[ped_sampled_indices].clone()
-        sorted_pp_features= torch.cat((sorted_pp_features, ped_sampled_feats),dim=0)
-        sorted_pp_labels = torch.cat((sorted_pp_labels, ped_sampled_labels),dim=0)
+        # lbl_bank_elements_2 = torch.where(sorted_labels==2)[0].size(0)        
+        # ulb_batch_elements_2 = torch.where(sorted_pp_labels==2)[0].size(0)
+        # num_to_sample_2 = max(lbl_bank_elements_2 - ulb_batch_elements_2, 0)
+        # ped_pp_class_indices = torch.where(self.pp_labels == 2)[0]
+        # # sampled_indices = torch.multinomial(torch.ones(class_indices.size(0)), num_to_sample, replacement=True)
+        # ped_sampled_indices = np.random.choice(ped_pp_class_indices.cpu().numpy(),num_to_sample_2,replace=True)
+        # ped_sampled_feats = self.pp_feats[ped_sampled_indices].clone()
+        # ped_sampled_labels = self.pp_labels[ped_sampled_indices].clone()
+        # sorted_pp_features= torch.cat((sorted_pp_features, ped_sampled_feats),dim=0)
+        # sorted_pp_labels = torch.cat((sorted_pp_labels, ped_sampled_labels),dim=0)
 
-        lbl_bank_elements_3 = torch.where(sorted_labels==3)[0].size(0)        
-        ulb_batch_elements_3 = torch.where(sorted_pp_labels==3)[0].size(0)
-        num_to_sample_3 = max(lbl_bank_elements_3 - ulb_batch_elements_3, 0)
-        cyc_pp_class_indices = torch.where(self.pp_labels == 3)[0]
-        # sampled_indices = torch.multinomial(torch.ones(class_indices.size(0)), num_to_sample, replacement=True)
-        cyc_sampled_indices = np.random.choice(cyc_pp_class_indices.cpu().numpy(),num_to_sample_3,replace=True)
-        cyc_sampled_feats = self.pp_feats[cyc_sampled_indices].clone()
-        cyc_sampled_labels = self.pp_labels[cyc_sampled_indices].clone()
-        sorted_pp_features= torch.cat((sorted_pp_features, cyc_sampled_feats),dim=0)
-        sorted_pp_labels = torch.cat((sorted_pp_labels, cyc_sampled_labels),dim=0)
+        # lbl_bank_elements_3 = torch.where(sorted_labels==3)[0].size(0)        
+        # ulb_batch_elements_3 = torch.where(sorted_pp_labels==3)[0].size(0)
+        # num_to_sample_3 = max(lbl_bank_elements_3 - ulb_batch_elements_3, 0)
+        # cyc_pp_class_indices = torch.where(self.pp_labels == 3)[0]
+        # # sampled_indices = torch.multinomial(torch.ones(class_indices.size(0)), num_to_sample, replacement=True)
+        # cyc_sampled_indices = np.random.choice(cyc_pp_class_indices.cpu().numpy(),num_to_sample_3,replace=True)
+        # cyc_sampled_feats = self.pp_feats[cyc_sampled_indices].clone()
+        # cyc_sampled_labels = self.pp_labels[cyc_sampled_indices].clone()
+        # sorted_pp_features= torch.cat((sorted_pp_features, cyc_sampled_feats),dim=0)
+        # sorted_pp_labels = torch.cat((sorted_pp_labels, cyc_sampled_labels),dim=0)
 
-        assert self.proto_labels.size(0) == sorted_pp_labels.size(0)
 
+        pp_car_mask = torch.nonzero(sorted_pp_labels==1).view(-1)
+        # pp_car_neg = torch.nonzero(sorted_pp_labels!=1).squeeze()
+        pp_ped_mask = torch.nonzero(sorted_pp_labels==2).view(-1)
+        # pp_ped_neg = torch.nonzero(sorted_pp_labels!=2).squeeze()
+        pp_cyc_mask = torch.nonzero(sorted_pp_labels==3).view(-1)
+        # pp_cyc_neg = torch.nonzero(sorted_pp_labels!=3).squeeze()
+        lbl_car_mask = torch.nonzero(sorted_labels==1).view(-1)
+        lbl_car_neg = torch.nonzero(sorted_labels!=1).view(-1)
+        lbl_ped_mask = torch.nonzero(sorted_labels==2).view(-1)
+        lbl_ped_neg = torch.nonzero(sorted_labels!=2).view(-1)
+        lbl_cyc_mask = torch.nonzero(sorted_labels==3).view(-1)
+        lbl_cyc_neg = torch.nonzero(sorted_labels!=3).view(-1)
         K = sorted_pp_labels.unique()        
         sorted_prototypes = F.normalize(sorted_prototypes, dim=-1)
         sorted_pp_features = F.normalize(sorted_pp_features, dim=-1)
-        sim_pos_pp_matrix = sorted_prototypes@sorted_pp_features.t()
-        sim_pos_pp_matrix = sim_pos_pp_matrix/1.0 #0.2  # Matrix of 161 *161 size
-        labels = torch.diag(torch.ones_like(sim_pos_pp_matrix[0]))
-        contrastive_loss = -1 * labels * F.log_softmax(sim_pos_pp_matrix,dim=-1)
-        contrastive_loss = contrastive_loss.sum()/ (3 * sorted_prototypes.size(0)) # num_classes
+        sim_pos_pp_matrix = sorted_pp_features@sorted_prototypes.t()
+        sim_pos_pp_matrix = sim_pos_pp_matrix/1.0 #0.2  # Matrix of 161 * N size
 
+        if pp_car_mask.any():
+            car_sims = torch.cat((sim_pos_pp_matrix[pp_car_mask][:,lbl_car_mask], sim_pos_pp_matrix[pp_car_mask][:,lbl_car_neg]),dim=1)
+            car_labels = torch.zeros_like(car_sims)
+            car_eye = torch.eye(car_labels.size(0), device=car_labels.device)
+            car_labels[:, :car_eye.size(1)] = car_eye
+            car_loss = -1 * car_labels * F.log_softmax(car_sims,dim=-1)
+            contrastive_loss = contrastive_loss + car_loss.sum()
+        if pp_ped_mask.any():
+            ped_sims = torch.cat((sim_pos_pp_matrix[pp_ped_mask][:,lbl_ped_mask], sim_pos_pp_matrix[pp_ped_mask][:,lbl_ped_neg]),dim=1)
+            ped_labels = torch.zeros_like(ped_sims)
+            ped_eye = torch.eye(ped_labels.size(0), device=ped_labels.device)
+            ped_labels[:, :ped_eye.size(1)] = ped_eye
+            ped_loss = -1 * ped_labels * F.log_softmax(ped_sims,dim=-1)
+            contrastive_loss = contrastive_loss + ped_loss.sum()
+        if pp_cyc_mask.any():
+            cyc_sims = torch.cat((sim_pos_pp_matrix[pp_cyc_mask][:,lbl_cyc_mask], sim_pos_pp_matrix[pp_cyc_mask][:,lbl_cyc_neg]),dim=1)
+            cyc_labels = torch.zeros_like(cyc_sims)
+            cyc_eye = torch.eye(cyc_labels.size(0), device=cyc_labels.device)
+            cyc_labels[:, :cyc_eye.size(1)] = cyc_eye
+            cyc_loss = -1 * cyc_labels * F.log_softmax(cyc_sims,dim=-1)
+            contrastive_loss = contrastive_loss + cyc_loss.sum()
+            
+        contrastive_loss = contrastive_loss/ (3 * sorted_prototypes.size(0)) # num_classes
+        # contrastive_loss = contrastive_loss.sum()/ (sorted_pp_features.size(0)) # num_classes
         return contrastive_loss
-        # for k in K: 
-        #     mask_mk, mask_others_denom, mk_first_idx, mk_last_idx = self.lpcont_indices(sorted_labels, sorted_pp_labels, k)
-        #     features_pp_k = sorted_pp_features[mask_mk]  # Sorted Pseudo-positive elements batchwise
-        #     mask_nk = sorted_labels==k
-        #     features_nk = sorted_prototypes[mask_nk]  # Sorted labeled prototype features from bank
-        #     n_k = features_nk.shape[0]
-        #     m_k = len(features_pp_k)
-        #     sim_proto_pp_matrix = sorted_prototypes @ sorted_pp_features.T
-        #     scaled_sim_proto_pp_matrix = sim_proto_pp_matrix/1.0
-        #     # log_sim_proto_pp_matrix = torch.log(scaled_sim_proto_pp_matrix) # temperature
-        #     # clipped_sim_matrix = torch.clamp(log_sim_proto_pp_matrix, min=1e-4)
 
 
 class FeatureBankRegistry(object):

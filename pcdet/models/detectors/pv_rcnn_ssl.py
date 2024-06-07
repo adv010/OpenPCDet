@@ -118,10 +118,11 @@ class PVRCNN_SSL(Detector3DTemplate):
         maxval = ulb_inds[-1] + 1
         arange_values = torch.arange(maxval)
         mask = torch.any((arange_values[..., None] == ulb_inds.cpu()).view(-1, len(ulb_inds.cpu())), dim=-1)
-        mask = torch.isin(arange_values, ulb_inds.cpu())
+        # mask = torch.isin(arange_values, ulb_inds.cpu())
         gt_mask = mask.unsqueeze(-1)
         gt_mask = gt_mask.unsqueeze(-1)
         ori_gt_boxes = torch.masked_select(batch_dict['ori_gt_boxes'],gt_mask.to(device))
+        # ori_gt_boxes = torch.index_select(batch_dict['ori_gt_boxes'],0,ulb_inds)
         ori_gt_boxes = ori_gt_boxes.reshape(B//2,N,-1)
         ori_labels = ori_gt_boxes[...,7].int()
         B1,N1 = ori_gt_boxes.shape[:2]
@@ -136,7 +137,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         ori_projections = ori_projections.view(B,-1,256)
         ori_projections = torch.masked_select(ori_projections,gt_mask.to(device))
         ori_projections = ori_projections.reshape(B//2,N,-1)
-        return ori_projections, ori_labels, ori_gt_boxes
+        return ori_projections, ori_labels, ori_gt_boxes #8,28,8
 
     def _prep_wa_bank_inputs(self, batch_dict, inds,ulb_inds, pl_projections, pl_labels, ori_pl_boxes, bank, iteration, num_points_threshold=20):
         selected_batch_dict_ema = self._clone_gt_boxes_and_feats(batch_dict)
@@ -177,15 +178,22 @@ class PVRCNN_SSL(Detector3DTemplate):
             bank_inputs['smpl_ids'].append(smpl_id)
             
         # if bank.is_initialized():
-        pl_nonzero_mask =  torch.logical_not(torch.eq(original_pl_boxes, 0).all(dim=-1))
-        pl_nonzero_mask = pl_nonzero_mask.to(device=pl_projections.device)
-        B,N = original_pl_boxes.shape[:2]
-        pl_nonzero_mask_proj = pl_nonzero_mask.unsqueeze(-1).expand(B,N,256).clone()
-        pl_feats = torch.masked_select(bank_pl_projections,pl_nonzero_mask_proj)
-        pl_feats_masked = pl_feats.reshape(-1,256).clone()
-        pl_label = torch.masked_select(bank_pl_labels,pl_nonzero_mask)
-        bank_inputs['pl_feats'].append(pl_feats_masked.clone())
-        bank_inputs['pl_labels'].append(pl_label.clone())
+        # pl_nonzero_mask =  torch.logical_not(torch.eq(original_pl_boxes, 0).all(dim=-1))
+        # pl_nonzero_mask = pl_nonzero_mask.to(device=pl_projections.device)
+        # inds = torch.where(pl_nonzero_mask.view(-1).int()==1)[0]
+        # pl_flattend_projections = pl_projections.view(-1,256)
+        # pl_feats = torch.index_select(pl_flattend_projections,0,inds)
+        
+        # B,N = original_pl_boxes.shape[:2]
+        # pl_nonzero_mask_proj = pl_nonzero_mask.unsqueeze(-1).expand(B,N,256).clone()
+        # pl_feats = torch.masked_select(bank_pl_projections,pl_nonzero_mask_proj)
+        # pl_feats =torch.index_select(bank_pl_projections,0,ulb_inds)
+        # pl_feats_masked = pl_feats.reshape(-1,256).clone()
+        # pl_label = torch.masked_select(bank_pl_labels,pl_nonzero_mask)
+        # bank_inputs['pl_feats'].append(pl_feats_masked.clone())
+        # bank_inputs['pl_labels'].append(pl_label.clone())
+        # bank_inputs['pl_feats'].append(bank_pl_projections.reshape(-1,256).clone())
+        # bank_inputs['pl_labels'].append(bank_pl_labels.clone())
         # else:
         #     bank_inputs['pl_feats'] = []   
         #     bank_inputs['pl_labels'] = []          
@@ -320,9 +328,9 @@ class PVRCNN_SSL(Detector3DTemplate):
             # Update the bank with student's features from augmented labeled data
             bank = feature_bank_registry.get('gt_wa_lbl_prototypes')
             ori_pseudo_projections, ori_labels, ori_gt_boxes  = self.get_pseudo_projections(batch_dict,ulb_inds)
-            batch_dict_ema['ori_pseudo_projections'] = ori_pseudo_projections.clone()
-            batch_dict_ema['ori_labels'] = ori_labels.clone()
-            wa_gt_lbl_inputs = self._prep_wa_bank_inputs(batch_dict_ema, lbl_inds, ulb_inds, ori_pseudo_projections, ori_labels, ori_gt_boxes, bank,batch_dict['cur_iteration'], bank.num_points_thresh)
+            # batch_dict_ema['ori_pseudo_projections'] = ori_pseudo_projections.clone()
+            # batch_dict_ema['ori_labels'] = ori_labels.clone()
+            wa_gt_lbl_inputs = self._prep_wa_bank_inputs(batch_dict_ema, lbl_inds, ulb_inds, ori_pseudo_projections, ori_labels, ori_gt_boxes, bank, batch_dict['cur_iteration'], bank.num_points_thresh)
             bank.update(**wa_gt_lbl_inputs,iteration=batch_dict['cur_iteration'])
 
 
