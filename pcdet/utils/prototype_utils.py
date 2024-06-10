@@ -189,100 +189,128 @@ class FeatureBank(Metric):
         mk_last_idx = (torch.where(mask)[0][-1]) + 1
         return mask, mask_others_denom, mk_first_idx, mk_last_idx
     
-    def get_lpcont_loss(self, pseudo_positives, topk_labels, topk_list):
+    
+    def topk_padding(self,pseudo_positive_labels, pseudo_positives, topk_list,k):
+        num_to_append = topk_list[k] - ((torch.nonzero(pseudo_positive_labels==(k+1)).size(0)))
+        labels = torch.tensor([(k+1)] * num_to_append).to(pseudo_positives.device)
+        pseudo_positive_labels = torch.cat((pseudo_positive_labels, labels), dim=0) 
+        pseudo_positives = torch.cat((pseudo_positives, torch.zeros(num_to_append,256).to(pseudo_positives.device)),dim=0) 
+        return pseudo_positive_labels, pseudo_positives
+
+    def get_lpcont_loss(self, pseudo_positives, pseudo_positive_labels, topk_list):
         """
         param pseudo_positives: Pseudo positive student features(Mk, Channel=256)
         param topk_labels: Labels for pseudo positive student features
         return:
         """
         N = len(self.prototypes)
-        contrastive_loss = torch.tensor(0.0).to(pseudo_positives.device)
+        contrastive_loss = torch.tensor(0.0).to(pseudo_positives.device) #contrastive_loss2 = torch.tensor(0.0).to(pseudo_positives.device)
         car_loss = torch.tensor(0.0).to(pseudo_positives.device)
         ped_loss = torch.tensor(0.0).to(pseudo_positives.device)
         cyc_loss = torch.tensor(0.0).to(pseudo_positives.device)
         sorted_labels, sorted_args = torch.sort(self.proto_labels)
         sorted_prototypes = self.prototypes[sorted_args] # sort prototypes to arrange classwise
         
-        sorted_pp_labels, sorted_pp_args = torch.sort(topk_labels)
+        ori_pseudo_positive_labels = pseudo_positive_labels.clone()
+        ori_pseudo_positives = pseudo_positives.clone()
+
+        if torch.nonzero(pseudo_positive_labels==2).shape[0] < topk_list[1]: #padding 5
+            pseudo_positive_labels, pseudo_positives = self.topk_padding(pseudo_positive_labels, pseudo_positives, topk_list, k=1)
+            # num2_to_append = topk_list[1] - ((torch.nonzero(pseudo_positive_labels==2).size(0)))
+            # additional_2s = torch.tensor([2] * num2_to_append).to(pseudo_positives.device)
+            # pseudo_positive_labels = torch.cat((pseudo_positive_labels, additional_2s), dim=0)
+            # pseudo_positives = torch.cat((pseudo_positives, torch.zeros(num2_to_append,256).to(pseudo_positives.device)),dim=0) #pad classes with zeros until topk satisfied
+        
+        if torch.nonzero(pseudo_positive_labels==3).shape[0] < topk_list[2]:
+            pseudo_positive_labels, pseudo_positives = self.topk_padding(pseudo_positive_labels, pseudo_positives, topk_list, k=2)
+            # num3_to_append = topk_list[2] - ((torch.nonzero(pseudo_positive_labels==3).size(0)))
+            # additional_3s = torch.tensor([3] * num3_to_append).to(pseudo_positives.device)
+            # pseudo_positive_labels = torch.cat((pseudo_positive_labels,additional_3s),dim=0)
+            # pseudo_positives = torch.cat((pseudo_positives, torch.zeros(num3_to_append,256).to(pseudo_positives.device)),dim=0) #pad classes with zeros until topk satisfied
+
+        sorted_pp_labels, sorted_pp_args = torch.sort(pseudo_positive_labels)
         sorted_pp_features = pseudo_positives[sorted_pp_args] # sort pseudo positives to arrange classwise  
-
-        # '''Sampling bank pseudo positives so that pseudo positives balanced same as labeled bank instances'''
-        # # for i in range(self.num_classes):
-        # lbl_bank_elements = torch.where(sorted_labels==1)[0].size(0)        
-        # ulb_batch_elements = torch.where(sorted_pp_labels==1)[0].size(0)
-        # num_to_sample = max(lbl_bank_elements - ulb_batch_elements, 0)
-        # pp_class_indices = torch.where(self.pp_labels == 1)[0]
-        # # sampled_indices = torch.multinomial(torch.ones(class_indices.size(0)), num_to_sample, replacement=True)
-        # car_sampled_indices = np.random.choice(pp_class_indices.cpu().numpy(),num_to_sample,replace=True)
-        # car_sampled_feats = self.pp_feats[car_sampled_indices].clone()
-        # car_sampled_labels = self.pp_labels[car_sampled_indices].clone()
-        # sorted_pp_features= torch.cat((sorted_pp_features, car_sampled_feats),dim=0)
-        # sorted_pp_labels = torch.cat((sorted_pp_labels, car_sampled_labels),dim=0)
-
-        # lbl_bank_elements_2 = torch.where(sorted_labels==2)[0].size(0)        
-        # ulb_batch_elements_2 = torch.where(sorted_pp_labels==2)[0].size(0)
-        # num_to_sample_2 = max(lbl_bank_elements_2 - ulb_batch_elements_2, 0)
-        # ped_pp_class_indices = torch.where(self.pp_labels == 2)[0]
-        # # sampled_indices = torch.multinomial(torch.ones(class_indices.size(0)), num_to_sample, replacement=True)
-        # ped_sampled_indices = np.random.choice(ped_pp_class_indices.cpu().numpy(),num_to_sample_2,replace=True)
-        # ped_sampled_feats = self.pp_feats[ped_sampled_indices].clone()
-        # ped_sampled_labels = self.pp_labels[ped_sampled_indices].clone()
-        # sorted_pp_features= torch.cat((sorted_pp_features, ped_sampled_feats),dim=0)
-        # sorted_pp_labels = torch.cat((sorted_pp_labels, ped_sampled_labels),dim=0)
-
-        # lbl_bank_elements_3 = torch.where(sorted_labels==3)[0].size(0)        
-        # ulb_batch_elements_3 = torch.where(sorted_pp_labels==3)[0].size(0)
-        # num_to_sample_3 = max(lbl_bank_elements_3 - ulb_batch_elements_3, 0)
-        # cyc_pp_class_indices = torch.where(self.pp_labels == 3)[0]
-        # # sampled_indices = torch.multinomial(torch.ones(class_indices.size(0)), num_to_sample, replacement=True)
-        # cyc_sampled_indices = np.random.choice(cyc_pp_class_indices.cpu().numpy(),num_to_sample_3,replace=True)
-        # cyc_sampled_feats = self.pp_feats[cyc_sampled_indices].clone()
-        # cyc_sampled_labels = self.pp_labels[cyc_sampled_indices].clone()
-        # sorted_pp_features= torch.cat((sorted_pp_features, cyc_sampled_feats),dim=0)
-        # sorted_pp_labels = torch.cat((sorted_pp_labels, cyc_sampled_labels),dim=0)
-
+        padded_features_mask = torch.logical_not(torch.eq(sorted_pp_features, 0).all(dim=-1))
 
         pp_car_mask = torch.nonzero(sorted_pp_labels==1).view(-1)
-        # pp_car_neg = torch.nonzero(sorted_pp_labels!=1).squeeze()
         pp_ped_mask = torch.nonzero(sorted_pp_labels==2).view(-1)
-        # pp_ped_neg = torch.nonzero(sorted_pp_labels!=2).squeeze()
         pp_cyc_mask = torch.nonzero(sorted_pp_labels==3).view(-1)
-        # pp_cyc_neg = torch.nonzero(sorted_pp_labels!=3).squeeze()
         lbl_car_mask = torch.nonzero(sorted_labels==1).view(-1)
         lbl_car_neg = torch.nonzero(sorted_labels!=1).view(-1)
         lbl_ped_mask = torch.nonzero(sorted_labels==2).view(-1)
         lbl_ped_neg = torch.nonzero(sorted_labels!=2).view(-1)
         lbl_cyc_mask = torch.nonzero(sorted_labels==3).view(-1)
         lbl_cyc_neg = torch.nonzero(sorted_labels!=3).view(-1)
-        K = sorted_pp_labels.unique()        
-        sorted_prototypes = F.normalize(sorted_prototypes, dim=-1)
-        sorted_pp_features = F.normalize(sorted_pp_features, dim=-1)
-        sim_pos_pp_matrix = sorted_pp_features@sorted_prototypes.t()
-        sim_pos_pp_matrix = sim_pos_pp_matrix/1.0 #0.2  # Matrix of 161 * N size
+        
+        # Index the topk indices, and repeat to match size of Labeled bank instances
+        car_mk = torch.topk(pp_car_mask,5)[0]
+        ped_mk = torch.topk(pp_ped_mask,5)[0]
+        cyc_mk = torch.topk(pp_cyc_mask,5)[0]
 
-        if pp_car_mask.any():
-            car_sims = torch.cat((sim_pos_pp_matrix[pp_car_mask][:,lbl_car_mask], sim_pos_pp_matrix[pp_car_mask][:,lbl_car_neg]),dim=1)
-            car_labels = torch.zeros_like(car_sims)
-            car_eye = torch.eye(car_labels.size(0), device=car_labels.device)
-            car_labels[:, :car_eye.size(1)] = car_eye
-            car_loss = -1 * car_labels * F.log_softmax(car_sims,dim=-1)
-            contrastive_loss = contrastive_loss + car_loss.sum()
-        if pp_ped_mask.any():
-            ped_sims = torch.cat((sim_pos_pp_matrix[pp_ped_mask][:,lbl_ped_mask], sim_pos_pp_matrix[pp_ped_mask][:,lbl_ped_neg]),dim=1)
-            ped_labels = torch.zeros_like(ped_sims)
-            ped_eye = torch.eye(ped_labels.size(0), device=ped_labels.device)
-            ped_labels[:, :ped_eye.size(1)] = ped_eye
-            ped_loss = -1 * ped_labels * F.log_softmax(ped_sims,dim=-1)
-            contrastive_loss = contrastive_loss + ped_loss.sum()
-        if pp_cyc_mask.any():
-            cyc_sims = torch.cat((sim_pos_pp_matrix[pp_cyc_mask][:,lbl_cyc_mask], sim_pos_pp_matrix[pp_cyc_mask][:,lbl_cyc_neg]),dim=1)
-            cyc_labels = torch.zeros_like(cyc_sims)
-            cyc_eye = torch.eye(cyc_labels.size(0), device=cyc_labels.device)
-            cyc_labels[:, :cyc_eye.size(1)] = cyc_eye
-            cyc_loss = -1 * cyc_labels * F.log_softmax(cyc_sims,dim=-1)
-            contrastive_loss = contrastive_loss + cyc_loss.sum()
+        pp_repeated_car = sorted_pp_features[car_mk].repeat(lbl_car_mask.size(0) // car_mk.size(0) + 1, 1)[:lbl_car_mask.size(0)]
+        pp_repeated_ped = sorted_pp_features[ped_mk].repeat(lbl_ped_mask.size(0) // ped_mk.size(0) + 1, 1)[:lbl_ped_mask.size(0)]
+        pp_repeated_cyc = sorted_pp_features[cyc_mk].repeat(lbl_cyc_mask.size(0) // cyc_mk.size(0) + 1, 1)[:lbl_cyc_mask.size(0)]
+        pp_repeated_lbl_car = sorted_pp_labels[car_mk[0]].repeat(pp_repeated_car.size(0))
+        pp_repeated_lbl_ped = sorted_pp_labels[ped_mk[0]].repeat(pp_repeated_ped.size(0))
+        pp_repeated_lbl_cyc = sorted_pp_labels[cyc_mk[0]].repeat(pp_repeated_cyc.size(0))
             
-        contrastive_loss = contrastive_loss/ (3 * sorted_prototypes.size(0)) # num_classes
+        pp_fts_repeated_all = torch.cat((pp_repeated_car, pp_repeated_ped, pp_repeated_cyc), dim=0)
+        pp_labels_repeated_all = torch.cat((pp_repeated_lbl_car, pp_repeated_lbl_ped, pp_repeated_lbl_cyc), dim=0)
+
+        sorted_prototypes = F.normalize(sorted_prototypes, dim=-1)
+        pp_fts_repeated_all = F.normalize(pp_fts_repeated_all, dim=-1)
+
+        padded_features_mask = torch.logical_not(torch.eq(pp_fts_repeated_all, 0).all(dim=-1)) # record padded indices
+
+        sorted_labels = sorted_labels.contiguous().view(-1,1)
+        label_mask = (sorted_labels.unsqueeze(1) == pp_labels_repeated_all.unsqueeze(0)).float()
+        # label_mask = torch.eq(sorted_labels, sorted_labels.T).float() #label_mask = sorted_labels == ori_pseudo_positive_labels
+
+        sim_pos_pp_matrix = sorted_prototypes @ pp_fts_repeated_all.t()
+        # sim_pos_pp_matrix = pp_fts_repeated_all@sorted_prototypes.t()
+        
+        sim_pos_pp_matrix = torch.exp(sim_pos_pp_matrix/1.0) #division by temperature
+        contrastive_loss = torch.log((sim_pos_pp_matrix*(label_mask==1.0))[:,padded_features_mask].sum()/(sim_pos_pp_matrix*(label_mask==0.0))[:,padded_features_mask].sum())
+        # for i in range(sim_pos_pp_matrix.size(0)):
+        #     denominator = ((sim_pos_pp_matrix[i] * (label_mask[i] == 0.0))[padded_features_mask]).sum(dim=-1)
+        #     assert torch.all(denominator > 1e-8), "Zero or near-zero values found in denominator, leading to potential Inf loss."
+        #     contrastive_loss = contrastive_loss + torch.log((((sim_pos_pp_matrix[i]*(label_mask[i]==1.0))[padded_features_mask]).sum(dim=-1)) / (((sim_pos_pp_matrix[i]*(label_mask[i]==0.0))[padded_features_mask]).sum(dim=-1)))
+                                               
+        contrastive_loss = contrastive_loss * -1 / (sorted_prototypes.size(0) * 3 * topk_list[0]) 
+
+        # pp_car_mask = torch.nonzero(pp_labels_repeated_all==1).view(-1)
+        # pp_ped_mask = torch.nonzero(pp_labels_repeated_all==2).view(-1)
+        # pp_cyc_mask = torch.nonzero(pp_labels_repeated_all==3).view(-1)
+        # lbl_car_mask = torch.nonzero(sorted_labels==1).view(-1)
+        # lbl_car_neg = torch.nonzero(sorted_labels!=1).view(-1)
+        # lbl_ped_mask = torch.nonzero(sorted_labels==2).view(-1)
+        # lbl_ped_neg = torch.nonzero(sorted_labels!=2).view(-1)
+        # lbl_cyc_mask = torch.nonzero(sorted_labels==3).view(-1)
+        # lbl_cyc_neg = torch.nonzero(sorted_labels!=3).view(-1)
+
+        # if pp_car_mask.any():
+        #     car_sims = torch.cat((sim_pos_pp_matrix[pp_car_mask][:,lbl_car_mask], sim_pos_pp_matrix[pp_car_mask][:,lbl_car_neg]),dim=1)
+        #     car_labels = torch.zeros_like(car_sims)
+        #     car_eye = torch.eye(car_labels.size(0), device=car_labels.device)
+        #     car_labels[:, :car_eye.size(1)] = car_eye
+        #     car_loss = -1 * car_labels * F.log_softmax(car_sims,dim=-1)
+        #     contrastive_loss = contrastive_loss + car_loss.sum()
+        # if pp_ped_mask.any():
+        #     ped_sims = torch.cat((sim_pos_pp_matrix[pp_ped_mask][:,lbl_ped_mask], sim_pos_pp_matrix[pp_ped_mask][:,lbl_ped_neg]),dim=1)
+        #     ped_labels = torch.zeros_like(ped_sims)
+        #     ped_eye = torch.eye(ped_labels.size(0), device=ped_labels.device)
+        #     ped_labels[:, :ped_eye.size(1)] = ped_eye
+        #     ped_loss = -1 * ped_labels * F.log_softmax(ped_sims,dim=-1)
+        #     contrastive_loss = contrastive_loss + ped_loss.sum()
+        # if pp_cyc_mask.any():
+        #     cyc_sims = torch.cat((sim_pos_pp_matrix[pp_cyc_mask][:,lbl_cyc_mask], sim_pos_pp_matrix[pp_cyc_mask][:,lbl_cyc_neg]),dim=1)
+        #     cyc_labels = torch.zeros_like(cyc_sims)
+        #     cyc_eye = torch.eye(cyc_labels.size(0), device=cyc_labels.device)
+        #     cyc_labels[:, :cyc_eye.size(1)] = cyc_eye
+        #     cyc_loss = -1 * cyc_labels * F.log_softmax(cyc_sims,dim=-1)
+        #     contrastive_loss = contrastive_loss + cyc_loss.sum()
+            
+        # contrastive_loss = contrastive_loss/ (3 * sorted_prototypes.size(0)) # num_classes
         # contrastive_loss = contrastive_loss.sum()/ (sorted_pp_features.size(0)) # num_classes
         return contrastive_loss
 

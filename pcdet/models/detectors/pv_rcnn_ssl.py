@@ -112,43 +112,30 @@ class PVRCNN_SSL(Detector3DTemplate):
 
     def get_pseudo_projections(self,batch_dict, ulb_inds):
         selected_batch_dict = self._clone_gt_boxes_and_feats(batch_dict)
-        B,N = batch_dict['ori_gt_boxes'].shape[:2]   
-        device = batch_dict['ori_gt_boxes'].device   
-        # Generating mask to get ulb inds only... using [ulb_inds] breaking computation graph
-        maxval = ulb_inds[-1] + 1
-        arange_values = torch.arange(maxval)
-        mask = torch.any((arange_values[..., None] == ulb_inds.cpu()).view(-1, len(ulb_inds.cpu())), dim=-1)
-        # mask = torch.isin(arange_values, ulb_inds.cpu())
-        gt_mask = mask.unsqueeze(-1)
-        gt_mask = gt_mask.unsqueeze(-1)
-        ori_gt_boxes = torch.masked_select(batch_dict['ori_gt_boxes'],gt_mask.to(device))
-        # ori_gt_boxes = torch.index_select(batch_dict['ori_gt_boxes'],0,ulb_inds)
-        ori_gt_boxes = ori_gt_boxes.reshape(B//2,N,-1)
-        ori_labels = ori_gt_boxes[...,7].int()
-        B1,N1 = ori_gt_boxes.shape[:2]
-        assert torch.equal(ori_gt_boxes,batch_dict['ori_gt_boxes'][ulb_inds])
-        with torch.no_grad():
-            ori_pooled_features = self.pv_rcnn.roi_head.roi_grid_pool(selected_batch_dict, use_gtboxes=False, use_ori_gtboxes=True).clone()
+        B,N = batch_dict['ori_gt_boxes'].shape[:2]
+        ori_gt_boxes =  torch.chunk(batch_dict['ori_gt_boxes'],2,dim=0)[1] # get unlabeled inds
+        ori_labels = ori_gt_boxes[..., 7].int()
+        ori_pooled_features = self.pv_rcnn.roi_head.roi_grid_pool(selected_batch_dict, use_gtboxes=False, use_ori_gtboxes=True).clone() #16*max_Box_num,216*2, C//2
         grid_size = self.model_cfg.ROI_HEAD.ROI_GRID_POOL.GRID_SIZE
         batch_size_rcnn = ori_pooled_features.shape[0]
         ori_pooled_features = ori_pooled_features.permute(0, 2, 1). \
             contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
         ori_projections = self.pv_rcnn.roi_head.stg2_projector(ori_pooled_features.view(batch_size_rcnn,-1,1))
         ori_projections = ori_projections.view(B,-1,256)
-        ori_projections = torch.masked_select(ori_projections,gt_mask.to(device))
-        ori_projections = ori_projections.reshape(B//2,N,-1)
-        return ori_projections, ori_labels, ori_gt_boxes #8,28,8
+        ori_projections = torch.chunk(ori_projections,2,dim=0)[1] # get unlabeled projections
+        return ori_projections, ori_labels, ori_gt_boxes
 
     def _prep_wa_bank_inputs(self, batch_dict, inds,ulb_inds, pl_projections, pl_labels, ori_pl_boxes, bank, iteration, num_points_threshold=20):
         selected_batch_dict_ema = self._clone_gt_boxes_and_feats(batch_dict)
-        original_pl_boxes = ori_pl_boxes.clone().detach()
-
+        # original_pl_boxes = ori_pl_boxes.clone().detach()
+        # bank_pl_projections = pl_projections.clone()
+        # bank_pl_labels = pl_labels.clone()
         with torch.no_grad():
             projections_gt = self.pv_rcnn_ema.roi_head.pool_features(selected_batch_dict_ema, use_gtboxes=True, shared=False, projector=True) 
           
         projections_gt = projections_gt.view(*batch_dict['gt_boxes'].shape[:2], -1)
-        bank_pl_projections = pl_projections.clone()
-        bank_pl_labels = pl_labels.clone()
+        projections_gt = torch.chunk(projections_gt,2,dim=0)[0] #  Teacher's labeled projections 
+
         bank_inputs = defaultdict(list)
         for ix in inds:
 
@@ -160,13 +147,11 @@ class PVRCNN_SSL(Detector3DTemplate):
             gt_boxes = gt_boxes[nonzero_mask]
             sample_mask = batch_dict['points'][:, 0].int() == ix
             points = batch_dict['points'][sample_mask, 1:4]
-            gt_feat = projections_gt[ix][nonzero_mask] # labeled projections from teacher stored in bank
-            # gt_labels = gt_boxes[:, 7].int() - 1
+            gt_feat = projections_gt[ix][nonzero_mask] # Store labeled projections into bank
             gt_labels = gt_boxes[:, 7].int()
             gt_boxes = gt_boxes[:, :7]
             ins_idxs = batch_dict['instance_idx'][ix][nonzero_mask].int()
             smpl_id = torch.from_numpy(batch_dict['frame_id'].astype(np.int32))[ix].to(gt_boxes.device)
-
             num_points_in_gt = roiaware_pool3d_utils.points_in_boxes_cpu(points.cpu(), gt_boxes.cpu()).sum(dim=-1)
             valid_gts_mask = (num_points_in_gt >= num_points_threshold)
             if valid_gts_mask.sum() == 0:
@@ -176,28 +161,6 @@ class PVRCNN_SSL(Detector3DTemplate):
             bank_inputs['labels'].append(gt_labels[valid_gts_mask])
             bank_inputs['ins_ids'].append(ins_idxs[valid_gts_mask])
             bank_inputs['smpl_ids'].append(smpl_id)
-            
-        # if bank.is_initialized():
-        # pl_nonzero_mask =  torch.logical_not(torch.eq(original_pl_boxes, 0).all(dim=-1))
-        # pl_nonzero_mask = pl_nonzero_mask.to(device=pl_projections.device)
-        # inds = torch.where(pl_nonzero_mask.view(-1).int()==1)[0]
-        # pl_flattend_projections = pl_projections.view(-1,256)
-        # pl_feats = torch.index_select(pl_flattend_projections,0,inds)
-        
-        # B,N = original_pl_boxes.shape[:2]
-        # pl_nonzero_mask_proj = pl_nonzero_mask.unsqueeze(-1).expand(B,N,256).clone()
-        # pl_feats = torch.masked_select(bank_pl_projections,pl_nonzero_mask_proj)
-        # pl_feats =torch.index_select(bank_pl_projections,0,ulb_inds)
-        # pl_feats_masked = pl_feats.reshape(-1,256).clone()
-        # pl_label = torch.masked_select(bank_pl_labels,pl_nonzero_mask)
-        # bank_inputs['pl_feats'].append(pl_feats_masked.clone())
-        # bank_inputs['pl_labels'].append(pl_label.clone())
-        # bank_inputs['pl_feats'].append(bank_pl_projections.reshape(-1,256).clone())
-        # bank_inputs['pl_labels'].append(bank_pl_labels.clone())
-        # else:
-        #     bank_inputs['pl_feats'] = []   
-        #     bank_inputs['pl_labels'] = []          
-    
         return bank_inputs    
 
 
@@ -492,12 +455,11 @@ class PVRCNN_SSL(Detector3DTemplate):
 
     # def _get_lpcont_loss(self, batch_dict, bank, ulb_inds, pl_conf_scores, pl_sem_scores, pl_labels, masks):
     def _get_lpcont_loss(self, batch_dict, bank, ulb_inds, ori_pseudo_projections, ori_labels, ori_gt_boxes):
-        gt_boxes = batch_dict['ori_gt_boxes']
-        nonzero_ulb_mask = torch.logical_not(torch.eq(gt_boxes, 0).all(dim=-1))[ulb_inds]
+        nonzero_ulb_mask = torch.logical_not(torch.eq(ori_gt_boxes, 0).all(dim=-1))
         if nonzero_ulb_mask.sum() == 0:
             print(f"No pl instances predicted for strongly augmented frame(s) {batch_dict['frame_id'][ulb_inds]}")
             return
-        B, N = gt_boxes.shape[:2]
+        B, N = ori_gt_boxes.shape[:2]
         ori_pseudo_projections = ori_pseudo_projections[nonzero_ulb_mask]
         ori_labels = ori_labels[nonzero_ulb_mask]
         # Sample pseudo projections to get uniform number 5,5,5 per batch
@@ -526,40 +488,40 @@ class PVRCNN_SSL(Detector3DTemplate):
         #     return
         # return lp_cont_loss.view(B, N)[ulb_inds][ulb_nonzero_mask].mean()
 
-    def sample_pseudo_positives(self, pseudo_projections_dict, features, labels):
-        topk_list = [3, 3, 3]
-        sorted_pp_labels, sorted_pp_args = torch.sort(labels)
-        sorted_pp_projections = features[sorted_pp_args]
-        sampled_features, sampled_labels = [], []
+    # def sample_pseudo_positives(self, pseudo_projections_dict, features, labels):
+    #     topk_list = [3, 3, 3]
+    #     sorted_pp_labels, sorted_pp_args = torch.sort(labels)
+    #     sorted_pp_projections = features[sorted_pp_args]
+    #     sampled_features, sampled_labels = [], []
 
-        for k in range(3):
-            class_mask = sorted_pp_labels == (k + 1)
-            class_indices = torch.where(class_mask)[0]  # Get indices directly where class_mask is True
-            class_count = class_mask.sum().item()
+    #     for k in range(3):
+    #         class_mask = sorted_pp_labels == (k + 1)
+    #         class_indices = torch.where(class_mask)[0]  # Get indices directly where class_mask is True
+    #         class_count = class_mask.sum().item()
 
-            if class_count >0:
-                selected_indices = class_indices
-                if class_indices.shape[0] >= topk_list[k]:
-                    selected_indices = class_indices[:topk_list[k]]
+    #         if class_count >0:
+    #             selected_indices = class_indices
+    #             if class_indices.shape[0] >= topk_list[k]:
+    #                 selected_indices = class_indices[:topk_list[k]]
 
-                ft = sorted_pp_projections[selected_indices]
-                lbl = sorted_pp_labels[selected_indices]
+    #             ft = sorted_pp_projections[selected_indices]
+    #             lbl = sorted_pp_labels[selected_indices]
 
-                for i in range(len(ft)):
-                    sampled_features.append(ft[i])
-                    sampled_labels.append(lbl[i])
+    #             for i in range(len(ft)):
+    #                 sampled_features.append(ft[i])
+    #                 sampled_labels.append(lbl[i])
 
-            if class_count < topk_list[k]: # sample from PP dict
-                bank_projections = pseudo_projections_dict['projection']
-                bank_labels = pseudo_projections_dict['label']
-                pp_bank_indices = [i for i, x in enumerate(bank_labels) if x == (k+1)]
-                num_to_fill = topk_list[k] - class_count
-                for i in range(num_to_fill):
-                    pp_idx = pp_bank_indices[i]
-                    sampled_features.append(bank_projections[pp_idx].to(sorted_pp_args.device))
-                    sampled_labels.append(bank_labels[pp_idx].to(sorted_pp_args.device))
+    #         if class_count < topk_list[k]: # sample from PP dict
+    #             bank_projections = pseudo_projections_dict['projection']
+    #             bank_labels = pseudo_projections_dict['label']
+    #             pp_bank_indices = [i for i, x in enumerate(bank_labels) if x == (k+1)]
+    #             num_to_fill = topk_list[k] - class_count
+    #             for i in range(num_to_fill):
+    #                 pp_idx = pp_bank_indices[i]
+    #                 sampled_features.append(bank_projections[pp_idx].to(sorted_pp_args.device))
+    #                 sampled_labels.append(bank_labels[pp_idx].to(sorted_pp_args.device))
 
-        return sampled_features, sampled_labels, topk_list
+    #     return sampled_features, sampled_labels, topk_list
 
     @staticmethod
     def _prep_tb_dict(tb_dict, lbl_inds, ulb_inds, reduce_loss_fn):
