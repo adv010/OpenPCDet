@@ -125,11 +125,59 @@ class PVRCNN_SSL(Detector3DTemplate):
         ori_projections = torch.chunk(ori_projections,2,dim=0)[1] # get unlabeled projections
         return ori_projections, ori_labels, ori_gt_boxes
 
-    def _prep_wa_bank_inputs(self, batch_dict, inds,ulb_inds, pl_projections, pl_labels, ori_pl_boxes, bank, iteration, num_points_threshold=20):
+    def get_pl_pseudo_projections(self,batch_dict, pl_boxes_tensor, pl_labels_tensor, pl_conf_scores_tensor, masks_tensor, lpcont_conf_threshold, ulb_inds):
+        
+        pl_labels_unfiltered = pl_labels_tensor[pl_labels_tensor>0]
+        pl_conf_scores_unfiltered = pl_conf_scores_tensor[pl_labels_tensor>0]
+        masks_tensor = masks_tensor[pl_labels_tensor>0]
+        selected_batch_dict = self._clone_gt_boxes_and_feats(batch_dict)
+        B,N = batch_dict['gt_boxes'].shape[:2]
+        pl_boxes =  torch.chunk(batch_dict['gt_boxes'],2,dim=0)[1] # get unlabeled  boxes
+        pl_labels = pl_boxes[..., 7].int()
+        pooled_features = self.pv_rcnn.roi_head.roi_grid_pool(selected_batch_dict, use_gtboxes=True, use_ori_gtboxes=False).clone() #16*max_Box_num,216*2, C//2
+        grid_size = self.model_cfg.ROI_HEAD.ROI_GRID_POOL.GRID_SIZE
+        batch_size_rcnn = pooled_features.shape[0]
+        pooled_features = pooled_features.permute(0, 2, 1). \
+            contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
+        pl_projections = self.pv_rcnn.roi_head.stg2_projector(pooled_features.view(batch_size_rcnn,-1,1))
+        pl_projections = pl_projections.view(B,-1,256)
+        pl_projections = torch.chunk(pl_projections,2,dim=0)[1] # get projections for all unlabeled samples
+
+        # Strip off zero padding
+        valid_mask = torch.logical_not(torch.eq(pl_boxes, 0).all(dim=-1))
+        pl_boxes = pl_boxes[valid_mask]
+        pl_labels = pl_labels[valid_mask]
+        pl_projections = pl_projections[valid_mask]
+        
+        assert torch.equal(pl_labels,pl_labels_unfiltered[masks_tensor])
+        # Via above check, we confirm the gt_boxes after 0 stripping same as unfiltered[masked] pls
+        
+        lpcont_conf_thresh = torch.tensor(lpcont_conf_threshold, device = pl_conf_scores_tensor.device)
+        lpcont_mask = pl_labels_unfiltered.clone()
+        # Enter values of lpcont_conf_thresh for each label into lpcont_mask
+        lpcont_mask[torch.where(pl_labels_unfiltered==1)[0]] = lpcont_conf_thresh[0]
+        lpcont_mask[torch.where(pl_labels_unfiltered==2)[0]] = lpcont_conf_thresh[1]
+        lpcont_mask[torch.where(pl_labels_unfiltered==3)[0]] = lpcont_conf_thresh[2]
+
+        #Repeat conf * sem_thresh (pl_filtering_step)
+        lpcont_mask =  lpcont_mask[masks_tensor]
+        lpcont_conf_scores = pl_conf_scores_unfiltered[masks_tensor]
+        # Finally select top confident PLs for LPCONT projections
+        lpcont_final_mask = pl_conf_scores_unfiltered[masks_tensor] > lpcont_mask
+
+        assert pl_projections.size(0) == lpcont_mask.size(0)
+
+        #Apply LPCont Mask
+        lpcont_boxes = pl_boxes[lpcont_final_mask]
+        lpcont_labels = pl_labels[lpcont_final_mask]
+        lpcont_conf_scores = lpcont_conf_scores[lpcont_final_mask]
+        lpcont_projections = pl_projections[lpcont_final_mask]
+
+        assert lpcont_projections.size(0) == lpcont_labels.size(0) == lpcont_conf_scores.size(0) == lpcont_boxes.size(0)
+        return lpcont_projections, lpcont_labels, lpcont_conf_scores, lpcont_boxes 
+
+    def _prep_wa_bank_inputs(self, batch_dict, inds,ulb_inds, bank, iteration, num_points_threshold=20):
         selected_batch_dict_ema = self._clone_gt_boxes_and_feats(batch_dict)
-        # original_pl_boxes = ori_pl_boxes.clone().detach()
-        # bank_pl_projections = pl_projections.clone()
-        # bank_pl_labels = pl_labels.clone()
         with torch.no_grad():
             projections_gt = self.pv_rcnn_ema.roi_head.pool_features(selected_batch_dict_ema, use_gtboxes=True, shared=False, projector=True) 
           
@@ -257,10 +305,16 @@ class PVRCNN_SSL(Detector3DTemplate):
             pl_cls_count_pre_filter = torch.bincount(ulb_pred_labels, minlength=4)[1:]
             (pl_boxes, pl_conf_scores, pl_sem_scores, pl_sem_logits,
              pl_rect_scores, masks, pl_weights) = self._filter_pls(pls_teacher_wa, batch_dict_ema, ulb_inds)
-            # pl_conf_scores_tensor = torch.cat((pl_conf_scores),dim=0)
-            # pl_sem_scores_tensor = torch.cat((pl_sem_scores),dim=0)
-            # pl_labels_tensor =  torch.cat((pl_boxes),dim=0)[:,-1]
-            # masks_tensor = torch.cat((masks),dim=0)
+                # pl_boxes_top, pl_conf_scores_top,pl_sem_scores_top, _,_, masks_top = self._filter_topk_pls(pls_teacher_wa, batch_dict_ema, ulb_inds)
+            # if :
+            #     lpcont_conf_thresh = self.model_cfg['ROI_HEAD'].get('LPCONT_CONF_THRESH')
+            #     mask_lpcont_conf = pl_conf_scores > lpcont_conf_thresh
+
+            pl_boxes_tensor = torch.cat((pl_boxes),dim=0)
+            pl_conf_scores_tensor = torch.cat((pl_conf_scores),dim=0)
+            pl_sem_scores_tensor = torch.cat((pl_sem_scores),dim=0)
+            pl_labels_tensor =  torch.cat((pl_boxes),dim=0)[:,-1]
+            masks_tensor = torch.cat((masks),dim=0)
             # assert pl_conf_scores_tensor.shape[0] == pl_labels_tensor.shape[0] == pl_sem_scores_tensor.shape[0] == masks_tensor.shape[0]
             pl_weights = [scores.new_ones(scores.shape[0], 1) for scores in pl_conf_scores]  # No weights for now
 
@@ -290,10 +344,10 @@ class PVRCNN_SSL(Detector3DTemplate):
         if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTOTYPING', False):
             # Update the bank with student's features from augmented labeled data
             bank = feature_bank_registry.get('gt_wa_lbl_prototypes')
-            ori_pseudo_projections, ori_labels, ori_gt_boxes  = self.get_pseudo_projections(batch_dict,ulb_inds)
-            # batch_dict_ema['ori_pseudo_projections'] = ori_pseudo_projections.clone()
-            # batch_dict_ema['ori_labels'] = ori_labels.clone()
-            wa_gt_lbl_inputs = self._prep_wa_bank_inputs(batch_dict_ema, lbl_inds, ulb_inds, ori_pseudo_projections, ori_labels, ori_gt_boxes, bank, batch_dict['cur_iteration'], bank.num_points_thresh)
+            if bank.is_initialized():
+                lpcont_conf_threshold = self.model_cfg['ROI_HEAD'].get('LPCONT_CONF_THRESH')
+                pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes = self.get_pl_pseudo_projections(batch_dict, pl_boxes_tensor, pl_labels_tensor, pl_conf_scores_tensor, masks_tensor, lpcont_conf_threshold, ulb_inds)
+            wa_gt_lbl_inputs = self._prep_wa_bank_inputs(batch_dict_ema, lbl_inds, ulb_inds, bank, batch_dict['cur_iteration'], bank.num_points_thresh)
             bank.update(**wa_gt_lbl_inputs,iteration=batch_dict['cur_iteration'])
 
 
@@ -331,11 +385,16 @@ class PVRCNN_SSL(Detector3DTemplate):
                 loss += proto_cont_loss * self.model_cfg['ROI_HEAD']['PROTO_CONTRASTIVE_LOSS_WEIGHT']
                 tb_dict['proto_cont_loss'] = proto_cont_loss.item()
         if self.model_cfg['ROI_HEAD'].get('ENABLE_LPCONT_LOSS', False) and bank.is_initialized():
-            # lpcont_loss = self._get_lpcont_loss(batch_dict, bank, ulb_inds, pl_conf_scores_tensor, pl_sem_scores_tensor, pl_labels_tensor,masks_tensor)
-            ori_lpcont_loss = self._get_lpcont_loss(batch_dict, bank, ulb_inds,ori_pseudo_projections, ori_labels,ori_gt_boxes)
-            if ori_lpcont_loss is not None:
-                loss += ori_lpcont_loss * self.model_cfg['ROI_HEAD']['LPCONT_LOSS_WEIGHT']
-                tb_dict['ori_lpcont_loss'] = ori_lpcont_loss.item()
+            lpcont_loss = self._get_lpcont_loss_pls(batch_dict, bank, pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes)
+            if lpcont_loss is not None:
+                loss += lpcont_loss * self.model_cfg['ROI_HEAD']['LPCONT_LOSS_WEIGHT']
+                tb_dict['lpcont_loss'] = lpcont_loss.item()
+
+            # ori_lpcont_loss = self._get_lpcont_loss(batch_dict, bank, ulb_inds,ori_pseudo_projections, ori_labels,ori_gt_boxes)
+            # if ori_lpcont_loss is not None:
+            #     loss += ori_lpcont_loss * self.model_cfg['ROI_HEAD']['LPCONT_LOSS_WEIGHT']
+            #     tb_dict['ori_lpcont_loss'] = ori_lpcont_loss.item()
+
         tb_dict_ = self._prep_tb_dict(tb_dict, lbl_inds, ulb_inds, reduce_loss_fn)
         tb_dict_.update(**pl_count_dict)
 
@@ -452,7 +511,6 @@ class PVRCNN_SSL(Detector3DTemplate):
             return
         return proto_cont_loss.view(B, N)[ulb_inds][ulb_nonzero_mask].mean()
 
-    # def _get_lpcont_loss(self, batch_dict, bank, ulb_inds, pl_conf_scores, pl_sem_scores, pl_labels, masks):
     def _get_lpcont_loss(self, batch_dict, bank, ulb_inds, ori_pseudo_projections, ori_labels, ori_gt_boxes):
         nonzero_ulb_mask = torch.logical_not(torch.eq(ori_gt_boxes, 0).all(dim=-1))
         if nonzero_ulb_mask.sum() == 0:
@@ -482,11 +540,18 @@ class PVRCNN_SSL(Detector3DTemplate):
         return lp_cont_loss
 
 
+    def _get_lpcont_loss_pls(self, batch_dict, bank, pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes):
+        topk_list=[5,5,5]
+        lp_cont_loss = bank.get_lpcont_loss_pls(pseudo_projections, pseudo_labels, topk_list,pseudo_conf_scores)
+        if lp_cont_loss is None:
+            return
+        return lp_cont_loss
+
     @staticmethod
     def _prep_tb_dict(tb_dict, lbl_inds, ulb_inds, reduce_loss_fn):
         tb_dict_ = {}
         for key in tb_dict.keys():
-            if key == 'proto_cont_loss' or key == 'ori_lpcont_loss':
+            if key == 'proto_cont_loss' or key == 'ori_lpcont_loss' or key=='lpcont_loss':
                 tb_dict_[key] = tb_dict[key]
             elif 'loss' in key or 'acc' in key or 'point_pos_num' in key:
                 tb_dict_[f"{key}_labeled"] = reduce_loss_fn(tb_dict[key][lbl_inds, ...])
