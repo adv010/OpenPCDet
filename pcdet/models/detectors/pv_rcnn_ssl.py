@@ -134,14 +134,9 @@ class PVRCNN_SSL(Detector3DTemplate):
         B,N = batch_dict['gt_boxes'].shape[:2]
         pl_boxes =  torch.chunk(batch_dict['gt_boxes'],2,dim=0)[1] # get unlabeled  boxes
         pl_labels = pl_boxes[..., 7].int()
-        pooled_features = self.pv_rcnn.roi_head.roi_grid_pool(selected_batch_dict, use_gtboxes=True, use_ori_gtboxes=False).clone() #16*max_Box_num,216*2, C//2
-        grid_size = self.model_cfg.ROI_HEAD.ROI_GRID_POOL.GRID_SIZE
-        batch_size_rcnn = pooled_features.shape[0]
-        pooled_features = pooled_features.permute(0, 2, 1). \
-            contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
-        pl_projections = self.pv_rcnn.roi_head.stg2_projector(pooled_features.view(batch_size_rcnn,-1,1))
-        pl_projections = pl_projections.view(B,-1,256)
-        pl_projections = torch.chunk(pl_projections,2,dim=0)[1] # get projections for all unlabeled samples
+        pl_projections = torch.chunk(batch_dict['projected_features_gt'],2,dim=0)[1] # get projections for all unlabeled samples
+        pl_projections = pl_projections.view(B//2,-1,256)
+        # pl_projections = torch.chunk(pl_projections,2,dim=0)[1] # get projections for all unlabeled samples
 
         # Strip off zero padding
         valid_mask = torch.logical_not(torch.eq(pl_boxes, 0).all(dim=-1))
@@ -176,34 +171,36 @@ class PVRCNN_SSL(Detector3DTemplate):
         assert lpcont_projections.size(0) == lpcont_labels.size(0) == lpcont_conf_scores.size(0) == lpcont_boxes.size(0)
         return lpcont_projections, lpcont_labels, lpcont_conf_scores, lpcont_boxes 
 
-    def _prep_wa_bank_inputs(self, batch_dict, inds,ulb_inds, bank, iteration, num_points_threshold=20):
-        selected_batch_dict_ema = self._clone_gt_boxes_and_feats(batch_dict)
-        with torch.no_grad():
-            projections_gt = self.pv_rcnn_ema.roi_head.pool_features(selected_batch_dict_ema, use_gtboxes=True, shared=False, projector=True) 
+    def _prep_wa_bank_inputs(self, batch_dict_ema, inds, ulb_inds, bank, iteration, num_points_threshold=20):
+        # selected_batch_dict_ema = self._clone_gt_boxes_and_feats(batch_dict)
+        # with torch.no_grad():
+        #     projections_gt = self.pv_rcnn_ema.roi_head.pool_features(selected_batch_dict_ema, use_gtboxes=True, shared=False, projector=True) 
           
-        projections_gt = projections_gt.view(*batch_dict['gt_boxes'].shape[:2], -1)
-        projections_gt = torch.chunk(projections_gt,2,dim=0)[0] #  Teacher's labeled projections 
+        projections_gt = batch_dict_ema['projected_features_gt']
+        projections_gt = projections_gt.view(*batch_dict_ema['gt_boxes'].shape[:2], -1)
+        
+        projections_gt = torch.chunk(projections_gt,2,dim=0)[0] #  Teacher's labeled projections on GT boxes
 
         bank_inputs = defaultdict(list)
         for ix in inds:
 
-            gt_boxes = selected_batch_dict_ema['gt_boxes'][ix]
+            gt_boxes = batch_dict_ema['gt_boxes'][ix]
             nonzero_mask = torch.logical_not(torch.eq(gt_boxes, 0).all(dim=-1))
             if nonzero_mask.sum() == 0:
-                print(f"no gt instance in frame {batch_dict['frame_id'][ix]}")
+                print(f"no gt instance in frame {batch_dict_ema['frame_id'][ix]}")
                 continue
             gt_boxes = gt_boxes[nonzero_mask]
-            sample_mask = batch_dict['points'][:, 0].int() == ix
-            points = batch_dict['points'][sample_mask, 1:4]
+            sample_mask = batch_dict_ema['points'][:, 0].int() == ix
+            points = batch_dict_ema['points'][sample_mask, 1:4]
             gt_feat = projections_gt[ix][nonzero_mask] # Store labeled projections into bank
             gt_labels = gt_boxes[:, 7].int()
             gt_boxes = gt_boxes[:, :7]
-            ins_idxs = batch_dict['instance_idx'][ix][nonzero_mask].int()
-            smpl_id = torch.from_numpy(batch_dict['frame_id'].astype(np.int32))[ix].to(gt_boxes.device)
+            ins_idxs = batch_dict_ema['instance_idx'][ix][nonzero_mask].int()
+            smpl_id = torch.from_numpy(batch_dict_ema['frame_id'].astype(np.int32))[ix].to(gt_boxes.device)
             num_points_in_gt = roiaware_pool3d_utils.points_in_boxes_cpu(points.cpu(), gt_boxes.cpu()).sum(dim=-1)
             valid_gts_mask = (num_points_in_gt >= num_points_threshold)
             if valid_gts_mask.sum() == 0:
-                print(f"no valid gt instances with enough points in frame {batch_dict['frame_id'][ix]}")
+                print(f"no valid gt instances with enough points in frame {batch_dict_ema['frame_id'][ix]}")
                 continue
             bank_inputs['feats'].append(gt_feat[valid_gts_mask])
             bank_inputs['labels'].append(gt_labels[valid_gts_mask])
@@ -385,7 +382,10 @@ class PVRCNN_SSL(Detector3DTemplate):
                 loss += proto_cont_loss * self.model_cfg['ROI_HEAD']['PROTO_CONTRASTIVE_LOSS_WEIGHT']
                 tb_dict['proto_cont_loss'] = proto_cont_loss.item()
         if self.model_cfg['ROI_HEAD'].get('ENABLE_LPCONT_LOSS', False) and bank.is_initialized():
-            lpcont_loss = self._get_lpcont_loss_pls(batch_dict, bank, pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes)
+            if not bank.is_initialized():
+                lpcont_loss = None
+            else:
+                lpcont_loss = self._get_lpcont_loss_pls(batch_dict, bank, pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes)
             if lpcont_loss is not None:
                 loss += lpcont_loss * self.model_cfg['ROI_HEAD']['LPCONT_LOSS_WEIGHT']
                 tb_dict['lpcont_loss'] = lpcont_loss.item()

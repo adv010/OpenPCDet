@@ -211,20 +211,19 @@ class PVRCNNHead(RoIHeadTemplate):
                           - (local_roi_size.unsqueeze(dim=1) / 2)  # (B, 6x6x6, 3)
         return roi_grid_points
 
-    def pool_features(self, batch_dict, use_gtboxes=False, shared=False, projector=False):
+    def pool_features(self, batch_dict, use_gtboxes=False, shared = False, projector=False):
         pooled_features = self.roi_grid_pool(batch_dict, use_gtboxes=use_gtboxes)  # (BxN, 6x6x6, C)
         grid_size = self.model_cfg.ROI_GRID_POOL.GRID_SIZE
         batch_size_rcnn = pooled_features.shape[0]
         pooled_features = pooled_features.permute(0, 2, 1). \
             contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
-        if shared:
-            shared_ft = self.shared_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1))
-            return shared_ft
-        if projector:
-            projections = self.stg2_projector(pooled_features.view(batch_size_rcnn, -1, 1))
-            return projections
+        if projector==True:
+            projection_gts = self.stg2_projector(pooled_features.view(batch_size_rcnn, -1, 1))
+        if shared==True:
+            shared_gts = self.shared_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1))
+            return shared_gts, projection_gts
         return pooled_features
-    
+
     
 
     def forward(self, batch_dict, test_only=False):
@@ -252,23 +251,26 @@ class PVRCNNHead(RoIHeadTemplate):
             targets_dict['ori_unlabeled_boxes'] = batch_dict['ori_unlabeled_boxes']
             targets_dict['points'] = batch_dict['points']
 
-        pooled_features = self.pool_features(batch_dict)
-        # ori_pooled_features = self.ori_roi_grid_pool(batch_dict, use_gtboxes=False, use_ori_gtboxes=True)
-        # ori_batch_size_rcnn = ori_pooled_features.shape[0]
+        '''Pooling block using GTs'''
+        shared_pooled_gts, proj_pooled_gts = self.pool_features(batch_dict, use_gtboxes=True, shared=True, projector=True)
+        batch_dict['shared_features_gt'] = shared_pooled_gts
+        batch_dict['projected_features_gt'] = proj_pooled_gts
+
+        '''Pooling block using RoIs'''
+        pooled_features = self.pool_features(batch_dict,use_gtboxes=False)
         batch_size_rcnn = pooled_features.shape[0]
         shared_features = self.shared_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1))
+        batch_dict['shared_features'] = shared_features
         rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
         rcnn_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
-        # ori_projections = self.stg2_projector(ori_pooled_features.view(ori_batch_size_rcnn, -1, 1))
-        # batch_dict['ori_projections'] = ori_projections
+
         if (self.training or self.print_loss_when_eval) and not test_only:
             # RoI-level similarity.
             # calculate cosine similarity between unlabeled augmented RoI features and labeled augmented prototypes.
             roi_features = pooled_features.clone().detach().view(batch_size_rcnn, -1)
             roi_scores_shape = batch_dict['roi_scores'].shape  # (B, N)
-            # bank = feature_bank_registry.get('gt_aug_lbl_prototypes')
-            # sim_scores = bank.get_sim_scores(roi_features)
-            # targets_dict['roi_sim_scores'] = sim_scores.view(*roi_scores_shape, -1)
+
+
 
         if not self.training or self.predict_boxes_when_training:
             batch_cls_preds, batch_box_preds = self.generate_predicted_boxes(

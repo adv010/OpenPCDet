@@ -208,16 +208,36 @@ class FeatureBank(Metric):
     def sample_topk(self, pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores):
         if pseudo_conf_scores is not None:
             car_idx = torch.where(pseudo_positive_labels==1)[0]
-            topk_conf_cars = torch.topk(pseudo_conf_scores[car_idx],topk_list[0])[1]
-            topk_cars = pseudo_positives[car_idx][topk_conf_cars]
+
+            car_conf_scores = torch.index_select(pseudo_conf_scores, dim=0, index=car_idx)
+            car_positives = torch.index_select(pseudo_positives, dim=0, index=car_idx)
+            car_labels= torch.index_select(pseudo_positive_labels, dim=0, index=car_idx)
+
+            topk_conf_cars, topk_car_idx = torch.topk(car_conf_scores,topk_list[0])
+            topk_car_fts = torch.index_select(car_positives, 0, topk_car_idx)
+            topk_car_labels = torch.index_select(car_labels, 0, topk_car_idx)
+
             ped_idx = torch.where(pseudo_positive_labels==2)[0]
-            topk_conf_peds = torch.topk(pseudo_conf_scores[ped_idx],topk_list[0])[1]
-            topk_peds = pseudo_positives[ped_idx][topk_conf_peds]
+            ped_conf_scores = torch.index_select(pseudo_conf_scores, dim=0, index=ped_idx)
+            ped_positives = torch.index_select(pseudo_positives, dim=0, index=ped_idx)
+            ped_labels= torch.index_select(pseudo_positive_labels, dim=0, index=ped_idx)
+
+            topk_conf_peds, topk_ped_idx = torch.topk(ped_conf_scores,topk_list[1])
+            topk_ped_fts = torch.index_select(ped_positives, dim=0, index=topk_ped_idx)
+            topk_ped_labels = torch.index_select(ped_labels, dim=0, index=topk_ped_idx)
+
             cyc_idx = torch.where(pseudo_positive_labels==3)[0]
-            topk_conf_cycs = torch.topk(pseudo_conf_scores[cyc_idx],topk_list[0])[1]
-            topk_cycs = pseudo_positives[cyc_idx][topk_conf_cycs]
-            pseudo_topk_labels = torch.cat((pseudo_positive_labels[topk_conf_cars],pseudo_positive_labels[topk_conf_peds],pseudo_positive_labels[topk_conf_cycs]),dim=0)
-            pseudo_topk_fts = torch.cat((topk_cars, topk_peds,topk_cycs),dim=0)
+            cyc_conf_scores = torch.index_select(pseudo_conf_scores, dim=0, index=cyc_idx)
+            cyc_positives = torch.index_select(pseudo_positives, dim=0, index=cyc_idx)
+            cyc_labels= torch.index_select(pseudo_positive_labels, dim=0, index=cyc_idx)
+
+            topk_conf_cycs, topk_cyc_idx = torch.topk(cyc_conf_scores,topk_list[2])
+            topk_cyc_fts = torch.index_select(cyc_positives, dim=0, index=topk_cyc_idx)
+            topk_cyc_labels = torch.index_select(cyc_labels, dim=0, index=topk_cyc_idx)
+
+            pseudo_topk_labels = torch.cat((topk_car_labels,topk_ped_labels,topk_cyc_labels),dim=0)
+            pseudo_topk_fts = torch.cat((topk_car_fts, topk_ped_fts, topk_cyc_fts), dim=0)
+
         else:
             car_mk = torch.topk((torch.where(pseudo_positive_labels==1)[0]),topk_list[0])[0]
             topk_cars = pseudo_positives[car_mk]
@@ -308,20 +328,22 @@ class FeatureBank(Metric):
 
             padding_mask = torch.logical_not(torch.all(pseudo_topk_features == 0, dim=-1))
 
-            sorted_prototypes = F.normalize(sorted_prototypes,dim=-1)
-            pseudo_topk_features = F.normalize(pseudo_topk_features,dim=-1)
+            norm_sorted_prototypes = F.normalize(sorted_prototypes,dim=-1)
+            norm_pseudo_topk_features = F.normalize(pseudo_topk_features,dim=-1)
 
-            sim_pos_matrix = sorted_prototypes @ pseudo_topk_features.t()
-            sim_pos_matrix = torch.exp(sim_pos_matrix/1.0)
-            sim_pos_matrix_row = sim_pos_matrix.clone()
+            sim_pos_matrix = norm_sorted_prototypes @ norm_pseudo_topk_features.t()
+            exp_sim_pos_matrix = torch.exp(sim_pos_matrix/1.0)
+            sim_pos_matrix_row = exp_sim_pos_matrix.clone()
             positive_mask = label_mask
             negative_mask = ~label_mask
 
             # Column loss
-            positive_sum = torch.sum(sim_pos_matrix * positive_mask.float(), dim=0) # sum positives along rows
-            negative_sum = torch.sum(sim_pos_matrix * negative_mask.float(), dim=0) # sum negatives along rows
-            logits = positive_sum / negative_sum
-            contrastive_loss = contrastive_loss + (torch.log(logits).sum() * -1) /(sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3)
+            positive_sum = torch.sum(exp_sim_pos_matrix * positive_mask.float(), dim=0, keepdims=True) # sum positives along rows
+            negative_sum = torch.sum(exp_sim_pos_matrix * negative_mask.float(), dim=0, keepdims=True) # sum negatives along rows
+            logits = positive_sum / negative_sum #1,C
+            log_logits = torch.log(logits).view(-1) #logits[padding_mask]
+            log_logits = log_logits[padding_mask]
+            contrastive_loss = contrastive_loss + ((log_logits.sum() * -1) / (sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3))
 
             # # Row loss
             # positive_sum_row = sim_pos_matrix_row * positive_mask
