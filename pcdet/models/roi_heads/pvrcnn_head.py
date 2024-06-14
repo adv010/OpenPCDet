@@ -19,6 +19,7 @@ class PVRCNNHead(RoIHeadTemplate):
 
         GRID_SIZE = self.model_cfg.ROI_GRID_POOL.GRID_SIZE
         pre_channel = GRID_SIZE * GRID_SIZE * GRID_SIZE * num_c_out
+        pre_channel2 = GRID_SIZE * GRID_SIZE * GRID_SIZE * num_c_out
 
         shared_fc_list = []
         for k in range(0, self.model_cfg.SHARED_FC.__len__()):
@@ -32,7 +33,21 @@ class PVRCNNHead(RoIHeadTemplate):
             if k != self.model_cfg.SHARED_FC.__len__() - 1 and self.model_cfg.DP_RATIO > 0:
                 shared_fc_list.append(nn.Dropout(self.model_cfg.DP_RATIO))
 
-        self.shared_fc_layer = nn.Sequential(*shared_fc_list)
+        self.shared_fc_layer = nn.Sequential(*shared_fc_list) 
+
+        projected_fc_list = []
+        for k in range(0, self.model_cfg.PROJECTED_FC.__len__()):
+            projected_fc_list.extend([
+                nn.Conv1d(pre_channel2, self.model_cfg.PROJECTED_FC[k], kernel_size=1, bias=False),
+                nn.BatchNorm1d(self.model_cfg.PROJECTED_FC[k]),
+                nn.ReLU()
+            ])
+            pre_channel2 = self.model_cfg.PROJECTED_FC[k]
+
+            if k != self.model_cfg.PROJECTED_FC.__len__() - 1 and self.model_cfg.DP_RATIO > 0:
+                projected_fc_list.append(nn.Dropout(self.model_cfg.DP_RATIO))
+
+        self.projector_fc_layer = nn.Sequential(*projected_fc_list) # Using this layer's projections to calculate instance wise contrastive loss on
 
         self.cls_layers = self.make_fc_layers(
             input_channels=pre_channel, output_channels=self.num_class, fc_list=self.model_cfg.CLS_FC
@@ -137,15 +152,18 @@ class PVRCNNHead(RoIHeadTemplate):
                           - (local_roi_size.unsqueeze(dim=1) / 2)  # (B, 6x6x6, 3)
         return roi_grid_points
 
-    def pool_features(self, batch_dict, use_gtboxes=False):
+    def pool_features(self, batch_dict, use_gtboxes=False, shared = False, projector=False):
         pooled_features = self.roi_grid_pool(batch_dict, use_gtboxes=use_gtboxes)  # (BxN, 6x6x6, C)
         grid_size = self.model_cfg.ROI_GRID_POOL.GRID_SIZE
         batch_size_rcnn = pooled_features.shape[0]
         pooled_features = pooled_features.permute(0, 2, 1). \
             contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
-
+        if projector==True:
+            projection_gts = self.projector_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1))
+        if shared==True:
+            shared_gts = self.shared_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1))
+            return shared_gts, projection_gts
         return pooled_features
-    
 
     def forward(self, batch_dict, test_only=False):
         """
@@ -172,9 +190,16 @@ class PVRCNNHead(RoIHeadTemplate):
             targets_dict['ori_unlabeled_boxes'] = batch_dict['ori_unlabeled_boxes']
             targets_dict['points'] = batch_dict['points']
 
-        pooled_features = self.pool_features(batch_dict)
+        '''Pooling block using GTs'''
+        shared_pooled_gts, proj_pooled_gts = self.pool_features(batch_dict, use_gtboxes=True, shared=True, projector=True)
+        batch_dict['shared_features_gt'] = shared_pooled_gts
+        batch_dict['projected_features_gt'] = proj_pooled_gts
+
+        '''Pooling block using RoIs'''
+        pooled_features = self.pool_features(batch_dict,use_gtboxes=False)
         batch_size_rcnn = pooled_features.shape[0]
         shared_features = self.shared_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1))
+        batch_dict['shared_features'] = shared_features
         rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
         rcnn_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
 
