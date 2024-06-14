@@ -51,7 +51,7 @@ class PVRCNNHead(RoIHeadTemplate):
         stg2_projector_list = []
         for k in range(0, self.model_cfg.STG2_PROJ_FC.__len__()):
             stg2_projector_list.append(
-                nn.Conv1d(pre_channel, self.model_cfg.STG2_PROJ_FC[k], kernel_size=1, bias=False))
+                nn.Conv1d(pre_channel, self.model_cfg.STG2_PROJ_FC[k], kernel_size=1, bias=True))
             if self.model_cfg.STG2_PROJ_FC_CFGS.BATCH_NORM:
                 stg2_projector_list.append(nn.BatchNorm1d(self.model_cfg.STG2_PROJ_FC[k]))
             if self.model_cfg.STG2_PROJ_FC_CFGS.ACTIVATION == 'ReLU':

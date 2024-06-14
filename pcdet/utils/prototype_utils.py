@@ -346,12 +346,37 @@ class FeatureBank(Metric):
             contrastive_loss = contrastive_loss + ((log_logits.sum() * -1) / (sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3))
 
             # # Row loss
-            # positive_sum_row = sim_pos_matrix_row * positive_mask
-            # positive_sum_row = torch.sum(positive_sum_row.float(), dim=1)
-            # negative_sum_row = sim_pos_matrix_row * negative_mask
-            # negative_sum_row = torch.sum(negative_sum_row.float(),dim=1)
-            # logits_row = (positive_sum_row) / (negative_sum_row)
-            # contrastive_loss = contrastive_loss + (torch.log(logits_row).sum() * -1) /(sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3)
+            padding_mask_row = padding_mask.unsqueeze(0).expand(161,-1)
+            positive_sum_row = sim_pos_matrix_row * positive_mask # Padded zeros get masked out
+            positive_sum_row = positive_sum_row[...,padding_mask_row]
+            '''
+            (sim_pos_matrix_row * positive_mask)[0]
+tensor([1.4732, 1.4086, 1.5458, 1.5581, 1.3934, 0.0000, 0.0000, 0.0000, 0.0000,
+        0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000], device='cuda:0',
+       grad_fn=<SelectBackward0>)
+            '''
+            '''
+            (sim_pos_matrix_row * negative_mask)[0]
+tensor([0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 1.4268, 1.4402, 1.4857, 1.0000,
+        1.0000, 1.0000, 1.0000, 1.0000, 1.0000, 1.0000], device='cuda:0',
+       grad_fn=<SelectBackward0>)
+            '''
+            '''
+            x/y
+tensor([0., 0., 0., 0., 0., 0., 0., 0., 0., 0., inf, inf, inf, inf, inf],
+       device='cuda:0', grad_fn=<DivBackward0>)
+            '''
+            negative_sum_row = sim_pos_matrix_row * negative_mask
+            negative_sum_row = negative_sum_row[...,padding_mask_row]
+            keep_positive_row = positive_sum_row.sum(dim=-1,keepdims=True).float()
+            keep_negative_row = negative_sum_row.sum(dim=-1,keepdims=True).float()
+            logits_row = (keep_positive_row) / (keep_negative_row)
+            safe_mask = logits_row==0
+            logits_row[safe_mask] = 1
+            log_logits_row = torch.log(logits_row).view(-1)
+            contrastive_loss = contrastive_loss + ((log_logits_row.sum() * -1) / (sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3))
+            contrastive_loss = contrastive_loss / 2
+            return contrastive_loss
 
 
 class FeatureBankRegistry(object):
