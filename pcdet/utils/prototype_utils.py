@@ -272,7 +272,7 @@ class FeatureBank(Metric):
 
         sim_pos_matrix = sorted_prototypes @ pseudo_topk_features.t() # (161,256) @ (256,15) -> (161,15)
         exp_sim_pos_matrix = torch.exp(sim_pos_matrix/1.0) 
-        exp_sim_pos_matrix_row = exp_sim_pos_matrix.clone() 
+        sim_pos_matrix_row = exp_sim_pos_matrix.clone() 
         positive_mask = label_mask #(161,15)
         negative_mask = ~label_mask #(161,15)
         positive_sum = torch.sum(exp_sim_pos_matrix * positive_mask.float(), dim=0, keepdims=True) # 1,15
@@ -282,16 +282,19 @@ class FeatureBank(Metric):
         log_logits = log_logits[padding_mask] # 15 - P
         contrastive_loss = contrastive_loss + ((log_logits.sum() * -1) / (sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3))
 
-        if CLIP_CE == True:
-            padding_mask_row = padding_mask.unsqueeze(0).expand(161,-1) # 161,15
-            positive_sum_row = exp_sim_pos_matrix_row * positive_mask * padding_mask_row # 161,15
-            negative_sum_row = exp_sim_pos_matrix_row * negative_mask * padding_mask_row #161,15
-            keep_positive_row = positive_sum_row.sum(dim=-1,keepdims=True).float() #161,1
-            keep_negative_row = negative_sum_row.sum(dim=-1,keepdims=True).float() #161,1
-            logits_row = (keep_positive_row) / (keep_negative_row) # 161,1
-            safe_mask = torch.eq(logits_row,0) #161,1
-            logits_row[safe_mask] = 1
-            log_logits_row = torch.log(logits_row).view(-1) #161
+        if CLIP_CE == True: 
+            padding_mask_row = padding_mask.unsqueeze(0).expand(161,-1) #161,15
+            positive_sum_row = sim_pos_matrix_row * positive_mask # 161,15
+            positive_sum_row = positive_sum_row[...,padding_mask_row] # [1449]
+            
+            negative_sum_row = sim_pos_matrix_row * negative_mask # 161,15
+            negative_sum_row = negative_sum_row[...,padding_mask_row] # [1449]
+            keep_positive_row = positive_sum_row.sum(dim=-1,keepdims=True).float()  # 1
+            keep_negative_row = negative_sum_row.sum(dim=-1,keepdims=True).float() # 1
+            logits_row = (keep_positive_row) / (keep_negative_row) #1
+            safe_mask = logits_row==0 #1 
+            logits_row[safe_mask] = 1#1 
+            log_logits_row = torch.log(logits_row).view(-1)
             contrastive_loss = contrastive_loss + ((log_logits_row.sum() * -1) / (sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3))
             contrastive_loss = contrastive_loss / 2
         return contrastive_loss
