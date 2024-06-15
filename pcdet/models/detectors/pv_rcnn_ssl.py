@@ -341,13 +341,11 @@ class PVRCNN_SSL(Detector3DTemplate):
         if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTOTYPING', False):
             # Update the bank with student's features from augmented labeled data
             bank = feature_bank_registry.get('gt_wa_lbl_prototypes')
-            # if bank.is_initialized():
-            #     lpcont_conf_threshold = self.model_cfg['ROI_HEAD'].get('LPCONT_CONF_THRESH')
-            #     pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes = self.get_pl_pseudo_projections(batch_dict, pl_boxes_tensor, pl_labels_tensor, pl_conf_scores_tensor, masks_tensor, lpcont_conf_threshold, ulb_inds)
-            # wa_gt_lbl_inputs = self._prep_wa_bank_inputs(batch_dict_ema, lbl_inds, ulb_inds, bank, batch_dict['cur_iteration'], bank.num_points_thresh)
-            # bank.update(**wa_gt_lbl_inputs,iteration=batch_dict['cur_iteration'])
+            if bank.is_initialized() and self.model_cfg['ROI_HEAD'].get('ENABLE_LPCONT_LOSS', False):
+                lpcont_conf_threshold = self.model_cfg['ROI_HEAD'].get('LPCONT_CONF_THRESH')
+                pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes = self.get_pl_pseudo_projections(batch_dict, pl_boxes_tensor, pl_labels_tensor, pl_conf_scores_tensor, masks_tensor, lpcont_conf_threshold, ulb_inds)
 
-            if bank.is_initialized():
+            if bank.is_initialized() and self.model_cfg['ROI_HEAD'].get('ENABLE_ORI_LPCONT_LOSS', False):
                 ori_pseudo_projections, ori_labels,ori_gt_boxes = self.get_pseudo_projections(batch_dict, ulb_inds)
             wa_gt_lbl_inputs = self._prep_wa_bank_inputs(batch_dict_ema, lbl_inds, ulb_inds, bank, batch_dict['cur_iteration'], bank.num_points_thresh)
             bank.update(**wa_gt_lbl_inputs,iteration=batch_dict['cur_iteration'])
@@ -386,20 +384,25 @@ class PVRCNN_SSL(Detector3DTemplate):
             if proto_cont_loss is not None:
                 loss += proto_cont_loss * self.model_cfg['ROI_HEAD']['PROTO_CONTRASTIVE_LOSS_WEIGHT']
                 tb_dict['proto_cont_loss'] = proto_cont_loss.item()
-        if self.model_cfg['ROI_HEAD'].get('ENABLE_LPCONT_LOSS', False):
+        if self.model_cfg['ROI_HEAD'].get('ENABLE_ORI_LPCONT_LOSS', False):
             if not bank.is_initialized():
                 ori_lpcont_loss = None
-            # else:
-            #     lpcont_loss = self._get_lpcont_loss_pls(batch_dict, bank, pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes)
-            # if lpcont_loss is not None:
-            #     loss += lpcont_loss * self.model_cfg['ROI_HEAD']['LPCONT_LOSS_WEIGHT']
-            #     tb_dict['lpcont_loss'] = lpcont_loss.item()
-
             else:
-                ori_lpcont_loss = self._get_lpcont_loss(batch_dict, bank, ulb_inds,ori_pseudo_projections, ori_labels,ori_gt_boxes)
+                CLIP_CE = self.model_cfg['ROI_HEAD'].get('CLIP_CE', False)
+                ori_lpcont_loss = self._get_lpcont_loss(batch_dict, bank, ulb_inds, ori_pseudo_projections, ori_labels, ori_gt_boxes,CLIP_CE)
             if ori_lpcont_loss is not None:
                 loss += ori_lpcont_loss * self.model_cfg['ROI_HEAD']['LPCONT_LOSS_WEIGHT']
                 tb_dict['ori_lpcont_loss'] = ori_lpcont_loss.item()
+
+        if self.model_cfg['ROI_HEAD'].get('ENABLE_LPCONT_LOSS', False):
+            if not bank.is_initialized():
+                lpcont_loss = None            
+            else:
+                CLIP_CE = self.model_cfg['ROI_HEAD'].get('CLIP_CE', False)
+                lpcont_loss = self._get_lpcont_loss_pls(batch_dict, bank, pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes,CLIP_CE)
+            if lpcont_loss is not None:
+                loss += lpcont_loss * self.model_cfg['ROI_HEAD']['LPCONT_LOSS_WEIGHT']
+                tb_dict['lpcont_loss'] = lpcont_loss.item()
 
         tb_dict_ = self._prep_tb_dict(tb_dict, lbl_inds, ulb_inds, reduce_loss_fn)
         tb_dict_.update(**pl_count_dict)
@@ -517,7 +520,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             return
         return proto_cont_loss.view(B, N)[ulb_inds][ulb_nonzero_mask].mean()
 
-    def _get_lpcont_loss(self, batch_dict, bank, ulb_inds, ori_pseudo_projections, ori_labels, ori_gt_boxes):
+    def _get_lpcont_loss(self, batch_dict, bank, ulb_inds, ori_pseudo_projections, ori_labels, ori_gt_boxes, CLIP_CE):
         nonzero_ulb_mask = torch.logical_not(torch.eq(ori_gt_boxes, 0).all(dim=-1))
         if nonzero_ulb_mask.sum() == 0:
             print(f"No pl instances predicted for strongly augmented frame(s) {batch_dict['frame_id'][ulb_inds]}")
@@ -540,15 +543,15 @@ class PVRCNN_SSL(Detector3DTemplate):
         # pl_labels = pl_labels[pl_labels>0]
 
         topk_list=[5,5,5]
-        lp_cont_loss = bank.get_lpcont_loss(ori_pseudo_projections, ori_labels, topk_list)
+        lp_cont_loss = bank.get_lpcont_loss(ori_pseudo_projections, ori_labels, topk_list, CLIP_CE)
         if lp_cont_loss is None:
             return
         return lp_cont_loss
 
 
-    def _get_lpcont_loss_pls(self, batch_dict, bank, pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes):
+    def _get_lpcont_loss_pls(self, batch_dict, bank, pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes, CLIP_CE):
         topk_list=[5,5,5]
-        lp_cont_loss = bank.get_lpcont_loss_pls(pseudo_projections, pseudo_labels, topk_list,pseudo_conf_scores)
+        lp_cont_loss = bank.get_lpcont_loss_pls(pseudo_projections, pseudo_labels, topk_list,pseudo_conf_scores, CLIP_CE)
         if lp_cont_loss is None:
             return
         return lp_cont_loss

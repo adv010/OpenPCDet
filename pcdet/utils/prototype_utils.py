@@ -178,16 +178,6 @@ class FeatureBank(Metric):
     def is_initialized(self):
         return self.initialized
     
-    def lpcont_indices(self,nk_labels,mk_labels,k):
-        """
-        param mk_labels : Sorted labels of pseudo-positives
-        return:
-        """
-        mask = mk_labels == k
-        mask_others_denom = mk_labels != k
-        mk_first_idx = torch.where(mask)[0][0]
-        mk_last_idx = (torch.where(mask)[0][-1]) + 1
-        return mask, mask_others_denom, mk_first_idx, mk_last_idx
     
     
     def topk_padding(self,pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores, k):
@@ -250,7 +240,7 @@ class FeatureBank(Metric):
         
         return pseudo_topk_labels,pseudo_topk_fts
 
-    def get_lpcont_loss(self, pseudo_positives, pseudo_positive_labels, topk_list):
+    def get_lpcont_loss(self, pseudo_positives, pseudo_positive_labels, topk_list, CLIP_CE=False):
         """
         param pseudo_positives: Pseudo positive student features(Mk, Channel=256)
         param topk_labels: Labels for pseudo positive student features
@@ -288,28 +278,27 @@ class FeatureBank(Metric):
         positive_sum = torch.sum(exp_sim_pos_matrix * positive_mask.float(), dim=0, keepdims=True) # sum positives along rows
         negative_sum = torch.sum(exp_sim_pos_matrix * negative_mask.float(), dim=0, keepdims=True) # sum negatives along rows
         logits = positive_sum / negative_sum #1,C
-        log_logits = torch.log(logits).view(-1) #logits[padding_mask]
-        log_logits = log_logits[padding_mask]
+        log_logits = torch.log(logits).view(-1)
+        log_logits = log_logits[padding_mask] # consider loss for only non padded columns
         contrastive_loss = contrastive_loss + ((log_logits.sum() * -1) / (sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3))
-        
-        # padding_mask_row = padding_mask.unsqueeze(0).expand(161,-1)
-        # positive_sum_row = sim_pos_matrix_row * positive_mask # Padded zeros get masked out
-        # positive_sum_row = positive_sum_row[...,padding_mask_row]
-        
-        # negative_sum_row = sim_pos_matrix_row * negative_mask
-        # negative_sum_row = negative_sum_row[...,padding_mask_row]
-        # keep_positive_row = positive_sum_row.sum(dim=-1,keepdims=True).float()
-        # keep_negative_row = negative_sum_row.sum(dim=-1,keepdims=True).float()
-        # logits_row = (keep_positive_row) / (keep_negative_row)
-        # safe_mask = logits_row==0
-        # logits_row[safe_mask] = 1
-        # log_logits_row = torch.log(logits_row).view(-1)
-        # contrastive_loss = contrastive_loss + ((log_logits_row.sum() * -1) / (sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3))
-        # contrastive_loss = contrastive_loss / 2
-
+        if CLIP_CE == True:
+            padding_mask_row = padding_mask.unsqueeze(0).expand(161,-1)
+            positive_sum_row = sim_pos_matrix_row * positive_mask # Padded zeros get masked out
+            positive_sum_row = positive_sum_row[...,padding_mask_row] # consider loss for only non padded columns
+            
+            negative_sum_row = sim_pos_matrix_row * negative_mask
+            negative_sum_row = negative_sum_row[...,padding_mask_row] # consider loss for only non padded columns
+            keep_positive_row = positive_sum_row.sum(dim=-1,keepdims=True).float()
+            keep_negative_row = negative_sum_row.sum(dim=-1,keepdims=True).float()
+            logits_row = (keep_positive_row) / (keep_negative_row)
+            safe_mask = logits_row==0
+            logits_row[safe_mask] = 1
+            log_logits_row = torch.log(logits_row).view(-1)
+            contrastive_loss = contrastive_loss + ((log_logits_row.sum() * -1) / (sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3))
+            contrastive_loss = contrastive_loss / 2
         return contrastive_loss
 
-    def get_lpcont_loss_pls(self, pseudo_positives, pseudo_positive_labels, topk_list, pseudo_conf_scores = None):
+    def get_lpcont_loss_pls(self, pseudo_positives, pseudo_positive_labels, topk_list, pseudo_conf_scores = None, CLIP_CE=False):
             """
             param pseudo_positives: Pseudo positive student features(Mk, Channel=256)
             param topk_labels: Labels for pseudo positive student features
@@ -348,25 +337,26 @@ class FeatureBank(Metric):
             positive_sum = torch.sum(exp_sim_pos_matrix * positive_mask.float(), dim=0, keepdims=True) # sum positives along rows
             negative_sum = torch.sum(exp_sim_pos_matrix * negative_mask.float(), dim=0, keepdims=True) # sum negatives along rows
             logits = positive_sum / negative_sum #1,C
-            log_logits = torch.log(logits).view(-1) #logits[padding_mask]
-            # log_logits = log_logits[padding_mask]
+            log_logits = torch.log(logits).view(-1) 
+            log_logits = log_logits[padding_mask] # consider loss for only non padded columns
             contrastive_loss = contrastive_loss + ((log_logits.sum() * -1) / (sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3))
-
-#             # # Row loss
-#             padding_mask_row = padding_mask.unsqueeze(0).expand(161,-1)
-#             positive_sum_row = sim_pos_matrix_row * positive_mask # Padded zeros get masked out
-#             positive_sum_row = positive_sum_row[...,padding_mask_row]
-#          
-#             negative_sum_row = sim_pos_matrix_row * negative_mask
-#             negative_sum_row = negative_sum_row[...,padding_mask_row]
-#             keep_positive_row = positive_sum_row.sum(dim=-1,keepdims=True).float()
-#             keep_negative_row = negative_sum_row.sum(dim=-1,keepdims=True).float()
-#             logits_row = (keep_positive_row) / (keep_negative_row)
-#             safe_mask = logits_row==0
-#             logits_row[safe_mask] = 1
-#             log_logits_row = torch.log(logits_row).view(-1)
-#             contrastive_loss = contrastive_loss + ((log_logits_row.sum() * -1) / (sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3))
-#             contrastive_loss = contrastive_loss / 2
+            
+            if CLIP_CE == True:
+                # # Row loss
+                padding_mask_row = padding_mask.unsqueeze(0).expand(161,-1)
+                positive_sum_row = sim_pos_matrix_row * positive_mask # Padded zeros get masked out
+                positive_sum_row = positive_sum_row[...,padding_mask_row]
+            
+                negative_sum_row = sim_pos_matrix_row * negative_mask
+                negative_sum_row = negative_sum_row[...,padding_mask_row]
+                keep_positive_row = positive_sum_row.sum(dim=-1,keepdims=True).float()
+                keep_negative_row = negative_sum_row.sum(dim=-1,keepdims=True).float()
+                logits_row = (keep_positive_row) / (keep_negative_row)
+                safe_mask = logits_row==0
+                logits_row[safe_mask] = 1
+                log_logits_row = torch.log(logits_row).view(-1)
+                contrastive_loss = contrastive_loss + ((log_logits_row.sum() * -1) / (sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3))
+                contrastive_loss = contrastive_loss / 2
             return contrastive_loss
 
 

@@ -171,7 +171,9 @@ MODEL:
             ACTIVATION: ReLU
             BATCH_NORM: True
             DP_RATIO: 0.9
-        ENABLE_LPCONT_LOSS: True
+        ENABLE_LPCONT_LOSS: False
+        ENABLE_ORI_LPCONT_LOSS: True
+        CLIP_CE: False
         LPCONT_TEMPERATURE: 1.0
         LPCONT_LOSS_WEIGHT: 0.2
         LPCONT_CONF_THRESH: [0.9, 0.8, 0.7]

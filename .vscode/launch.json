@@ -17,7 +17,7 @@
                 "../../ckpt/pv_rcnn/checkpoint_epoch_80.pth",
                 "--save_to_file",
                 "--extra_tag",
-                "projector_LPCont_padded_row_col_loss_PL_debug",
+                "projector_LPCont_ORIGT_CLIPCE_flag_test",
                 "--epochs",
                 "2",
                  "--ckpt_save_interval",
@@ -45,9 +45,13 @@
                 "MODEL.ROI_HEAD.STG2_PROJ_FC_CFGS.DP_RATIO",
                 "0.0",
                 "MODEL.ROI_HEAD.ENABLE_LPCONT_LOSS",
-                "True",
+                "False",
                 "MODEL.ROI_HEAD.ENABLE_PROTO_CONTRASTIVE_LOSS",
                 "False",
+                "MODEL.ROI_HEAD.ENABLE_ORI_LPCONT_LOSS",
+                "True",
+                "MODEL.ROI_HEAD.CLIP_CE",
+                "True"
                 ],
      }
     ]
