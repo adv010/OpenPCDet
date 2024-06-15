@@ -264,13 +264,13 @@ class FeatureBank(Metric):
 
         pseudo_conf_scores = None
         if torch.nonzero(pseudo_positive_labels==1).shape[0] < topk_list[0]: # topk for car, pad if less than 5
-            pseudo_positive_labels, pseudo_positives = self.topk_padding(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores, k=0)
+            pseudo_positive_labels, pseudo_positives,_ = self.topk_padding(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores, k=0)
 
         if torch.nonzero(pseudo_positive_labels==2).shape[0] < topk_list[1]: #topk for ped, pad if less than 5
-            pseudo_positive_labels, pseudo_positives = self.topk_padding(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores, k=1)
+            pseudo_positive_labels, pseudo_positives,_ = self.topk_padding(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores, k=1)
 
         if torch.nonzero(pseudo_positive_labels==3).shape[0] < topk_list[2]: #topk for cyc, pad if less than 5
-            pseudo_positive_labels, pseudo_positives = self.topk_padding(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores, k=2)
+            pseudo_positive_labels, pseudo_positives,_ = self.topk_padding(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores, k=2)
 
         pseudo_topk_labels, pseudo_topk_features = self.sample_topk(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores)
         label_mask = sorted_labels.unsqueeze(1)== pseudo_topk_labels.unsqueeze(0)
@@ -281,24 +281,31 @@ class FeatureBank(Metric):
         pseudo_topk_features = F.normalize(pseudo_topk_features,dim=-1)
 
         sim_pos_matrix = sorted_prototypes @ pseudo_topk_features.t()
-        sim_pos_matrix = torch.exp(sim_pos_matrix/1.0)
+        exp_sim_pos_matrix = torch.exp(sim_pos_matrix/1.0)
         sim_pos_matrix_row = sim_pos_matrix.clone()
         positive_mask = label_mask
         negative_mask = ~label_mask
-
-        # Column loss
-        positive_sum = torch.sum(sim_pos_matrix * positive_mask.float(), dim=0) # sum positives along rows
-        negative_sum = torch.sum(sim_pos_matrix * negative_mask.float(), dim=0) # sum negatives along rows
-        logits = positive_sum / negative_sum
-        contrastive_loss = contrastive_loss + (torch.log(logits).sum() * -1) /(sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3)
-
-        # Row loss
-        positive_sum_row = sim_pos_matrix_row * positive_mask
-        positive_sum_row = torch.sum(positive_sum_row.float(), dim=1)
-        negative_sum_row = sim_pos_matrix_row * negative_mask
-        negative_sum_row = torch.sum(negative_sum_row.float(),dim=1)
-        logits_row = (positive_sum_row) / (negative_sum_row)
-        contrastive_loss = contrastive_loss + (torch.log(logits_row).sum() * -1) /(sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3)
+        positive_sum = torch.sum(exp_sim_pos_matrix * positive_mask.float(), dim=0, keepdims=True) # sum positives along rows
+        negative_sum = torch.sum(exp_sim_pos_matrix * negative_mask.float(), dim=0, keepdims=True) # sum negatives along rows
+        logits = positive_sum / negative_sum #1,C
+        log_logits = torch.log(logits).view(-1) #logits[padding_mask]
+        log_logits = log_logits[padding_mask]
+        contrastive_loss = contrastive_loss + ((log_logits.sum() * -1) / (sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3))
+        
+        # padding_mask_row = padding_mask.unsqueeze(0).expand(161,-1)
+        # positive_sum_row = sim_pos_matrix_row * positive_mask # Padded zeros get masked out
+        # positive_sum_row = positive_sum_row[...,padding_mask_row]
+        
+        # negative_sum_row = sim_pos_matrix_row * negative_mask
+        # negative_sum_row = negative_sum_row[...,padding_mask_row]
+        # keep_positive_row = positive_sum_row.sum(dim=-1,keepdims=True).float()
+        # keep_negative_row = negative_sum_row.sum(dim=-1,keepdims=True).float()
+        # logits_row = (keep_positive_row) / (keep_negative_row)
+        # safe_mask = logits_row==0
+        # logits_row[safe_mask] = 1
+        # log_logits_row = torch.log(logits_row).view(-1)
+        # contrastive_loss = contrastive_loss + ((log_logits_row.sum() * -1) / (sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3))
+        # contrastive_loss = contrastive_loss / 2
 
         return contrastive_loss
 
@@ -342,40 +349,24 @@ class FeatureBank(Metric):
             negative_sum = torch.sum(exp_sim_pos_matrix * negative_mask.float(), dim=0, keepdims=True) # sum negatives along rows
             logits = positive_sum / negative_sum #1,C
             log_logits = torch.log(logits).view(-1) #logits[padding_mask]
-            log_logits = log_logits[padding_mask]
+            # log_logits = log_logits[padding_mask]
             contrastive_loss = contrastive_loss + ((log_logits.sum() * -1) / (sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3))
 
-            # # Row loss
-            padding_mask_row = padding_mask.unsqueeze(0).expand(161,-1)
-            positive_sum_row = sim_pos_matrix_row * positive_mask # Padded zeros get masked out
-            positive_sum_row = positive_sum_row[...,padding_mask_row]
-            '''
-            (sim_pos_matrix_row * positive_mask)[0]
-tensor([1.4732, 1.4086, 1.5458, 1.5581, 1.3934, 0.0000, 0.0000, 0.0000, 0.0000,
-        0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000], device='cuda:0',
-       grad_fn=<SelectBackward0>)
-            '''
-            '''
-            (sim_pos_matrix_row * negative_mask)[0]
-tensor([0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 1.4268, 1.4402, 1.4857, 1.0000,
-        1.0000, 1.0000, 1.0000, 1.0000, 1.0000, 1.0000], device='cuda:0',
-       grad_fn=<SelectBackward0>)
-            '''
-            '''
-            x/y
-tensor([0., 0., 0., 0., 0., 0., 0., 0., 0., 0., inf, inf, inf, inf, inf],
-       device='cuda:0', grad_fn=<DivBackward0>)
-            '''
-            negative_sum_row = sim_pos_matrix_row * negative_mask
-            negative_sum_row = negative_sum_row[...,padding_mask_row]
-            keep_positive_row = positive_sum_row.sum(dim=-1,keepdims=True).float()
-            keep_negative_row = negative_sum_row.sum(dim=-1,keepdims=True).float()
-            logits_row = (keep_positive_row) / (keep_negative_row)
-            safe_mask = logits_row==0
-            logits_row[safe_mask] = 1
-            log_logits_row = torch.log(logits_row).view(-1)
-            contrastive_loss = contrastive_loss + ((log_logits_row.sum() * -1) / (sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3))
-            contrastive_loss = contrastive_loss / 2
+#             # # Row loss
+#             padding_mask_row = padding_mask.unsqueeze(0).expand(161,-1)
+#             positive_sum_row = sim_pos_matrix_row * positive_mask # Padded zeros get masked out
+#             positive_sum_row = positive_sum_row[...,padding_mask_row]
+#          
+#             negative_sum_row = sim_pos_matrix_row * negative_mask
+#             negative_sum_row = negative_sum_row[...,padding_mask_row]
+#             keep_positive_row = positive_sum_row.sum(dim=-1,keepdims=True).float()
+#             keep_negative_row = negative_sum_row.sum(dim=-1,keepdims=True).float()
+#             logits_row = (keep_positive_row) / (keep_negative_row)
+#             safe_mask = logits_row==0
+#             logits_row[safe_mask] = 1
+#             log_logits_row = torch.log(logits_row).view(-1)
+#             contrastive_loss = contrastive_loss + ((log_logits_row.sum() * -1) / (sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3))
+#             contrastive_loss = contrastive_loss / 2
             return contrastive_loss
 
 
