@@ -14,7 +14,7 @@
                  "--batch_size",
                  "8",
                  "--pretrained_model",
-                "../../ckpt/pv_rcnn/checkpoint_epoch_80.pth",
+                "../../ckpt/pv_rcnn/checkpoint_epoch_80.pth", // /mnt/data/adat01/ckpt/pv_rcnn/checkpoint_epoch_80.pth
                 "--save_to_file",
                 "--extra_tag",
                 "projector_LPCont_ORIGT_CLIPCE_flag_test",
