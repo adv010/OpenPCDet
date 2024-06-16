@@ -8,6 +8,7 @@ from pcdet.ops.iou3d_nms import iou3d_nms_utils
 from pcdet.ops.roiaware_pool3d import roiaware_pool3d_utils
 from .detector3d_template import Detector3DTemplate
 from .pv_rcnn import PVRCNN
+from matplotlib import pyplot as plt
 
 from pcdet.utils import common_utils
 from pcdet.utils.stats_utils import metrics_registry
@@ -387,12 +388,14 @@ class PVRCNN_SSL(Detector3DTemplate):
         if self.model_cfg['ROI_HEAD'].get('ENABLE_ORI_LPCONT_LOSS', False):
             if not bank.is_initialized():
                 ori_lpcont_loss = None
+                sim_matrix =  None
             else:
                 CLIP_CE = self.model_cfg['ROI_HEAD'].get('CLIP_CE', False)
-                ori_lpcont_loss = self._get_lpcont_loss(batch_dict, bank, ulb_inds, ori_pseudo_projections, ori_labels, ori_gt_boxes,CLIP_CE)
+                ori_lpcont_loss, sim_matrix = self._get_lpcont_loss(batch_dict, bank, ulb_inds, ori_pseudo_projections, ori_labels, ori_gt_boxes,CLIP_CE)
             if ori_lpcont_loss is not None:
                 loss += ori_lpcont_loss * self.model_cfg['ROI_HEAD']['LPCONT_LOSS_WEIGHT']
                 tb_dict['ori_lpcont_loss'] = ori_lpcont_loss.item()
+                tb_dict['sim_matrix'] = sim_matrix
 
         if self.model_cfg['ROI_HEAD'].get('ENABLE_LPCONT_LOSS', False):
             if not bank.is_initialized():
@@ -543,15 +546,15 @@ class PVRCNN_SSL(Detector3DTemplate):
         # pl_labels = pl_labels[pl_labels>0]
 
         topk_list=[5,5,5]
-        lp_cont_loss = bank.get_lpcont_loss(ori_pseudo_projections, ori_labels, topk_list, CLIP_CE)
+        lp_cont_loss, sim_matrix = bank.get_lpcont_loss(ori_pseudo_projections, ori_labels, topk_list, CLIP_CE)
         if lp_cont_loss is None:
             return
-        return lp_cont_loss
+        return lp_cont_loss, sim_matrix
 
 
     def _get_lpcont_loss_pls(self, batch_dict, bank, pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes, CLIP_CE):
         topk_list=[5,5,5]
-        lp_cont_loss = bank.get_lpcont_loss_pls(pseudo_projections, pseudo_labels, topk_list,pseudo_conf_scores, CLIP_CE)
+        lp_cont_loss,sim_matrix = bank.get_lpcont_loss_pls(pseudo_projections, pseudo_labels, topk_list,pseudo_conf_scores, CLIP_CE)
         if lp_cont_loss is None:
             return
         return lp_cont_loss
@@ -565,6 +568,26 @@ class PVRCNN_SSL(Detector3DTemplate):
             elif 'loss' in key or 'acc' in key or 'point_pos_num' in key:
                 tb_dict_[f"{key}_labeled"] = reduce_loss_fn(tb_dict[key][lbl_inds, ...])
                 tb_dict_[f"{key}_unlabeled"] = reduce_loss_fn(tb_dict[key][ulb_inds, ...])
+            elif 'sim_matrix' in key:
+                sim_matrix, labels, pseudo_labels = tb_dict[key]
+                sim_matrix = sim_matrix.detach().cpu().numpy()
+                labels = labels.cpu().numpy()
+                pseudo_labels = pseudo_labels.cpu().numpy()
+                fig, ax = plt.subplots(figsize=(4, 4))
+                ax.imshow(sim_matrix, interpolation='nearest', cmap=plt.cm.Blues,vmin=0, vmax=1)
+                ax.set_title(" LPCont Similarity matrix")
+                fig.colorbar(ax.imshow(sim_matrix, interpolation='nearest', cmap=plt.cm.Blues))
+                x_tick_marks = np.arange(len(pseudo_labels))
+                ax.set_xticks(x_tick_marks)
+                ax.set_xticklabels(pseudo_labels, rotation=45)
+                y_tick_marks = np.arange(len(labels))   
+                ax.set_yticks(y_tick_marks)
+                ax.set_yticklabels(labels)
+                ax.set_ylabel('Labeled features')
+                ax.set_xlabel('Pseudo features')
+                fig.tight_layout()
+                tb_dict_[key] = fig
+
             else:
                 tb_dict_[key] = tb_dict[key]
 

@@ -8,7 +8,7 @@
          "program": "${file}",
          "console": "integratedTerminal",
          "cwd": "${workspaceFolder}/tools",
-         "env": {"CUDA_VISIBLE_DEVICES": "1"},
+         "env": {"CUDA_VISIBLE_DEVICES": "0"},
          "args": ["--cfg_file" ,
                  "cfgs/kitti_models/pv_rcnn_ssl_60.yaml",
                  "--batch_size",
@@ -51,7 +51,7 @@
                 "MODEL.ROI_HEAD.ENABLE_ORI_LPCONT_LOSS",
                 "True",
                 "MODEL.ROI_HEAD.CLIP_CE",
-                "True"
+                "False"
                 ],
      }
     ]
