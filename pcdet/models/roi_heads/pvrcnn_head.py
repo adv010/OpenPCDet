@@ -140,54 +140,6 @@ class PVRCNNHead(RoIHeadTemplate):
         )  # (BxN, 6x6x6, C)
         return pooled_features
 
-    # def ori_roi_grid_pool(self, batch_dict, use_gtboxes=False):
-    #     """
-    #     Args:
-    #         batch_dict:
-    #             batch_size:
-    #             rois: (B, num_rois, 7 + C)
-    #             point_coords: (num_points, 4)  [bs_idx, x, y, z]
-    #             point_features: (num_points, C)
-    #             point_cls_scores: (N1 + N2 + N3 + ..., 1)
-    #             point_part_offset: (N1 + N2 + N3 + ..., 3)
-    #     Returns:
-
-    #     """
-    #     batch_size = batch_dict['batch_size']
-    #     rois = batch_dict['ori_gt_boxes'][..., 0:7] if use_gtboxes else batch_dict['rois']
-    #     point_coords = batch_dict["point_coords"]
-    #     point_features = batch_dict["point_features"]
-    #     point_cls_scores = batch_dict["point_cls_scores"]
-
-    #     point_features = point_features * point_cls_scores.view(-1, 1)
-
-    #     global_roi_grid_points, local_roi_grid_points = self.get_global_grid_points_of_roi(
-    #         rois, grid_size=self.model_cfg.ROI_GRID_POOL.GRID_SIZE
-    #     )  # (BxN, 6x6x6, 3)
-    #     global_roi_grid_points = global_roi_grid_points.view(batch_size, -1, 3)  # (B, Nx6x6x6, 3)
-
-    #     xyz = point_coords[:, 1:4]
-    #     xyz_batch_cnt = xyz.new_zeros(batch_size).int()
-    #     batch_idx = point_coords[:, 0]
-    #     for k in range(batch_size):
-    #         xyz_batch_cnt[k] = (batch_idx == k).sum()
-
-    #     new_xyz = global_roi_grid_points.view(-1, 3)
-    #     new_xyz_batch_cnt = xyz.new_zeros(batch_size).int().fill_(global_roi_grid_points.shape[1])
-    #     pooled_points, pooled_features = self.roi_grid_pool_layer(
-    #         xyz=xyz.contiguous(),
-    #         xyz_batch_cnt=xyz_batch_cnt,
-    #         new_xyz=new_xyz,
-    #         new_xyz_batch_cnt=new_xyz_batch_cnt,
-    #         features=point_features.contiguous(),
-    #     )  # (M1 + M2 ..., C)
-
-    #     pooled_features_true = pooled_features.view(
-    #         -1, self.model_cfg.ROI_GRID_POOL.GRID_SIZE ** 3,
-    #         pooled_features.shape[-1]
-    #     )  # (BxN, 6x6x6, C)
-    #     return pooled_features_true
-
     def get_global_grid_points_of_roi(self, rois, grid_size):
         rois = rois.view(-1, rois.shape[-1])
         batch_size_rcnn = rois.shape[0]
@@ -263,7 +215,8 @@ class PVRCNNHead(RoIHeadTemplate):
         batch_dict['shared_features'] = shared_features
         rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
         rcnn_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
-
+        projected_features = self.stg2_projector(pooled_features.view(batch_size_rcnn, -1, 1))
+        batch_dict['projected_features'] = projected_features
         if (self.training or self.print_loss_when_eval) and not test_only:
             # RoI-level similarity.
             # calculate cosine similarity between unlabeled augmented RoI features and labeled augmented prototypes.

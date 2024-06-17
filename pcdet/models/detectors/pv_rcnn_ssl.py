@@ -290,6 +290,7 @@ class PVRCNN_SSL(Detector3DTemplate):
     def _forward_training(self, batch_dict):
         # batch_dict = self._get_fixed_batch_dict()
         lbl_inds, ulb_inds = self._prep_batch_dict(batch_dict)
+        ulb_inds_list = ulb_inds.tolist()
         batch_dict_ema = self._split_batch(batch_dict, tag='ema')
 
         if self.supervise_mode == 1:
@@ -302,17 +303,14 @@ class PVRCNN_SSL(Detector3DTemplate):
             ulb_pred_labels = torch.cat([pl['pred_labels'] for pl in pls_teacher_wa]).int().detach()
             pl_cls_count_pre_filter = torch.bincount(ulb_pred_labels, minlength=4)[1:]
             (pl_boxes, pl_conf_scores, pl_sem_scores, pl_sem_logits,
-             pl_rect_scores, masks, pl_weights) = self._filter_pls(pls_teacher_wa, batch_dict_ema, ulb_inds)
-                # pl_boxes_top, pl_conf_scores_top,pl_sem_scores_top, _,_, masks_top = self._filter_topk_pls(pls_teacher_wa, batch_dict_ema, ulb_inds)
-            # if :
-            #     lpcont_conf_thresh = self.model_cfg['ROI_HEAD'].get('LPCONT_CONF_THRESH')
-            #     mask_lpcont_conf = pl_conf_scores > lpcont_conf_thresh
+             pl_rect_scores, masks, pl_weights, pl_projections) = self._filter_pls(pls_teacher_wa, batch_dict_ema, ulb_inds)
 
-            pl_boxes_tensor = torch.cat((pl_boxes),dim=0)
-            pl_conf_scores_tensor = torch.cat((pl_conf_scores),dim=0)
-            pl_sem_scores_tensor = torch.cat((pl_sem_scores),dim=0)
-            pl_labels_tensor =  torch.cat((pl_boxes),dim=0)[:,-1]
-            masks_tensor = torch.cat((masks),dim=0)
+            pl_teacher_boxes = torch.cat((pl_boxes),dim=0)
+            pl_teacher_scores = torch.cat((pl_conf_scores),dim=0)
+            pl_teacher_sem_scores = torch.cat((pl_sem_scores),dim=0)
+            pl_teacher_labels =  torch.cat((pl_boxes),dim=0)[:,-1]
+            pl_teacher_masks = torch.cat((masks),dim=0)
+            pl_teacher_projections = torch.cat((pl_projections),dim=0)
             # assert pl_conf_scores_tensor.shape[0] == pl_labels_tensor.shape[0] == pl_sem_scores_tensor.shape[0] == masks_tensor.shape[0]
             pl_weights = [scores.new_ones(scores.shape[0], 1) for scores in pl_conf_scores]  # No weights for now
 
@@ -338,13 +336,24 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         for cur_module in self.pv_rcnn.module_list:
             batch_dict = cur_module(batch_dict)
+        
+        pls_student, _ = self.pv_rcnn.post_processing(batch_dict, no_recall_dict=True)
+        
+        nmsed_student_lbls = [pls_student[i]['pred_labels'] for i in ulb_inds_list]
+        pl_student_labels = torch.cat((nmsed_student_lbls),0)
+        nmsed_student_scores = [pls_student[i]['pred_scores'] for i in ulb_inds_list]
+        pl_student_scores = torch.cat((nmsed_student_scores),0)
+        nmsed_student_boxes = [pls_student[i]['pred_boxes'] for i in ulb_inds_list]
+        pl_student_boxes = torch.cat((nmsed_student_boxes),0)
+        nmsed_student_projections = [pls_student[i]['projections'] for i in ulb_inds_list]
+        pl_student_projections = torch.cat((nmsed_student_projections),0)
 
         if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTOTYPING', False):
             # Update the bank with student's features from augmented labeled data
             bank = feature_bank_registry.get('gt_wa_lbl_prototypes')
             if bank.is_initialized() and self.model_cfg['ROI_HEAD'].get('ENABLE_LPCONT_LOSS', False):
                 lpcont_conf_threshold = self.model_cfg['ROI_HEAD'].get('LPCONT_CONF_THRESH')
-                pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes = self.get_pl_pseudo_projections(batch_dict, pl_boxes_tensor, pl_labels_tensor, pl_conf_scores_tensor, masks_tensor, lpcont_conf_threshold, ulb_inds)
+                pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes = self.get_pl_pseudo_projections(batch_dict, pl_teacher_boxes, pl_teacher_labels, pl_teacher_scores, pl_teacher_masks, lpcont_conf_threshold, ulb_inds)
 
             if bank.is_initialized() and self.model_cfg['ROI_HEAD'].get('ENABLE_ORI_LPCONT_LOSS', False):
                 ori_pseudo_projections, ori_labels,ori_gt_boxes = self.get_pseudo_projections(batch_dict, ulb_inds)
@@ -672,6 +681,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         pl_rect_scores = []
         pl_weights = []
         masks = []
+        pl_projections = []
 
         def _fill_with_zeros():
             pl_boxes.append(labels.new_zeros((1, 8)).float())
@@ -680,7 +690,8 @@ class PVRCNN_SSL(Detector3DTemplate):
             pl_sem_logits.append(labels.new_zeros((1, 3)).float())
             pl_rect_scores.append(labels.new_zeros((1, 3)).float())
             pl_weights.append(labels.new_ones((1,)))
-            masks.append(labels.new_ones((1,), dtype=torch.bool))
+            masks.append(labels.new_zeros((1,), dtype=torch.bool))
+            pl_projections.append(labels.new_zeros((1,256)).float())
 
         for ind in ulb_inds:
             scores = pls_dict[ind]['pred_scores']  # Using gt scores for now
@@ -688,6 +699,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             labels = pls_dict[ind]['pred_labels']
             sem_scores = pls_dict[ind]['pred_sem_scores']
             sem_logits = pls_dict[ind]['pred_sem_logits']
+            projections = pls_dict[ind]['projections']
 
             if len(labels) == 0:
                 _fill_with_zeros()
@@ -719,8 +731,9 @@ class PVRCNN_SSL(Detector3DTemplate):
                 pl_rect_scores.append(rect_scores)
                 pl_weights.append(weights)
                 masks.append(mask)
+                pl_projections.append(projections)
 
-        return pl_boxes, pl_scores, pl_sem_scores, pl_sem_logits, pl_rect_scores, masks, pl_weights
+        return pl_boxes, pl_scores, pl_sem_scores, pl_sem_logits, pl_rect_scores, masks, pl_weights, pl_projections
 
     @staticmethod
     def _fill_with_pls(batch_dict, pseudo_boxes, masks, ulb_inds, lb_inds, key=None):
