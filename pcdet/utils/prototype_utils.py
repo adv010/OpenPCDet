@@ -4,7 +4,9 @@ from torchmetrics import Metric
 import numpy as np
 from torch.distributions import Categorical
 import random
-
+from sklearn.cluster import KMeans
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.metrics.pairwise import pairwise_distances_argmin_min
 class FeatureBank(Metric):
     full_state_update: bool = False
 
@@ -242,17 +244,21 @@ class FeatureBank(Metric):
 
     def get_uniform_samples(self, prototypes, labels, unique_labels,num_per_class):
         indices = []
-        for label in unique_labels:  # Assuming labels are 1, 2, or 3
+        for label in unique_labels[1:]:  # Assuming labels are 1, 2, or 3
             label_indices = torch.topk((torch.where(labels == label)[0]),num_per_class)[0]
             indices.append(label_indices)
-        
         # Concatenate the indices for each class and select from prototypes
         indices = torch.cat((indices), dim=0)
         uniform_prototypes = prototypes.index_select(0, indices)
         uniform_labels = labels.index_select(0, indices)
-        assert uniform_prototypes.size(0)== 3 * num_per_class
         return uniform_prototypes, uniform_labels
 
+    def informative_car_features(self, car_prototypes, car_labels):
+        kmeans = KMeans(n_clusters=9, random_state=0).fit(car_prototypes.cpu().numpy())
+        cluster_labels = kmeans.labels_
+        centroids = kmeans.cluster_centers_ # Using centroids as the informative car features
+        car_centroids = torch.from_numpy(centroids).to(car_prototypes.device)
+        return car_centroids, car_labels[:9]
 
 
     def get_lpcont_loss(self, pseudo_positives, pseudo_positive_labels, topk_list, CLIP_CE=False):
@@ -268,7 +274,9 @@ class FeatureBank(Metric):
         sorted_prototypes = self.prototypes[sorted_args] # sort prototypes to arrange classwise #161
         unique_labels, counts = torch.unique(sorted_labels, return_counts=True)
         uniform_sorted_prototypes, uniform_sorted_labels  = self.get_uniform_samples(sorted_prototypes, sorted_labels, unique_labels, counts.min())
-
+        car_prototypes, car_labels = self.informative_car_features(sorted_prototypes[sorted_labels==1], sorted_labels[sorted_labels==1]) # get centroids of all cars as its representative features
+        uniform_lbl_prototypes = torch.cat((car_prototypes, uniform_sorted_prototypes), dim=0)
+        uniform_lbl_labels = torch.cat((car_labels, uniform_sorted_labels), dim=0)
 
         pseudo_conf_scores = None
         if torch.nonzero(pseudo_positive_labels==1).shape[0] < topk_list[0]: # topk for car, pad if less than 5
@@ -281,15 +289,15 @@ class FeatureBank(Metric):
             pseudo_positive_labels, pseudo_positives,_ = self.topk_padding(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores, k=2) # 40,256
         
         pseudo_topk_labels, pseudo_topk_features = self.sample_topk(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores)
-        label_mask = uniform_sorted_labels.unsqueeze(1)== pseudo_topk_labels.unsqueeze(0)  # Shape: 27,15
+        label_mask = uniform_lbl_labels.unsqueeze(1)== pseudo_topk_labels.unsqueeze(0)  # Shape: 27,15
         padding_mask = torch.logical_not(torch.all(pseudo_topk_features == 0, dim=-1))  #15 
 
 
-        uniform_sorted_prototypes = F.normalize(uniform_sorted_prototypes,dim=-1) #27,256
+        uniform_lbl_prototypes = F.normalize(uniform_lbl_prototypes,dim=-1) #27,256
         pseudo_topk_features = F.normalize(pseudo_topk_features,dim=-1) #15,256
         positive_mask = label_mask #(27,15)
         negative_mask = ~label_mask #(27,15)
-        sim_matrix = uniform_sorted_prototypes @ pseudo_topk_features.t() # (27,256) @ (256,15) -> (27,15)
+        sim_matrix = uniform_lbl_prototypes @ pseudo_topk_features.t() # (27,256) @ (256,15) -> (27,15)
 
         exp_sim_pos_matrix = torch.exp(sim_matrix * positive_mask /1.0)
         sim_pos_matrix_row = exp_sim_pos_matrix.clone() 
@@ -348,7 +356,7 @@ class FeatureBank(Metric):
             norm_pseudo_topk_features = F.normalize(pseudo_topk_features,dim=-1)
 
             sim_pos_matrix = norm_sorted_prototypes @ norm_pseudo_topk_features.t()
-            exp_sim_pos_matrix = torch.exp(sim_pos_matrix/1.0)
+            exp_sim_pos_matrix = torch.exp(sim_pos_matrix/0.07)
             exp_sim_pos_matrix_row = exp_sim_pos_matrix.clone()
             positive_mask = label_mask
             negative_mask = ~label_mask
@@ -374,6 +382,7 @@ class FeatureBank(Metric):
                 contrastive_loss = contrastive_loss + ((log_logits_row.sum() * -1) / (sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3))
                 contrastive_loss = contrastive_loss / 2
             return contrastive_loss
+
 
 
 
