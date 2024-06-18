@@ -9,7 +9,7 @@ from pcdet.ops.iou3d_nms import iou3d_nms_utils
 from pcdet.ops.roiaware_pool3d import roiaware_pool3d_utils
 from .detector3d_template import Detector3DTemplate
 from .pv_rcnn import PVRCNN
-
+import torch.distributed as dist
 from pcdet.utils import common_utils
 from pcdet.utils.stats_utils import metrics_registry
 from pcdet.utils.prototype_utils import feature_bank_registry
@@ -266,7 +266,10 @@ class PVRCNN_SSL(Detector3DTemplate):
         if self.model_cfg['ROI_HEAD'].get('ENABLE_INSTANCE_SUP_LOSS', False):
             lbl_inst_cont_loss, supcon_classwise_loss = self._get_instance_contrastive_loss(tb_dict,batch_dict,batch_dict_ema,lbl_inds,ulb_inds)
             if lbl_inst_cont_loss is not None:
-                loss +=  lbl_inst_cont_loss * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT']
+                if dist.is_initialized():
+                    loss+= (lbl_inst_cont_loss/2)
+                else:
+                    loss = lbl_inst_cont_loss
                 tb_dict['instloss_car'] = supcon_classwise_loss['instloss_car']
                 tb_dict['instloss_ped'] = supcon_classwise_loss['instloss_ped']
                 tb_dict['instloss_cyc'] = supcon_classwise_loss['instloss_cyc']
@@ -392,7 +395,6 @@ class PVRCNN_SSL(Detector3DTemplate):
         
         embed_size = batch_dict['shared_features_gt'].squeeze().shape[-1]
         shared_ft_sa = batch_dict['shared_features_gt'].view(batch_dict['batch_size'],-1,embed_size)         # shared_ft_sa = batch_dict['projected_features_gt'].view(batch_dict['batch_size'],-1,embed_size)[indices]
-
         shared_ft_sa = shared_ft_sa[indices].view(-1,256)
         shared_ft_wa = batch_dict_wa['shared_features_gt'].view(batch_dict['batch_size'],-1,embed_size)         # shared_ft_wa = batch_dict_wa['projected_features_gt'].view(batch_dict['batch_size'],-1,embed_size)[indices]
         shared_ft_wa = shared_ft_wa[indices].view(-1,256)
@@ -428,12 +430,17 @@ class PVRCNN_SSL(Detector3DTemplate):
         labels_sa_common = torch.index_select(labels_sa, 0,ids_sa_common)
         labels_wa_common = torch.index_select(labels_wa, 0, ids_wa_common)
         assert torch.equal(labels_sa_common, labels_wa_common)
+        
+        print("shared_ft_wa_shape:",shared_ft_wa.shape)
+        shared_ft_sa_common= torch.index_select(shared_ft_sa, 0, ids_sa_common)
+        shared_ft_wa_common = torch.index_select(shared_ft_wa, 0, ids_wa_common)
 
-        shared_ft_sa_common = shared_ft_sa[ids_sa_common]
-        shared_ft_wa_common = shared_ft_wa[ids_wa_common]
-        assert shared_ft_sa_common.size(0) == labels_wa_common.size(0)
+        print("Labels_wa_shape:", labels_wa_common.shape)
+        print("Shared_ft_wa_masked_shape:", shared_ft_wa_common.shape)
 
-        return  (labels_sa_common, labels_wa_common, shared_ft_sa_common, shared_ft_wa_common)
+        aligned_wa_info = torch.cat([shared_ft_wa_common, labels_wa_common.unsqueeze(-1)], dim=-1)
+        aligned_sa_info = torch.cat([shared_ft_sa_common, labels_sa_common.unsqueeze(-1)], dim=-1)
+        return aligned_wa_info, aligned_sa_info
 
 
     def _get_instance_contrastive_loss(self, tb_dict, batch_dict, batch_dict_wa, lbl_inds, temperature=1.0, base_temperature=1.0):
@@ -444,50 +451,42 @@ class PVRCNN_SSL(Detector3DTemplate):
             mask: contrastive mask of shape [bsz, bsz], mask_{i,j}=1 if sample j
                 has the same class as sample i. Can be asymmetric.
         '''
-        start_epoch = self.model_cfg['ROI_HEAD'].get('INSTANCE_CONTRASTIVE_LOSS_START_EPOCH', 0)
-        stop_epoch = self.model_cfg['ROI_HEAD'].get('INSTANCE_CONTRASTIVE_LOSS_STOP_EPOCH', 60)
+        # start_epoch = self.model_cfg['ROI_HEAD'].get('INSTANCE_CONTRASTIVE_LOSS_START_EPOCH', 0)
+        # stop_epoch = self.model_cfg['ROI_HEAD'].get('INSTANCE_CONTRASTIVE_LOSS_STOP_EPOCH', 60)
+        # if not start_epoch<=batch_dict['cur_epoch']<stop_epoch:
+        #     return None, None
+        aligned_wa_info, aligned_sa_info = self._sort_instance_pairs(batch_dict, batch_dict_wa, lbl_inds)
+
+        gathered_sa_tensor = self.gather_tensors(aligned_sa_info)
+        gathered_sa_labels = gathered_sa_tensor[:,-1].long()
+        non_zero_mask = gathered_sa_labels != 0
+        gathered_sa_feats = gathered_sa_tensor[:,:-1][non_zero_mask]
+        gathered_labels_sa = gathered_sa_labels[non_zero_mask]
+
+        gathered_wa_tensor = self.gather_tensors(aligned_wa_info)
+        gathered_wa_labels = gathered_wa_tensor[:,-1].long()
+        non_zero_mask2 = gathered_wa_labels != 0
+        gathered_wa_feats = gathered_wa_tensor[:,:-1][non_zero_mask2]
+        gathered_labels_wa = gathered_wa_labels[non_zero_mask2]
+
+        batch_size_labeled = gathered_labels_sa.shape[0]
+        device = gathered_sa_feats.device
         tb_dict = {} if tb_dict is None else tb_dict
-        # To examine effects of stopping supervised contrastive loss
         supcon_classwise_loss = {'instloss_car':{},'instloss_ped':{},'instloss_cyc':{},'instloss_all':{}}
-
-        if not start_epoch<=batch_dict['cur_epoch']<stop_epoch:
-            return None, None
         temperature = self.model_cfg['ROI_HEAD'].get('TEMPERATURE', 1.0)
-        
-        sorted_pairs = self._sort_instance_pairs(batch_dict, batch_dict_wa, lbl_inds)
-        
-        if sorted_pairs is None:
-            return None, tb_dict
 
-        labels_sa, labels_wa, embed_ft_sa, embed_ft_wa = sorted_pairs
-        batch_size_labeled = labels_sa.shape[0]
-        device = embed_ft_sa.device
-        labels = torch.cat((labels_sa,labels_wa), dim=0)
-
-        '''# Record stats of num_pairs per batch'''
-        # batch_dict['lbl_inst_freq'] =  torch.bincount(labels_sa.view(-1).int().detach(),minlength = 4).tolist()[1:]       #Record freq of each class in batch
-        # batch_dict['positive_pairs_duped'] = [(2*n-1) * 2*n for n in batch_dict['lbl_inst_freq']]
-        # batch_dict['negative_pairs_duped'] = [sum(batch_dict['lbl_inst_freq']) - k  for k in batch_dict['lbl_inst_freq']]
-        # batch_dict['negative_pairs_duped'] = [4*k*i for k,i in zip(batch_dict['negative_pairs_duped'],batch_dict['lbl_inst_freq'])]
-
-
-        combined_embed_features = torch.cat([embed_ft_sa.unsqueeze(1), embed_ft_wa.unsqueeze(1)], dim=1) # B*N,num_pairs,channel_dim
+        labels = torch.cat((gathered_labels_sa, gathered_labels_wa), dim=0)
+        combined_embed_features = torch.cat([gathered_sa_feats.unsqueeze(1), gathered_wa_feats.unsqueeze(1)], dim=1) # B*N,num_pairs,channel_dim
         num_pairs = combined_embed_features.shape[1]
         assert num_pairs == 2  # contrast_count = 2
 
         '''Create Contrastive Mask'''
-        labels_sa = labels_sa.contiguous().view(-1, 1)
+        labels_sa = gathered_labels_sa.contiguous().view(-1, 1)
         mask = torch.eq(labels_sa, labels_sa.T).float().to(device) # (B*N, B*N)
         mask = mask.repeat(num_pairs, num_pairs)        # Tiling mask from N,N -> 2N, 2N)
         logits_mask = torch.scatter(torch.ones_like(mask),1,torch.arange(batch_size_labeled * num_pairs).view(-1, 1).to(device),0)    # mask-out self-contrast cases
         mask = mask * logits_mask
 
-        ''' Visualize mask'''
-        # plt.imshow(mask.cpu().numpy(), cmap='viridis')
-        # plt.colorbar()
-        # plt.savefig("mask.png")
-        # plt.clf()
-        
         contrast_feature = torch.cat(torch.unbind(combined_embed_features, dim=1), dim=0)   # B,2,256 -> Tuple(B,256) with len(2) -> (2*B,256)
         contrast_feature = F.normalize(contrast_feature.view(-1,combined_embed_features.shape[-1]),dim=-1) # normalized features for cosine similarity
         sim_supcon_matrix = torch.div(torch.matmul(contrast_feature, contrast_feature.T),temperature)  # compute similarity matrix
@@ -505,17 +504,16 @@ class PVRCNN_SSL(Detector3DTemplate):
         if instance_loss is None:
             return
 
-        instloss_car = instance_loss[labels==1].mean()
-        instloss_ped = instance_loss[labels==2].mean()
-        instloss_cyc = instance_loss[labels==3].mean()
-        instloss_all = instance_loss.mean()
-
+        instloss_car = instance_loss[labels==1].mean() * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT']
+        instloss_ped = instance_loss[labels==2].mean() * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT']
+        instloss_cyc = instance_loss[labels==3].mean() * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT']
+        instloss_all = instance_loss.mean() * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT']
 
         supcon_classwise_loss= {
-                        'instloss_car': instance_loss[labels==1].mean().item() * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT'],
-                        'instloss_ped': instance_loss[labels==2].mean().item() * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT'],
-                        'instloss_cyc': instance_loss[labels==2].mean().item() * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT'],
-                        'instloss_all': instance_loss.mean().item() * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT'],
+                        'instloss_car': instloss_car.item() ,
+                        'instloss_ped': instloss_ped.item() ,
+                        'instloss_cyc': instloss_cyc.item() ,
+                        'instloss_all': instance_loss.mean().item(),
                 }
 
         return instloss_all, supcon_classwise_loss
@@ -577,6 +575,53 @@ class PVRCNN_SSL(Detector3DTemplate):
         points = points.cpu().numpy()
         box_labels = box_labels.cpu().numpy()
         V.draw_scenes(points=points, gt_boxes=boxes, gt_labels=box_labels)
+
+    def gather_tensors(self,tensor):
+            """
+            Returns the gathered tensor to all GPUs in DDP else returns the tensor as such
+            dist.gather_all needs the gathered tensors to be of same size.
+            We get the sizes of the tensors first, zero pad them to match the size
+            Then gather and filter the padding
+
+            Args:
+                tensor: tensor to be gathered
+                
+            """
+
+            assert tensor.size(-1) == 257 , "features should be of size common_instances,(ft_size+ lbl_size)"
+            if not dist.is_initialized():
+                return tensor
+                # Determine sizes first
+            WORLD_SIZE = dist.get_world_size()
+            local_size = torch.tensor(tensor.size(), device=tensor.device)
+            all_sizes = [torch.zeros_like(local_size) for _ in range(WORLD_SIZE)]
+            
+            dist.barrier() 
+            dist.all_gather(all_sizes,local_size)
+            dist.barrier()
+
+            print(f'all_sizes {all_sizes}')
+            # make zero-padded version https://sftackoverflow.com/questions/71433507/pytorch-python-distributed-multiprocessing-gather-concatenate-tensor-arrays-of
+            max_length = max([size[0] for size in all_sizes])
+            
+            diff = max_length - local_size[0].item()
+            if diff:
+                pad_size =[diff.item()] #pad with zeros 
+                if local_size.ndim >= 1:
+                    pad_size.extend(dimension.item() for dimension in local_size[1:])
+                padding = torch.zeros(pad_size, device=tensor.device, dtype=tensor.dtype)
+                tensor = torch.cat((tensor,padding),)
+
+            all_tensors_padded = [torch.zeros_like(tensor) for _ in range(WORLD_SIZE)]
+
+            dist.barrier()
+            dist.all_gather(all_tensors_padded,tensor)
+            dist.barrier()
+
+            gathered_tensor = torch.cat(all_tensors_padded)
+            non_zero_mask = torch.any(gathered_tensor!=0,dim=-1).squeeze()
+            gathered_tensor = gathered_tensor[non_zero_mask]
+            return gathered_tensor
 
     def _update_thresh_alg(self, pl_conf_scores, pl_sem_logits, pl_rect_scores, batch_dict_ema, pls_teacher_wa, lbl_inds):
         thresh_inputs = dict()
