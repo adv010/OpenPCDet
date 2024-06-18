@@ -175,7 +175,7 @@ MODEL:
         ENABLE_ORI_LPCONT_LOSS: True
         CLIP_CE: False
         LPCONT_TEMPERATURE: 1.0
-        LPCONT_LOSS_WEIGHT: 0.2
+        LPCONT_LOSS_WEIGHT: 0.1
         LPCONT_CONF_THRESH: [0.9, 0.8, 0.7]
         CLS_FC: [256, 256]
         REG_FC: [256, 256]

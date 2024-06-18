@@ -193,7 +193,7 @@ class FeatureBank(Metric):
             num_to_append = topk_list[k] - ((torch.nonzero(pseudo_positive_labels==(k+1)).size(0)))
             labels = torch.tensor([(k+1)] * num_to_append).to(pseudo_positives.device)
             pseudo_positive_labels = torch.cat((pseudo_positive_labels, labels), dim=0)
-            pseudo_positives = torch.cat((pseudo_positives, torch.zeros(num_to_append,256).to(pseudo_positives.device)),dim=0)             
+            pseudo_positives = torch.cat((pseudo_positives, self.classwise_prototypes[k].unsqueeze(0).expand(num_to_append, -1)),dim=0)             
 
         return pseudo_positive_labels, pseudo_positives, pseudo_conf_scores
     
@@ -261,6 +261,7 @@ class FeatureBank(Metric):
         return car_centroids, car_labels[:9]
 
 
+
     def get_lpcont_loss(self, pseudo_positives, pseudo_positive_labels, topk_list, CLIP_CE=False):
         """
         param pseudo_positives: Pseudo positive student features(Mk, Channel=256)
@@ -274,9 +275,7 @@ class FeatureBank(Metric):
         sorted_prototypes = self.prototypes[sorted_args] # sort prototypes to arrange classwise #161
         unique_labels, counts = torch.unique(sorted_labels, return_counts=True)
         uniform_sorted_prototypes, uniform_sorted_labels  = self.get_uniform_samples(sorted_prototypes, sorted_labels, unique_labels, counts.min())
-        car_prototypes, car_labels = self.informative_car_features(sorted_prototypes[sorted_labels==1], sorted_labels[sorted_labels==1]) # get centroids of all cars as its representative features
-        uniform_lbl_prototypes = torch.cat((car_prototypes, uniform_sorted_prototypes), dim=0)
-        uniform_lbl_labels = torch.cat((car_labels, uniform_sorted_labels), dim=0)
+
 
         pseudo_conf_scores = None
         if torch.nonzero(pseudo_positive_labels==1).shape[0] < topk_list[0]: # topk for car, pad if less than 5
@@ -289,23 +288,35 @@ class FeatureBank(Metric):
             pseudo_positive_labels, pseudo_positives,_ = self.topk_padding(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores, k=2) # 40,256
         
         pseudo_topk_labels, pseudo_topk_features = self.sample_topk(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores)
-        label_mask = uniform_lbl_labels.unsqueeze(1)== pseudo_topk_labels.unsqueeze(0)  # Shape: 27,15
+        label_mask = uniform_sorted_labels.unsqueeze(1)== pseudo_topk_labels.unsqueeze(0)  # Shape: 27,15
         padding_mask = torch.logical_not(torch.all(pseudo_topk_features == 0, dim=-1))  #15 
 
-
-        uniform_lbl_prototypes = F.normalize(uniform_lbl_prototypes,dim=-1) #27,256
+        uniform_sorted_prototypes = F.normalize(uniform_sorted_prototypes,dim=-1) #27,256
         pseudo_topk_features = F.normalize(pseudo_topk_features,dim=-1) #15,256
         positive_mask = label_mask #(27,15)
         negative_mask = ~label_mask #(27,15)
-        sim_matrix = uniform_lbl_prototypes @ pseudo_topk_features.t() # (27,256) @ (256,15) -> (27,15)
-
+        sim_matrix = uniform_sorted_prototypes @ pseudo_topk_features.t() # (27,256) @ (256,15) -> (27,15)
+        # temperature = nn.Parameter(torch.tensor(2.0),requires_grad=True)
         exp_sim_pos_matrix = torch.exp(sim_matrix * positive_mask /1.0)
-        sim_pos_matrix_row = exp_sim_pos_matrix.clone() 
-        positive_sum = torch.log(exp_sim_pos_matrix).sum() # Sum of log(exp(positives))
-        negative_sum = (torch.exp(sim_matrix) * negative_mask).sum(dim=0, keepdims=True)/((unique_labels.size(0)-1) * counts.min())
-        negative_sum =  torch.log(negative_sum).sum()
-        unscaled_contrastive_loss = ((positive_sum - (counts.min() * negative_sum))) 
-        contrastive_loss = contrastive_loss + ((unscaled_contrastive_loss * -1)/ (5 * unique_labels.size(0)))
+        sim_pos_matrix_row = exp_sim_pos_matrix.clone()
+        B,N  = torch.log(exp_sim_pos_matrix).size()
+        car_positive_sum = torch.log(exp_sim_pos_matrix[:B//3,:N//3]).sum()
+        car_negative_sum = torch.log((torch.exp(sim_matrix[:B,:N//3]) * negative_mask[:B,:N//3]).sum(dim=0, keepdims=True)).sum()
+        car_lpcont_loss  = car_positive_sum - (2 * (N//3) * car_negative_sum)
+        car_lpcont_loss = car_lpcont_loss / ((B//3) * (N//3))
+        ped_positive_sum = torch.log(exp_sim_pos_matrix[B//3:2*B//3,N//3:2*N//3]).sum()
+        ped_negative_sum = torch.log((torch.exp(sim_matrix[:B,N//3:2*N//3]) * negative_mask[:B,N//3:2*N//3]).sum(dim=0, keepdims=True)).sum()
+        ped_lpcont_loss  = ped_positive_sum - (2 * (N//3) * ped_negative_sum)
+        ped_lpcont_loss = ped_lpcont_loss / ((B//3) * (N//3))
+        cyc_positive_sum = torch.log(exp_sim_pos_matrix[2*B//3:,2*N//3:]).sum()
+        cyc_negative_sum = torch.log((torch.exp(sim_matrix[:B,2*N//3:]) * negative_mask[:B,2*N//3:]).sum(dim=0, keepdims=True)).sum()
+        cyc_lpcont_loss  = cyc_positive_sum - (2 * (N//3) * cyc_negative_sum)
+        cyc_lpcont_loss = cyc_lpcont_loss / ((B//3) * (N//3))
+        # positive_sum = torch.log(exp_sim_pos_matrix).sum() # Sum of log(exp(positives))
+        # negative_sum = (torch.exp(sim_matrix) * negative_mask).sum(dim=0, keepdims=True) #/((unique_labels.size(0)-1) * counts.min())
+        # negative_sum =  torch.log(negative_sum).sum()
+        # unscaled_contrastive_loss = ((positive_sum - (counts.min() * negative_sum))) 
+        contrastive_loss = contrastive_loss + -(1/3) * (car_lpcont_loss + ped_lpcont_loss + cyc_lpcont_loss)  
 
         if CLIP_CE == True: 
             padding_mask_row = padding_mask.unsqueeze(0).expand(161,-1) #161,15
