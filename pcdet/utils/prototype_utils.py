@@ -187,8 +187,8 @@ class FeatureBank(Metric):
             num_to_append = topk_list[k] - ((torch.nonzero(pseudo_positive_labels==(k+1)).size(0)))
             labels = torch.tensor([(k+1)] * num_to_append).to(pseudo_positives.device)
             pseudo_positive_labels = torch.cat((pseudo_positive_labels, labels), dim=0)
-            pseudo_conf_scores= torch.cat((pseudo_conf_scores, torch.zeros(num_to_append, device = pseudo_positives.device)), dim=0) 
-            pseudo_positives = torch.cat((pseudo_positives, torch.zeros(num_to_append,256).to(pseudo_positives.device)),dim=0)             
+            synthetic_samples =  self.generate_synthetic_samples(self.classwise_prototypes[k].unsqueeze(0).expand(num_to_append, -1), noise_level=0.1)
+            pseudo_positives = torch.cat((pseudo_positives, synthetic_samples),dim=0)                     
         else:
             num_to_append = topk_list[k] - ((torch.nonzero(pseudo_positive_labels==(k+1)).size(0)))
             labels = torch.tensor([(k+1)] * num_to_append).to(pseudo_positives.device)
