@@ -4,6 +4,7 @@ from torchmetrics import Metric
 import torch.nn as nn
 import numpy as np
 from torch.distributions import Categorical
+import torch.distributed as dist
 import random
 from sklearn.cluster import KMeans
 from sklearn.metrics.pairwise import cosine_similarity
@@ -36,6 +37,7 @@ class FeatureBank(Metric):
         self.num_updates = None
         self.pp_feats = None
         self.pp_labels = None
+        self.proto_conf_scores = None
 
         # Local feature/label which are used to update the global ones
         self.add_state('feats', default=[], dist_reduce_fx='cat')
@@ -43,8 +45,7 @@ class FeatureBank(Metric):
         self.add_state('ins_ids', default=[], dist_reduce_fx='cat')
         self.add_state('smpl_ids', default=[], dist_reduce_fx='cat')
         self.add_state('iterations', default=[], dist_reduce_fx='cat')
-        self.add_state('pl_feats', default=[], dist_reduce_fx='cat')
-        self.add_state('pl_labels', default=[], dist_reduce_fx='cat')
+        self.add_state('conf_scores', default=[], dist_reduce_fx='cat')
 
     def _init(self, unique_ins_ids, labels):
         self.bank_size = len(unique_ins_ids)
@@ -52,18 +53,17 @@ class FeatureBank(Metric):
         self.prototypes = torch.zeros((self.bank_size, self.feat_size)).cuda()
         self.classwise_prototypes = torch.zeros((3, self.feat_size)).cuda()
         self.proto_labels = labels
-        # self.pp_feats = pl_feats
-        # self.pp_labels = pl_labels
         self.num_updates = torch.zeros(self.bank_size).cuda()
         self.insId_protoId_mapping = {unique_ins_ids[i]: i for i in range(len(unique_ins_ids))}
 
     def update(self, feats: [torch.Tensor], labels: [torch.Tensor], ins_ids: [torch.Tensor], smpl_ids: torch.Tensor,
-               iteration: int) -> None:
+               conf_scores: [torch.Tensor], iteration: int) -> None:
         for i in range(len(feats)):
             self.feats.append(feats[i])                 # (N, C)
             self.labels.append(labels[i].view(-1))      # (N,)
             self.ins_ids.append(ins_ids[i].view(-1))    # (N,)
             self.smpl_ids.append(smpl_ids[i].view(-1))  # (1,)     
+            self.conf_scores.append(conf_scores[i].view(-1))  # (N,)
             rois_iter = torch.tensor(iteration, device=feats[0].device).expand_as(ins_ids[i].view(-1))
             self.iterations.append(rois_iter)           # (N,)
         
@@ -85,8 +85,7 @@ class FeatureBank(Metric):
             iterations = torch.cat((self.iterations,),dim=0).int().cpu().numpy()
             ins_ids = torch.cat((self.ins_ids,), dim=0).int().cpu().numpy()
             iterations = torch.cat((self.iterations,), dim=0).int().cpu().numpy()
-            # pl_feats = torch.cat((self.pl_feats,),dim=0)
-            # pl_labels = torch.cat((self.pl_labels,),dim=0).int()
+            conf_scores = torch.cat((self.conf_scores,),dim=0)
         except:
             features = torch.cat((self.feats), dim=0)
             ins_ids = torch.cat(self.ins_ids).int().cpu().numpy()
@@ -94,13 +93,14 @@ class FeatureBank(Metric):
             iterations = torch.cat(self.iterations).int().cpu().numpy()
             ins_ids = torch.cat((self.ins_ids), dim=0).int().cpu().numpy()
             iterations = torch.cat((self.iterations), dim=0).int().cpu().numpy()            
-            # pl_feats = torch.cat((self.pl_feats),dim=0)
+            conf_scores = torch.cat((self.conf_scores),dim=0)
             # pl_labels = torch.cat((self.pl_labels),dim=0).int()
 
-        assert len(features) == len(labels) == len(ins_ids) == len(iterations), \
-            "length of features, labels, ins_ids, and iterations should be the same"
+        assert len(features) == len(labels) == len(ins_ids) == len(iterations) == len(conf_scores), \
+            "length of features, labels, ins_ids, conf_scores and iterations should be the same"
         sorted_ins_ids, arg_sorted_ins_ids = np.sort(ins_ids), np.argsort(ins_ids)
         unique_ins_ids, split_indices = np.unique(sorted_ins_ids, return_index=True)
+        self.proto_conf_scores = conf_scores[arg_sorted_ins_ids[split_indices]] # Update proto_conf_scores at every compute() call -> with fresh batch's conf_scores
 
         if not self.initialized:
             self._init(unique_ins_ids, labels[arg_sorted_ins_ids[split_indices]])
@@ -135,7 +135,7 @@ class FeatureBank(Metric):
             classwise_prototypes[i] = torch.mean(self.prototypes[inds], dim=0)
         self.classwise_prototypes = self.momentum * self.classwise_prototypes + (1 - self.momentum) * classwise_prototypes
 
-    
+
     @torch.no_grad()
     def get_sim_scores(self, input_features, use_classwise_prototypes=True):
         assert input_features.shape[1] == self.feat_size, "input feature size is not equal to the bank feature size"
@@ -243,23 +243,23 @@ class FeatureBank(Metric):
         
         return pseudo_topk_labels,pseudo_topk_fts
 
-    def get_uniform_samples(self, prototypes, labels, unique_labels,num_per_class):
-        indices = []
-        for label in unique_labels[1:]:  # Assuming labels are 1, 2, or 3
-            label_indices = torch.topk((torch.where(labels == label)[0]),num_per_class)[0]
-            indices.append(label_indices)
-        # Concatenate the indices for each class and select from prototypes
-        indices = torch.cat((indices), dim=0)
-        uniform_prototypes = prototypes.index_select(0, indices)
-        uniform_labels = labels.index_select(0, indices)
-        return uniform_prototypes, uniform_labels
+    # def get_uniform_samples(self, prototypes, labels, unique_labels,num_per_class):
+    #     indices = []
+    #     for label in unique_labels[1:]:  # Assuming labels are 1, 2, or 3
+    #         label_indices = torch.topk((torch.where(labels == label)[0]),num_per_class)[0]
+    #         indices.append(label_indices)
+    #     # Concatenate the indices for each class and select from prototypes
+    #     indices = torch.cat((indices), dim=0)
+    #     uniform_prototypes = prototypes.index_select(0, indices)
+    #     uniform_labels = labels.index_select(0, indices)
+    #     return uniform_prototypes, uniform_labels
 
-    def informative_car_features(self, car_prototypes, car_labels):
-        kmeans = KMeans(n_clusters=9, random_state=0).fit(car_prototypes.cpu().numpy())
-        cluster_labels = kmeans.labels_
-        centroids = kmeans.cluster_centers_ # Using centroids as the informative car features
-        car_centroids = torch.from_numpy(centroids).to(car_prototypes.device)
-        return car_centroids, car_labels[:9]
+    # def informative_car_features(self, car_prototypes, car_labels):
+    #     kmeans = KMeans(n_clusters=9, random_state=0).fit(car_prototypes.cpu().numpy())
+    #     cluster_labels = kmeans.labels_
+    #     centroids = kmeans.cluster_centers_ # Using centroids as the informative car features
+    #     car_centroids = torch.from_numpy(centroids).to(car_prototypes.device)
+    #     return car_centroids, car_labels[:9]
 
     def generate_synthetic_samples(self, batch_tensors, noise_level=0.0001):
         noise = torch.randn_like(batch_tensors) * noise_level
@@ -274,12 +274,27 @@ class FeatureBank(Metric):
         """
         N = len(self.prototypes)  #161
         contrastive_loss = torch.tensor(0.0).to(pseudo_positives.device) #contrastive_loss2 = torch.tensor(0.0).to(pseudo_positives.device)
+        labeled_bank_info = torch.cat([self.prototypes, self.proto_labels.unsqueeze(-1)], dim=-1)
+        pseudo_batch_info = torch.cat([pseudo_positives, pseudo_positive_labels.unsqueeze(-1)], dim=-1)
 
-        sorted_labels, sorted_args = torch.sort(self.proto_labels) #161
-        sorted_prototypes = self.prototypes[sorted_args] # sort prototypes to arrange classwise #161
+        gathered_lbl_tensor = self.gather_tensors(labeled_bank_info)
+        gathered_sa_labels = gathered_lbl_tensor[:,-1].long()
+        non_zero_mask = gathered_sa_labels != 0
+        gathered_prototypes = gathered_lbl_tensor[:,:-1][non_zero_mask]
+        gathered_labels = gathered_sa_labels[non_zero_mask]
+
+        gathered_pseudo_tensor = self.gather_tensors(pseudo_batch_info)
+        gathered_wa_labels = gathered_pseudo_tensor[:,-1].long()
+        non_zero_mask2 = gathered_wa_labels != 0
+        gathered_pseudo_positives = gathered_pseudo_tensor[:,:-1][non_zero_mask2]
+        gathered_pseudo_labels = gathered_wa_labels[non_zero_mask2]
+
+
+        sorted_labels, sorted_args = torch.sort(gathered_labels) #161
+        sorted_prototypes = gathered_prototypes[sorted_args] # sort prototypes to arrange classwise #161
         unique_labels, counts = torch.unique(sorted_labels, return_counts=True)
-        sorted_pls, pl_args = torch.sort(pseudo_positive_labels)
-        sorted_pseudo_positives = pseudo_positives[pl_args]
+        sorted_pls, pl_args = torch.sort(gathered_pseudo_labels)
+        sorted_pseudo_positives = gathered_pseudo_positives[pl_args]
         # uniform_sorted_prototypes, uniform_sorted_labels  = self.get_uniform_samples(sorted_prototypes, sorted_labels, unique_labels, counts.min())
 
         pseudo_conf_scores = None
@@ -295,21 +310,20 @@ class FeatureBank(Metric):
         # pseudo_topk_labels, pseudo_topk_features = self.sample_topk(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores)
         
         label_mask = sorted_labels.unsqueeze(1)== sorted_pls.unsqueeze(0)  # Shape: 27,15
-        # padding_mask = torch.logical_not(torch.all(pseudo_topk_features == 0, dim=-1))  #15 
+        positive_mask = label_mask #(27,15)
+        negative_mask = ~label_mask #(27,15)
 
         uniform_sorted_prototypes = F.normalize(sorted_prototypes,dim=-1) #27,256
         pseudo_topk_features = F.normalize(sorted_pseudo_positives,dim=-1) #15,256
-        positive_mask = label_mask #(27,15)
-        negative_mask = ~label_mask #(27,15)
         sim_matrix = uniform_sorted_prototypes @ pseudo_topk_features.t() # (27,256) @ (256,15) -> (27,15)
         temperature = nn.Parameter(torch.tensor(1.0),requires_grad=False)
         exp_sim_pos_matrix = torch.exp(sim_matrix * positive_mask /temperature)
         # sim_pos_matrix_row = exp_sim_pos_matrix.clone()
         positive_sum = torch.log(exp_sim_pos_matrix).sum() # Sum of log(exp(positives))
-        number_negative_pairs = negative_mask.sum(dim=0, keepdims=True) # Number of negative pairs for each positive
+        # number_negative_pairs = negative_mask.sum(dim=0, keepdims=True) # Number of negative pairs for each positive
         negative_sum = (torch.exp(sim_matrix) * negative_mask).sum(dim=0, keepdims=True) #/((unique_labels.size(0)-1) * counts.min())
-        weighted_negatives =  torch.log(negative_sum * number_negative_pairs).sum()
-        unscaled_contrastive_loss = ((positive_sum - weighted_negatives)) 
+        pairwise_negative_sum =  torch.log(negative_sum).sum()
+        unscaled_contrastive_loss = ((positive_sum - pairwise_negative_sum)) 
         contrastive_loss = contrastive_loss +  -1 * (unscaled_contrastive_loss / (sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3))
 
         # if CLIP_CE == True: 
@@ -338,55 +352,167 @@ class FeatureBank(Metric):
             N = len(self.prototypes)
             contrastive_loss = torch.tensor(0.0).to(pseudo_positives.device) #contrastive_loss2 = torch.tensor(0.0).to(pseudo_positives.device)
 
-            sorted_labels, sorted_args = torch.sort(self.proto_labels)
-            sorted_prototypes = self.prototypes[sorted_args] # sort prototypes to arrange classwise
+            labeled_bank_info = torch.cat([self.prototypes, self.proto_conf_scores.unsqueeze(-1), self.proto_labels.unsqueeze(-1)], dim=-1)
+            pseudo_batch_info = torch.cat([pseudo_positives, pseudo_conf_scores.unsqueeze(-1), pseudo_positive_labels.unsqueeze(-1)], dim=-1)
 
-
-
-            if torch.nonzero(pseudo_positive_labels==1).shape[0] < topk_list[0]: # topk for car, pad if less than 5
-                pseudo_positive_labels, pseudo_positives, pseudo_conf_scores = self.topk_padding(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores, k=0)
-
-            if torch.nonzero(pseudo_positive_labels==2).shape[0] < topk_list[1]: #topk for ped, pad if less than 5
-                pseudo_positive_labels, pseudo_positives, pseudo_conf_scores = self.topk_padding(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores, k=1)
-
-            if torch.nonzero(pseudo_positive_labels==3).shape[0] < topk_list[2]: #topk for cyc, pad if less than 5
-                pseudo_positive_labels, pseudo_positives, pseudo_conf_scores = self.topk_padding(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores, k=2)
-
-            pseudo_topk_labels, pseudo_topk_features = self.sample_topk(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores)
-            label_mask = sorted_labels.unsqueeze(1)== pseudo_topk_labels.unsqueeze(0)
-
-            padding_mask = torch.logical_not(torch.all(pseudo_topk_features == 0, dim=-1))
-
-            norm_sorted_prototypes = F.normalize(sorted_prototypes,dim=-1)
-            norm_pseudo_topk_features = F.normalize(pseudo_topk_features,dim=-1)
-
-            sim_pos_matrix = norm_sorted_prototypes @ norm_pseudo_topk_features.t()
-            exp_sim_pos_matrix = torch.exp(sim_pos_matrix/0.07)
-            exp_sim_pos_matrix_row = exp_sim_pos_matrix.clone()
-            positive_mask = label_mask
-            negative_mask = ~label_mask
-
-            # Column loss
-            positive_sum = torch.sum(exp_sim_pos_matrix * positive_mask.float(), dim=0, keepdims=True) # sum positives along rows
-            negative_sum = torch.sum(exp_sim_pos_matrix * negative_mask.float(), dim=0, keepdims=True) # sum negatives along rows
-            logits = positive_sum / negative_sum #1,C
-            log_logits = torch.log(logits).view(-1) 
-            log_logits = log_logits[padding_mask] # consider loss for only non padded columns
-            contrastive_loss = contrastive_loss + ((log_logits.sum() * -1) / (sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3))
+            gathered_lbl_tensor = self.gather_tensor_pls(labeled_bank_info)
+            gathered_sa_labels = gathered_lbl_tensor[:,-1].long()
+            non_zero_mask = gathered_sa_labels != 0
+            gathered_prototypes = gathered_lbl_tensor[:,:-2][non_zero_mask]
+            gathered_labels = gathered_sa_labels[non_zero_mask]
+            gathered_conf_scores = gathered_lbl_tensor[:,-2][non_zero_mask]
             
-            if CLIP_CE == True:
-                padding_mask_row = padding_mask.unsqueeze(0).expand(161,-1) # 161,15
-                positive_sum_row = exp_sim_pos_matrix_row * positive_mask * padding_mask_row # 161,15
-                negative_sum_row = exp_sim_pos_matrix_row * negative_mask * padding_mask_row #161,15
-                keep_positive_row = positive_sum_row.sum(dim=-1,keepdims=True).float() #161
-                keep_negative_row = negative_sum_row.sum(dim=-1,keepdims=True).float() #161
-                logits_row = (keep_positive_row) / (keep_negative_row) #1
-                safe_mask = torch.eq(logits_row,0)
-                logits_row[safe_mask] = 1
-                log_logits_row = torch.log(logits_row).view(-1) #
-                contrastive_loss = contrastive_loss + ((log_logits_row.sum() * -1) / (sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3))
-                contrastive_loss = contrastive_loss / 2
-            return contrastive_loss
+            gathered_pseudo_tensor = self.gather_tensor_pls(pseudo_batch_info)
+            gathered_wa_labels = gathered_pseudo_tensor[:,-1].long()
+            non_zero_mask2 = gathered_wa_labels != 0
+            gathered_pseudo_positives = gathered_pseudo_tensor[:,:-2][non_zero_mask2]
+            gathered_pseudo_labels = gathered_wa_labels[non_zero_mask2]
+            gathered_pseudo_conf_scores = gathered_pseudo_tensor[:,-2][non_zero_mask2]
+
+
+            sorted_labels, sorted_args = torch.sort(gathered_labels) #161
+            sorted_prototypes = gathered_prototypes[sorted_args] # sort prototypes to arrange classwise #161
+            sorted_conf_scores = gathered_conf_scores[sorted_args]
+            unique_labels, counts = torch.unique(sorted_labels, return_counts=True)
+            sorted_pls, pl_args = torch.sort(gathered_pseudo_labels)
+            sorted_pseudo_positives = gathered_pseudo_positives[pl_args]
+            sorted_pseudo_conf_scores = gathered_pseudo_conf_scores[pl_args]
+            
+            # if torch.nonzero(pseudo_positive_labels==1).shape[0] < topk_list[0]: # topk for car, pad if less than 5
+            #     pseudo_positive_labels, pseudo_positives, pseudo_conf_scores = self.topk_padding(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores, k=0)
+
+            # if torch.nonzero(pseudo_positive_labels==2).shape[0] < topk_list[1]: #topk for ped, pad if less than 5
+            #     pseudo_positive_labels, pseudo_positives, pseudo_conf_scores = self.topk_padding(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores, k=1)
+
+            # if torch.nonzero(pseudo_positive_labels==3).shape[0] < topk_list[2]: #topk for cyc, pad if less than 5
+            #     pseudo_positive_labels, pseudo_positives, pseudo_conf_scores = self.topk_padding(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores, k=2)
+
+            # pseudo_topk_labels, pseudo_topk_features = self.sample_topk(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores)
+
+            label_mask = sorted_labels.unsqueeze(1)== sorted_pls.unsqueeze(0)
+            positive_mask = label_mask
+            negative_mask = ~label_mask           
+            ## Product of conf_scores and pseudo_conf_scores as weights for negative_mask
+            # confidence_weights = sorted_conf_scores.unsqueeze(1) * sorted_pseudo_conf_scores.unsqueeze(0)
+
+            norm_sorted_prototypes = F.normalize(sorted_prototypes, dim=-1)
+            norm_pseudo_topk_features = F.normalize(sorted_pseudo_positives, dim=-1)
+            sim_matrix = norm_sorted_prototypes @ norm_pseudo_topk_features.t()
+            temperature = nn.Parameter(torch.tensor(1.0),requires_grad=False)
+            exp_sim_pos_matrix = torch.exp(sim_matrix * positive_mask /temperature)
+            # sim_pos_matrix_row = exp_sim_pos_matrix.clone()
+            positive_sum = torch.log(exp_sim_pos_matrix).sum() # Sum of log(exp(positives))
+            # number_negative_pairs = negative_mask.sum(dim=0, keepdims=True) # Number of negative pairs for each positive
+            negative_sum = (torch.exp(sim_matrix) * negative_mask).sum(dim=0, keepdims=True) #/((unique_labels.size(0)-1) * counts.min())
+            pairwise_negatives_sum =  torch.log(negative_sum).sum()
+            unscaled_contrastive_loss = ((positive_sum - pairwise_negatives_sum)) 
+            contrastive_loss = contrastive_loss +  -1 * (unscaled_contrastive_loss / (sorted_prototypes.size(0) * norm_pseudo_topk_features.size(0) * 3))            
+            
+            # if CLIP_CE == True:
+            #     padding_mask_row = padding_mask.unsqueeze(0).expand(161,-1) # 161,15
+            #     positive_sum_row = exp_sim_pos_matrix_row * positive_mask * padding_mask_row # 161,15
+            #     negative_sum_row = exp_sim_pos_matrix_row * negative_mask * padding_mask_row #161,15
+            #     keep_positive_row = positive_sum_row.sum(dim=-1,keepdims=True).float() #161
+            #     keep_negative_row = negative_sum_row.sum(dim=-1,keepdims=True).float() #161
+            #     logits_row = (keep_positive_row) / (keep_negative_row) #1
+            #     safe_mask = torch.eq(logits_row,0)
+            #     logits_row[safe_mask] = 1
+            #     log_logits_row = torch.log(logits_row).view(-1) #
+            #     contrastive_loss = contrastive_loss + ((log_logits_row.sum() * -1) / (sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3))
+            #     contrastive_loss = contrastive_loss / 2
+            return contrastive_loss, (sim_matrix, sorted_labels, pseudo_positive_labels)
+
+    def gather_tensors(self, tensor):
+            """
+            Returns the gathered tensor to all GPUs in DDP else returns the tensor as such
+            dist.gather_all needs the gathered tensors to be of same size.
+            We get the sizes of the tensors first, zero pad them to match the size
+            Then gather and filter the padding
+            Args:
+                tensor: tensor to be gathered
+                
+            """
+
+            assert tensor.size(-1) == 257 , "features should be of size common_instances,(ft_size+ lbl_size)"
+            if not dist.is_initialized():
+                return tensor
+                # Determine sizes first
+            WORLD_SIZE = dist.get_world_size()
+            local_size = torch.tensor(tensor.size(), device=tensor.device)
+            all_sizes = [torch.zeros_like(local_size) for _ in range(WORLD_SIZE)]
+
+            dist.barrier() 
+            dist.all_gather(all_sizes,local_size)
+            dist.barrier()
+
+            print(f'all_sizes {all_sizes}')
+            # make zero-padded version https://stackoverflow.com/questions/71433507/pytorch-python-distributed-multiprocessing-gather-concatenate-tensor-arrays-of
+            max_length = max([size[0] for size in all_sizes])
+
+            diff = max_length - local_size[0].item()
+            if diff:
+                pad_size =[diff.item()] #pad with zeros 
+                if local_size.ndim >= 1:
+                    pad_size.extend(dimension.item() for dimension in local_size[1:])
+                padding = torch.zeros(pad_size, device=tensor.device, dtype=tensor.dtype)
+                tensor = torch.cat((tensor,padding),)
+
+            all_tensors_padded = [torch.zeros_like(tensor) for _ in range(WORLD_SIZE)]
+
+            dist.barrier()
+            dist.all_gather(all_tensors_padded,tensor)
+            dist.barrier()
+
+            gathered_tensor = torch.cat(all_tensors_padded)
+            non_zero_mask = torch.any(gathered_tensor!=0,dim=-1).squeeze()
+            gathered_tensor = gathered_tensor[non_zero_mask]
+            return gathered_tensor
+
+    def gather_tensor_pls(self, tensor):
+            """
+            Returns the gathered tensor to all GPUs in DDP else returns the tensor as such
+            dist.gather_all needs the gathered tensors to be of same size.
+            We get the sizes of the tensors first, zero pad them to match the size
+            Then gather and filter the padding
+            Args:
+                tensor: tensor to be gathered
+                
+            """
+
+            assert tensor.size(-1) == 258 , "features should be of size common_instances,(ft_size+ conf_score + lbl_size)"
+            if not dist.is_initialized():
+                return tensor
+                # Determine sizes first
+            WORLD_SIZE = dist.get_world_size()
+            local_size = torch.tensor(tensor.size(), device=tensor.device)
+            all_sizes = [torch.zeros_like(local_size) for _ in range(WORLD_SIZE)]
+
+            dist.barrier() 
+            dist.all_gather(all_sizes,local_size)
+            dist.barrier()
+
+            print(f'all_sizes {all_sizes}')
+            # make zero-padded version https://stackoverflow.com/questions/71433507/pytorch-python-distributed-multiprocessing-gather-concatenate-tensor-arrays-of
+            max_length = max([size[0] for size in all_sizes])
+
+            diff = max_length - local_size[0].item()
+            if diff:
+                pad_size =[diff.item()] #pad with zeros 
+                if local_size.ndim >= 1:
+                    pad_size.extend(dimension.item() for dimension in local_size[1:])
+                padding = torch.zeros(pad_size, device=tensor.device, dtype=tensor.dtype)
+                tensor = torch.cat((tensor,padding),)
+
+            all_tensors_padded = [torch.zeros_like(tensor) for _ in range(WORLD_SIZE)]
+
+            dist.barrier()
+            dist.all_gather(all_tensors_padded,tensor)
+            dist.barrier()
+
+            gathered_tensor = torch.cat(all_tensors_padded)
+            non_zero_mask = torch.any(gathered_tensor!=0,dim=-1).squeeze()
+            gathered_tensor = gathered_tensor[non_zero_mask]
+            return gathered_tensor
 
 
 class FeatureBankRegistry(object):

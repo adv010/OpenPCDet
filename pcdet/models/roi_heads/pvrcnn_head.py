@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional
 from ...ops.pointnet2.pointnet2_stack import pointnet2_modules as pointnet2_stack_modules
 from ...utils import common_utils
 from .roi_head_template import RoIHeadTemplate
@@ -48,23 +49,25 @@ class PVRCNNHead(RoIHeadTemplate):
         GRID_SIZE = self.model_cfg.ROI_GRID_POOL.GRID_SIZE
         pre_channel = GRID_SIZE * GRID_SIZE * GRID_SIZE * num_c_out
 
-        stg2_projector_list = []
-        for k in range(0, self.model_cfg.STG2_PROJ_FC.__len__()):
-            stg2_projector_list.append(
-                nn.Conv1d(pre_channel, self.model_cfg.STG2_PROJ_FC[k], kernel_size=1, bias=True))
-            if self.model_cfg.STG2_PROJ_FC_CFGS.BATCH_NORM:
-                stg2_projector_list.append(nn.BatchNorm1d(self.model_cfg.STG2_PROJ_FC[k]))
-            if self.model_cfg.STG2_PROJ_FC_CFGS.ACTIVATION == 'ReLU':
-                stg2_projector_list.append(nn.ReLU())
-            elif self.model_cfg.STG2_PROJ_FC_CFGS.ACTIVATION == 'Linear':
-                pass          
-            pre_channel = self.model_cfg.STG2_PROJ_FC[k]
+        self.stg2_projector = None  # Initialize projector as None
+        if self.training:  # Projection head created if training mode only
+            stg2_projector_list = []
+            for k in range(0, self.model_cfg.STG2_PROJ_FC.__len__()):
+                stg2_projector_list.append(
+                    nn.Conv1d(pre_channel, self.model_cfg.STG2_PROJ_FC[k], kernel_size=1, bias=True))
+                if self.model_cfg.STG2_PROJ_FC_CFGS.BATCH_NORM:
+                    stg2_projector_list.append(nn.BatchNorm1d(self.model_cfg.STG2_PROJ_FC[k]))
+                if self.model_cfg.STG2_PROJ_FC_CFGS.ACTIVATION == 'ReLU':
+                    stg2_projector_list.append(nn.ReLU())
+                elif self.model_cfg.STG2_PROJ_FC_CFGS.ACTIVATION == 'Linear':
+                    pass          
+                pre_channel = self.model_cfg.STG2_PROJ_FC[k]
 
-            if k != self.model_cfg.STG2_PROJ_FC.__len__() - 1 and self.model_cfg.STG2_PROJ_FC_CFGS.DP_RATIO > 0:
-                stg2_projector_list.append(nn.Dropout(self.model_cfg.DP_RATIO))
+                if k != self.model_cfg.STG2_PROJ_FC.__len__() - 1 and self.model_cfg.STG2_PROJ_FC_CFGS.DP_RATIO > 0:
+                    stg2_projector_list.append(nn.Dropout(self.model_cfg.DP_RATIO))
 
-        self.stg2_projector = nn.Sequential(*stg2_projector_list)
-        
+            self.stg2_projector = nn.Sequential(*stg2_projector_list)
+            
         self.init_weights(weight_init='xavier')
 
     def init_weights(self, weight_init='xavier'):
@@ -140,54 +143,6 @@ class PVRCNNHead(RoIHeadTemplate):
         )  # (BxN, 6x6x6, C)
         return pooled_features
 
-    # def ori_roi_grid_pool(self, batch_dict, use_gtboxes=False):
-    #     """
-    #     Args:
-    #         batch_dict:
-    #             batch_size:
-    #             rois: (B, num_rois, 7 + C)
-    #             point_coords: (num_points, 4)  [bs_idx, x, y, z]
-    #             point_features: (num_points, C)
-    #             point_cls_scores: (N1 + N2 + N3 + ..., 1)
-    #             point_part_offset: (N1 + N2 + N3 + ..., 3)
-    #     Returns:
-
-    #     """
-    #     batch_size = batch_dict['batch_size']
-    #     rois = batch_dict['ori_gt_boxes'][..., 0:7] if use_gtboxes else batch_dict['rois']
-    #     point_coords = batch_dict["point_coords"]
-    #     point_features = batch_dict["point_features"]
-    #     point_cls_scores = batch_dict["point_cls_scores"]
-
-    #     point_features = point_features * point_cls_scores.view(-1, 1)
-
-    #     global_roi_grid_points, local_roi_grid_points = self.get_global_grid_points_of_roi(
-    #         rois, grid_size=self.model_cfg.ROI_GRID_POOL.GRID_SIZE
-    #     )  # (BxN, 6x6x6, 3)
-    #     global_roi_grid_points = global_roi_grid_points.view(batch_size, -1, 3)  # (B, Nx6x6x6, 3)
-
-    #     xyz = point_coords[:, 1:4]
-    #     xyz_batch_cnt = xyz.new_zeros(batch_size).int()
-    #     batch_idx = point_coords[:, 0]
-    #     for k in range(batch_size):
-    #         xyz_batch_cnt[k] = (batch_idx == k).sum()
-
-    #     new_xyz = global_roi_grid_points.view(-1, 3)
-    #     new_xyz_batch_cnt = xyz.new_zeros(batch_size).int().fill_(global_roi_grid_points.shape[1])
-    #     pooled_points, pooled_features = self.roi_grid_pool_layer(
-    #         xyz=xyz.contiguous(),
-    #         xyz_batch_cnt=xyz_batch_cnt,
-    #         new_xyz=new_xyz,
-    #         new_xyz_batch_cnt=new_xyz_batch_cnt,
-    #         features=point_features.contiguous(),
-    #     )  # (M1 + M2 ..., C)
-
-    #     pooled_features_true = pooled_features.view(
-    #         -1, self.model_cfg.ROI_GRID_POOL.GRID_SIZE ** 3,
-    #         pooled_features.shape[-1]
-    #     )  # (BxN, 6x6x6, C)
-    #     return pooled_features_true
-
     def get_global_grid_points_of_roi(self, rois, grid_size):
         rois = rois.view(-1, rois.shape[-1])
         batch_size_rcnn = rois.shape[0]
@@ -252,9 +207,10 @@ class PVRCNNHead(RoIHeadTemplate):
             targets_dict['points'] = batch_dict['points']
 
         '''Pooling block using GTs'''
-        shared_pooled_gts, proj_pooled_gts = self.pool_features(batch_dict, use_gtboxes=True, shared=True, projector=True)
-        batch_dict['shared_features_gt'] = shared_pooled_gts
-        batch_dict['projected_features_gt'] = proj_pooled_gts
+        if self.training:
+            shared_pooled_gts, proj_pooled_gts = self.pool_features(batch_dict, use_gtboxes=True, shared=True, projector=True)
+            batch_dict['shared_features_gt'] = shared_pooled_gts
+            batch_dict['projected_features_gt'] = proj_pooled_gts
 
         '''Pooling block using RoIs'''
         pooled_features = self.pool_features(batch_dict,use_gtboxes=False)
@@ -264,12 +220,28 @@ class PVRCNNHead(RoIHeadTemplate):
         rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
         rcnn_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
 
-        if (self.training or self.print_loss_when_eval) and not test_only:
-            # RoI-level similarity.
-            # calculate cosine similarity between unlabeled augmented RoI features and labeled augmented prototypes.
-            roi_features = pooled_features.clone().detach().view(batch_size_rcnn, -1)
-            roi_scores_shape = batch_dict['roi_scores'].shape  # (B, N)
-
+        # if (self.training or self.print_loss_when_eval) and not test_only:
+        #     # # RoI-level similarity.
+        #     # # calculate cosine similarity between unlabeled augmented RoI features and labeled augmented prototypes.
+        #     # roi_features = pooled_features.clone().detach().view(batch_size_rcnn, -1)
+        #     # roi_scores_shape = batch_dict['roi_scores'].shape  # (B, N)
+        if self.training:
+            with torch.no_grad(): # Generate RCNN conf_score for teacher GTs ; append labeled bank
+                a = self.cls_layers(shared_pooled_gts).transpose(1, 2).contiguous().squeeze(dim=1)
+                b = self.reg_layers(shared_pooled_gts).transpose(1, 2).contiguous().squeeze(dim=1)
+                batch_gt_cls_preds, batch_gt_reg_preds = self.generate_predicted_boxes(
+                            batch_size=batch_dict['batch_size'], rois=batch_dict['gt_boxes'], cls_preds=a, box_preds=b)
+                B,N = batch_gt_cls_preds.size()[:2]
+                batch_size = batch_dict['batch_size']
+                gt_rcnn_conf_preds = []
+                for index in range(batch_size):
+                    batch_mask = index
+                    cls_preds = batch_gt_cls_preds[batch_mask]
+                    sigmoided =  torch.sigmoid(cls_preds)
+                    softplused = torch.nn.functional.softplus(cls_preds)
+                    gt_rcnn_conf_preds.append(torch.sigmoid(cls_preds))
+                gt_rcnn_conf_preds = torch.cat(gt_rcnn_conf_preds, dim=0)   
+                batch_dict['gt_conf_scores'] = gt_rcnn_conf_preds.view(B,N,-1)
 
 
         if not self.training or self.predict_boxes_when_training:

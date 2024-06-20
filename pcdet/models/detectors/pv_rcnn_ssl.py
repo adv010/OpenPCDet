@@ -173,10 +173,6 @@ class PVRCNN_SSL(Detector3DTemplate):
         return lpcont_projections, lpcont_labels, lpcont_conf_scores, lpcont_boxes 
 
     def _prep_wa_bank_inputs(self, batch_dict_ema, inds, ulb_inds, bank, iteration, num_points_threshold=20):
-        # selected_batch_dict_ema = self._clone_gt_boxes_and_feats(batch_dict)
-        # with torch.no_grad():
-        #     projections_gt = self.pv_rcnn_ema.roi_head.pool_features(selected_batch_dict_ema, use_gtboxes=True, shared=False, projector=True) 
-          
         projections_gt = batch_dict_ema['projected_features_gt']
         projections_gt = projections_gt.view(*batch_dict_ema['gt_boxes'].shape[:2], -1)
         
@@ -186,6 +182,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         for ix in inds:
 
             gt_boxes = batch_dict_ema['gt_boxes'][ix]
+            gt_conf_preds = batch_dict_ema['gt_conf_scores'][ix]
             nonzero_mask = torch.logical_not(torch.eq(gt_boxes, 0).all(dim=-1))
             if nonzero_mask.sum() == 0:
                 print(f"no gt instance in frame {batch_dict_ema['frame_id'][ix]}")
@@ -207,6 +204,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             bank_inputs['labels'].append(gt_labels[valid_gts_mask])
             bank_inputs['ins_ids'].append(ins_idxs[valid_gts_mask])
             bank_inputs['smpl_ids'].append(smpl_id)
+            bank_inputs['conf_scores'].append(gt_conf_preds[nonzero_mask][valid_gts_mask])
         return bank_inputs    
 
 
@@ -291,6 +289,8 @@ class PVRCNN_SSL(Detector3DTemplate):
         # batch_dict = self._get_fixed_batch_dict()
         lbl_inds, ulb_inds = self._prep_batch_dict(batch_dict)
         batch_dict_ema = self._split_batch(batch_dict, tag='ema')
+        if self.model_cfg['ROI_HEAD'].get('ENABLE_ORI_LPCONT_LOSS', False)==True and self.model_cfg['ROI_HEAD'].get('ENABLE_LPCONT_LOSS', False)==True:
+            raise AssertionError("Both LPCONT and ORI_LPCONT loss cannot be enabled at the same time")
 
         if self.supervise_mode == 1:
             pl_boxes, pl_conf_scores, pl_sem_scores, pl_sem_logits, pl_rect_scores, masks = self._get_gt_pls(batch_dict_ema, ulb_inds)
@@ -399,13 +399,15 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         if self.model_cfg['ROI_HEAD'].get('ENABLE_LPCONT_LOSS', False):
             if not bank.is_initialized():
-                lpcont_loss = None            
+                lpcont_loss = None
+                sim_matrix = None            
             else:
                 CLIP_CE = self.model_cfg['ROI_HEAD'].get('CLIP_CE', False)
-                lpcont_loss = self._get_lpcont_loss_pls(batch_dict, bank, pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes,CLIP_CE)
+                lpcont_loss, sim_matrix = self._get_lpcont_loss_pls(batch_dict, bank, pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes,CLIP_CE)
             if lpcont_loss is not None:
                 loss += lpcont_loss * self.model_cfg['ROI_HEAD']['LPCONT_LOSS_WEIGHT']
                 tb_dict['lpcont_loss'] = lpcont_loss.item()
+                tb_dict['sim_matrix'] = sim_matrix
 
         tb_dict_ = self._prep_tb_dict(tb_dict, lbl_inds, ulb_inds, reduce_loss_fn)
         tb_dict_.update(**pl_count_dict)
@@ -531,19 +533,6 @@ class PVRCNN_SSL(Detector3DTemplate):
         B, N = ori_gt_boxes.shape[:2]
         ori_pseudo_projections = ori_pseudo_projections[nonzero_ulb_mask]
         ori_labels = ori_labels[nonzero_ulb_mask]
-        # Sample pseudo projections to get uniform number 5,5,5 per batch
-        # sampled_projections, sampled_labels, topk_list = self.sample_pseudo_positives(self.pseudo_projection_dict, ori_pseudo_projections,ori_labels)
-        # ori_pseudo_projections = torch.stack(sampled_projections)
-        # ori_labels = [t if t.dim() > 0 else t.unsqueeze(0) for t in sampled_labels]
-        # ori_labels = torch.stack(ori_labels).squeeze()
-        
-        # pl_conf_scores = pl_conf_scores[masks]
-        # pl_sem_scores = pl_sem_scores[masks]
-        # pl_labels = pl_labels[masks]
-        # undo fill_with_zeros during filter_pls
-        # pl_conf_scores = pl_conf_scores[pl_conf_scores>0]
-        # pl_sem_scores = pl_sem_scores[pl_sem_scores>0]
-        # pl_labels = pl_labels[pl_labels>0]
 
         topk_list=[5,5,5]
         lp_cont_loss, sim_matrix = bank.get_lpcont_loss(ori_pseudo_projections, ori_labels, topk_list, CLIP_CE)
@@ -554,10 +543,10 @@ class PVRCNN_SSL(Detector3DTemplate):
 
     def _get_lpcont_loss_pls(self, batch_dict, bank, pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes, CLIP_CE):
         topk_list=[5,5,5]
-        lp_cont_loss,sim_matrix = bank.get_lpcont_loss_pls(pseudo_projections, pseudo_labels, topk_list,pseudo_conf_scores, CLIP_CE)
+        lp_cont_loss ,sim_matrix = bank.get_lpcont_loss_pls(pseudo_projections, pseudo_labels, topk_list,pseudo_conf_scores, CLIP_CE)
         if lp_cont_loss is None:
             return
-        return lp_cont_loss
+        return lp_cont_loss, sim_matrix
 
     @staticmethod
     def _prep_tb_dict(tb_dict, lbl_inds, ulb_inds, reduce_loss_fn):
@@ -573,8 +562,8 @@ class PVRCNN_SSL(Detector3DTemplate):
                 sim_matrix = sim_matrix.detach().cpu().numpy()
                 labels = labels.cpu().numpy()
                 pseudo_labels = pseudo_labels.cpu().numpy()
-                fig, ax = plt.subplots(figsize=(4, 4))
-                ax.imshow(sim_matrix, interpolation='nearest', cmap=plt.cm.Blues,vmin=0, vmax=1)
+                fig, ax = plt.subplots(figsize=(8, 8))
+                ax.imshow(sim_matrix, interpolation='nearest', cmap=plt.cm.Blues) #(sim_matrix, interpolation='nearest', cmap=plt.cm.Blues,vmin=0, vmax=1)
                 ax.set_title(" LPCont Similarity matrix")
                 fig.colorbar(ax.imshow(sim_matrix, interpolation='nearest', cmap=plt.cm.Blues))
                 x_tick_marks = np.arange(len(pseudo_labels))

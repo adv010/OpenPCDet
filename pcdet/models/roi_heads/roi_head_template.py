@@ -91,7 +91,7 @@ class RoIHeadTemplate(nn.Module):
             fc_layers.extend([
                 nn.Conv1d(pre_channel, fc_list[k], kernel_size=1, bias=False),
                 nn.BatchNorm1d(fc_list[k]),
-                nn.ReLU()
+                nn.ReLU() #nn.LeakyReLU(negative_slope=0.01) 
             ])
             pre_channel = fc_list[k]
             if self.model_cfg.DP_RATIO >= 0 and k == 0:
