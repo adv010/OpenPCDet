@@ -562,7 +562,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                 sim_matrix = sim_matrix.detach().cpu().numpy()
                 labels = labels.cpu().numpy()
                 pseudo_labels = pseudo_labels.cpu().numpy()
-                fig, ax = plt.subplots(figsize=(8, 8))
+                fig, ax = plt.subplots(figsize=(max(8, len(pseudo_labels) * 0.2), max(8, len(labels) * 0.2))) 
                 ax.imshow(sim_matrix, interpolation='nearest', cmap=plt.cm.Blues) #(sim_matrix, interpolation='nearest', cmap=plt.cm.Blues,vmin=0, vmax=1)
                 ax.set_title(" LPCont Similarity matrix")
                 fig.colorbar(ax.imshow(sim_matrix, interpolation='nearest', cmap=plt.cm.Blues))
@@ -574,6 +574,8 @@ class PVRCNN_SSL(Detector3DTemplate):
                 ax.set_yticklabels(labels)
                 ax.set_ylabel('Labeled features')
                 ax.set_xlabel('Pseudo features')
+                # ax.tick_params(axis='x', which='major', labelsize=8, rotation=45, pad=5)
+                # ax.tick_params(axis='y', which='major', labelsize=8, pad=5)
                 fig.tight_layout()
                 tb_dict_[key] = fig
 

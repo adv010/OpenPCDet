@@ -181,23 +181,48 @@ class FeatureBank(Metric):
     def is_initialized(self):
         return self.initialized
     
-    
-    def topk_padding(self,pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores, k):
-        if pseudo_conf_scores is not None:
-            num_to_append = topk_list[k] - ((torch.nonzero(pseudo_positive_labels==(k+1)).size(0)))
-            labels = torch.tensor([(k+1)] * num_to_append).to(pseudo_positives.device)
-            pseudo_positive_labels = torch.cat((pseudo_positive_labels, labels), dim=0)
-            synthetic_samples =  self.generate_synthetic_samples(self.classwise_prototypes[k].unsqueeze(0).expand(num_to_append, -1), noise_level=0.1)
-            pseudo_positives = torch.cat((pseudo_positives, synthetic_samples),dim=0)                     
-        else:
-            num_to_append = topk_list[k] - ((torch.nonzero(pseudo_positive_labels==(k+1)).size(0)))
-            labels = torch.tensor([(k+1)] * num_to_append).to(pseudo_positives.device)
-            pseudo_positive_labels = torch.cat((pseudo_positive_labels, labels), dim=0)
-            synthetic_samples =  self.generate_synthetic_samples(self.classwise_prototypes[k].unsqueeze(0).expand(num_to_append, -1), noise_level=0.1)
-            pseudo_positives = torch.cat((pseudo_positives, synthetic_samples),dim=0)             
 
+    def topk_padding(self, pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores, class_labels=(1, 2, 3)):
+        for k, class_label in enumerate(class_labels):
+            if torch.nonzero(pseudo_positive_labels == class_label).shape[0] < topk_list[k]:
+                num_to_append = topk_list[k] - torch.nonzero(pseudo_positive_labels == class_label).shape[0]
+
+                labels = torch.tensor([class_label] * num_to_append).to(pseudo_positives.device)
+                pseudo_positive_labels = torch.cat((pseudo_positive_labels, labels), dim=0)
+                
+                synthetic_samples = self.generate_synthetic_samples(
+                    self.classwise_prototypes[k].unsqueeze(0).expand(num_to_append, -1), noise_level=0.1
+                )
+                pseudo_positives = torch.cat((pseudo_positives, synthetic_samples), dim=0)
+                if pseudo_conf_scores is not None:
+                    pseudo_conf_scores = torch.cat((pseudo_conf_scores, (0.7 * torch.ones(num_to_append).to(pseudo_positives.device))), dim=0)
         return pseudo_positive_labels, pseudo_positives, pseudo_conf_scores
-    
+
+
+    # def sample_topk(self, pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores):
+    #     class_to_index = {1: 0, 2: 1, 3: 2}  # Map class labels to list indices
+
+    #     topk_labels = []
+    #     topk_fts = []
+
+    #     for class_label in (1, 2, 3):
+    #         class_idx = torch.where(pseudo_positive_labels == class_label)[0]
+
+    #         if pseudo_conf_scores is not None:
+    #             class_conf_scores = pseudo_conf_scores.index_select(dim=0, index=class_idx)
+    #             topk_values, topk_idx = torch.topk(class_conf_scores, topk_list[class_to_index[class_label]])
+    #         else:
+    #             topk_idx = torch.topk(class_idx, topk_list[class_to_index[class_label]])[0]
+
+    #         topk_labels.append(pseudo_positive_labels.index_select(dim=0, index=topk_idx))
+    #         topk_fts.append(pseudo_positives.index_select(dim=0, index=topk_idx))
+
+    #     return torch.cat(topk_labels, dim=0), torch.cat(topk_fts, dim=0)
+
+
+
+
+
     def sample_topk(self, pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores):
         if pseudo_conf_scores is not None:
             car_idx = torch.where(pseudo_positive_labels==1)[0]
@@ -264,6 +289,7 @@ class FeatureBank(Metric):
     def generate_synthetic_samples(self, batch_tensors, noise_level=0.0001):
         noise = torch.randn_like(batch_tensors) * noise_level
         new_samples = batch_tensors + noise
+        new_samples = torch.abs(new_samples)
         return new_samples
 
     def get_lpcont_loss(self, pseudo_positives, pseudo_positive_labels, topk_list, CLIP_CE=False):
@@ -289,7 +315,6 @@ class FeatureBank(Metric):
         gathered_pseudo_positives = gathered_pseudo_tensor[:,:-1][non_zero_mask2]
         gathered_pseudo_labels = gathered_wa_labels[non_zero_mask2]
 
-
         sorted_labels, sorted_args = torch.sort(gathered_labels) #161
         sorted_prototypes = gathered_prototypes[sorted_args] # sort prototypes to arrange classwise #161
         unique_labels, counts = torch.unique(sorted_labels, return_counts=True)
@@ -298,17 +323,10 @@ class FeatureBank(Metric):
         # uniform_sorted_prototypes, uniform_sorted_labels  = self.get_uniform_samples(sorted_prototypes, sorted_labels, unique_labels, counts.min())
 
         pseudo_conf_scores = None
-        # if torch.nonzero(pseudo_positive_labels==1).shape[0] < topk_list[0]: # topk for car, pad if less than 5
-        #     pseudo_positive_labels, pseudo_positives,_ = self.topk_padding(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores, k=0) #33,256
+        sorted_pls, sorted_pseudo_positives, sorted_pseudo_conf_scores = self.topk_padding(sorted_pls, sorted_pseudo_positives, topk_list, sorted_pseudo_conf_scores)
 
-        # if torch.nonzero(pseudo_positive_labels==2).shape[0] < topk_list[1]: #topk for ped, pad if less than 5
-        #     pseudo_positive_labels, pseudo_positives,_ = self.topk_padding(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores, k=1) #35,256
+        sorted_pls, sorted_pseudo_positives = self.sample_topk(sorted_pls, sorted_pseudo_positives, topk_list, sorted_pseudo_conf_scores)
 
-        # if torch.nonzero(pseudo_positive_labels==3).shape[0] < topk_list[2]: #topk for cyc, pad if less than 5
-        #     pseudo_positive_labels, pseudo_positives,_ = self.topk_padding(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores, k=2) # 40,256
-        
-        # pseudo_topk_labels, pseudo_topk_features = self.sample_topk(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores)
-        
         label_mask = sorted_labels.unsqueeze(1)== sorted_pls.unsqueeze(0)  # Shape: 27,15
         positive_mask = label_mask #(27,15)
         negative_mask = ~label_mask #(27,15)
@@ -326,101 +344,67 @@ class FeatureBank(Metric):
         unscaled_contrastive_loss = ((positive_sum - pairwise_negative_sum)) 
         contrastive_loss = contrastive_loss +  -1 * (unscaled_contrastive_loss / (sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3))
 
-        # if CLIP_CE == True: 
-        #     padding_mask_row = padding_mask.unsqueeze(0).expand(161,-1) #161,15
-        #     positive_sum_row = sim_pos_matrix_row * positive_mask # 161,15
-        #     positive_sum_row = positive_sum_row[...,padding_mask_row] # [1449]
-            
-        #     negative_sum_row = sim_pos_matrix_row * negative_mask # 161,15
-        #     negative_sum_row = negative_sum_row[...,padding_mask_row] # [1449]
-        #     keep_positive_row = positive_sum_row.sum(dim=-1,keepdims=True).float()  # 1
-        #     keep_negative_row = negative_sum_row.sum(dim=-1,keepdims=True).float() # 1
-        #     logits_row = (keep_positive_row) / (keep_negative_row) #1
-        #     safe_mask = logits_row==0 #1 
-        #     logits_row[safe_mask] = 1#1 
-        #     log_logits_row = torch.log(logits_row).view(-1)
-        #     contrastive_loss = contrastive_loss + ((log_logits_row.sum() * -1) / (sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3))
-        #     contrastive_loss = contrastive_loss / 2
         return contrastive_loss, (sim_matrix, sorted_labels, pseudo_positive_labels)
 
     def get_lpcont_loss_pls(self, pseudo_positives, pseudo_positive_labels, topk_list, pseudo_conf_scores = None, CLIP_CE=False):
-            """
-            param pseudo_positives: Pseudo positive student features(Mk, Channel=256)
-            param topk_labels: Labels for pseudo positive student features
-            return:
-            """
-            N = len(self.prototypes)
-            contrastive_loss = torch.tensor(0.0).to(pseudo_positives.device) #contrastive_loss2 = torch.tensor(0.0).to(pseudo_positives.device)
+        """
+        param pseudo_positives: Pseudo positive student features(Mk, Channel=256)
+        param topk_labels: Labels for pseudo positive student features
+        return:
+        """
+        N = len(self.prototypes)
+        contrastive_loss = torch.tensor(0.0).to(pseudo_positives.device) #contrastive_loss2 = torch.tensor(0.0).to(pseudo_positives.device)
 
-            labeled_bank_info = torch.cat([self.prototypes, self.proto_conf_scores.unsqueeze(-1), self.proto_labels.unsqueeze(-1)], dim=-1)
-            pseudo_batch_info = torch.cat([pseudo_positives, pseudo_conf_scores.unsqueeze(-1), pseudo_positive_labels.unsqueeze(-1)], dim=-1)
+        labeled_bank_info = torch.cat([self.prototypes, self.proto_conf_scores.unsqueeze(-1), self.proto_labels.unsqueeze(-1)], dim=-1)
+        pseudo_batch_info = torch.cat([pseudo_positives, pseudo_conf_scores.unsqueeze(-1), pseudo_positive_labels.unsqueeze(-1)], dim=-1)
 
-            gathered_lbl_tensor = self.gather_tensor_pls(labeled_bank_info)
-            gathered_sa_labels = gathered_lbl_tensor[:,-1].long()
-            non_zero_mask = gathered_sa_labels != 0
-            gathered_prototypes = gathered_lbl_tensor[:,:-2][non_zero_mask]
-            gathered_labels = gathered_sa_labels[non_zero_mask]
-            gathered_conf_scores = gathered_lbl_tensor[:,-2][non_zero_mask]
-            
-            gathered_pseudo_tensor = self.gather_tensor_pls(pseudo_batch_info)
-            gathered_wa_labels = gathered_pseudo_tensor[:,-1].long()
-            non_zero_mask2 = gathered_wa_labels != 0
-            gathered_pseudo_positives = gathered_pseudo_tensor[:,:-2][non_zero_mask2]
-            gathered_pseudo_labels = gathered_wa_labels[non_zero_mask2]
-            gathered_pseudo_conf_scores = gathered_pseudo_tensor[:,-2][non_zero_mask2]
+        gathered_lbl_tensor = self.gather_tensor_pls(labeled_bank_info)
+        gathered_sa_labels = gathered_lbl_tensor[:,-1].long()
+        non_zero_mask = gathered_sa_labels != 0
+        gathered_prototypes = gathered_lbl_tensor[:,:-2][non_zero_mask]
+        gathered_labels = gathered_sa_labels[non_zero_mask]
+        gathered_conf_scores = gathered_lbl_tensor[:,-2][non_zero_mask]
+        
+        gathered_pseudo_tensor = self.gather_tensor_pls(pseudo_batch_info)
+        gathered_wa_labels = gathered_pseudo_tensor[:,-1].long()
+        non_zero_mask2 = gathered_wa_labels != 0
+        gathered_pseudo_positives = gathered_pseudo_tensor[:,:-2][non_zero_mask2]
+        gathered_pseudo_labels = gathered_wa_labels[non_zero_mask2]
+        gathered_pseudo_conf_scores = gathered_pseudo_tensor[:,-2][non_zero_mask2]
 
 
-            sorted_labels, sorted_args = torch.sort(gathered_labels) #161
-            sorted_prototypes = gathered_prototypes[sorted_args] # sort prototypes to arrange classwise #161
-            sorted_conf_scores = gathered_conf_scores[sorted_args]
-            unique_labels, counts = torch.unique(sorted_labels, return_counts=True)
-            sorted_pls, pl_args = torch.sort(gathered_pseudo_labels)
-            sorted_pseudo_positives = gathered_pseudo_positives[pl_args]
-            sorted_pseudo_conf_scores = gathered_pseudo_conf_scores[pl_args]
-            
-            # if torch.nonzero(pseudo_positive_labels==1).shape[0] < topk_list[0]: # topk for car, pad if less than 5
-            #     pseudo_positive_labels, pseudo_positives, pseudo_conf_scores = self.topk_padding(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores, k=0)
+        sorted_labels, sorted_args = torch.sort(gathered_labels) #161
+        sorted_prototypes = gathered_prototypes[sorted_args] # sort prototypes to arrange classwise #161
+        sorted_conf_scores = gathered_conf_scores[sorted_args]
+        unique_labels, counts = torch.unique(sorted_labels, return_counts=True)
+        sorted_pls, pl_args = torch.sort(gathered_pseudo_labels)
+        sorted_pseudo_positives = gathered_pseudo_positives[pl_args]
+        sorted_pseudo_conf_scores = gathered_pseudo_conf_scores[pl_args]
 
-            # if torch.nonzero(pseudo_positive_labels==2).shape[0] < topk_list[1]: #topk for ped, pad if less than 5
-            #     pseudo_positive_labels, pseudo_positives, pseudo_conf_scores = self.topk_padding(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores, k=1)
+        sorted_pls, sorted_pseudo_positives, sorted_pseudo_conf_scores = self.topk_padding(sorted_pls, sorted_pseudo_positives, topk_list, sorted_pseudo_conf_scores)
 
-            # if torch.nonzero(pseudo_positive_labels==3).shape[0] < topk_list[2]: #topk for cyc, pad if less than 5
-            #     pseudo_positive_labels, pseudo_positives, pseudo_conf_scores = self.topk_padding(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores, k=2)
+        sorted_pls, sorted_pseudo_positives = self.sample_topk(sorted_pls, sorted_pseudo_positives, topk_list, sorted_pseudo_conf_scores)
 
-            # pseudo_topk_labels, pseudo_topk_features = self.sample_topk(pseudo_positive_labels, pseudo_positives, topk_list, pseudo_conf_scores)
+        label_mask = sorted_labels.unsqueeze(1)== sorted_pls.unsqueeze(0)
+        positive_mask = label_mask
+        negative_mask = ~label_mask           
+        ## Product of conf_scores and pseudo_conf_scores as weights for negative_mask
+        # confidence_weights = sorted_conf_scores.unsqueeze(1) * sorted_pseudo_conf_scores.unsqueeze(0)
 
-            label_mask = sorted_labels.unsqueeze(1)== sorted_pls.unsqueeze(0)
-            positive_mask = label_mask
-            negative_mask = ~label_mask           
-            ## Product of conf_scores and pseudo_conf_scores as weights for negative_mask
-            # confidence_weights = sorted_conf_scores.unsqueeze(1) * sorted_pseudo_conf_scores.unsqueeze(0)
-
-            norm_sorted_prototypes = F.normalize(sorted_prototypes, dim=-1)
-            norm_pseudo_topk_features = F.normalize(sorted_pseudo_positives, dim=-1)
-            sim_matrix = norm_sorted_prototypes @ norm_pseudo_topk_features.t()
-            temperature = nn.Parameter(torch.tensor(1.0),requires_grad=False)
-            exp_sim_pos_matrix = torch.exp(sim_matrix * positive_mask /temperature)
-            # sim_pos_matrix_row = exp_sim_pos_matrix.clone()
-            positive_sum = torch.log(exp_sim_pos_matrix).sum() # Sum of log(exp(positives))
-            # number_negative_pairs = negative_mask.sum(dim=0, keepdims=True) # Number of negative pairs for each positive
-            negative_sum = (torch.exp(sim_matrix) * negative_mask).sum(dim=0, keepdims=True) #/((unique_labels.size(0)-1) * counts.min())
-            pairwise_negatives_sum =  torch.log(negative_sum).sum()
-            unscaled_contrastive_loss = ((positive_sum - pairwise_negatives_sum)) 
-            contrastive_loss = contrastive_loss +  -1 * (unscaled_contrastive_loss / (sorted_prototypes.size(0) * norm_pseudo_topk_features.size(0) * 3))            
-            
-            # if CLIP_CE == True:
-            #     padding_mask_row = padding_mask.unsqueeze(0).expand(161,-1) # 161,15
-            #     positive_sum_row = exp_sim_pos_matrix_row * positive_mask * padding_mask_row # 161,15
-            #     negative_sum_row = exp_sim_pos_matrix_row * negative_mask * padding_mask_row #161,15
-            #     keep_positive_row = positive_sum_row.sum(dim=-1,keepdims=True).float() #161
-            #     keep_negative_row = negative_sum_row.sum(dim=-1,keepdims=True).float() #161
-            #     logits_row = (keep_positive_row) / (keep_negative_row) #1
-            #     safe_mask = torch.eq(logits_row,0)
-            #     logits_row[safe_mask] = 1
-            #     log_logits_row = torch.log(logits_row).view(-1) #
-            #     contrastive_loss = contrastive_loss + ((log_logits_row.sum() * -1) / (sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3))
-            #     contrastive_loss = contrastive_loss / 2
-            return contrastive_loss, (sim_matrix, sorted_labels, pseudo_positive_labels)
+        norm_sorted_prototypes = F.normalize(sorted_prototypes, dim=-1)
+        norm_pseudo_topk_features = F.normalize(sorted_pseudo_positives, dim=-1)
+        sim_matrix = norm_sorted_prototypes @ norm_pseudo_topk_features.t()
+        temperature = nn.Parameter(torch.tensor(1.0),requires_grad=False)
+        exp_sim_pos_matrix = torch.exp(sim_matrix * positive_mask /temperature)
+        # sim_pos_matrix_row = exp_sim_pos_matrix.clone()
+        positive_sum = torch.log(exp_sim_pos_matrix).sum() # Sum of log(exp(positives))
+        # number_negative_pairs = negative_mask.sum(dim=0, keepdims=True) # Number of negative pairs for each positive
+        negative_sum = (torch.exp(sim_matrix) * negative_mask).sum(dim=0, keepdims=True) #/((unique_labels.size(0)-1) * counts.min())
+        pairwise_negatives_sum =  torch.log(negative_sum).sum()
+        unscaled_contrastive_loss = ((positive_sum - pairwise_negatives_sum)) 
+        contrastive_loss = contrastive_loss +  -1 * (unscaled_contrastive_loss / (sorted_prototypes.size(0) * norm_pseudo_topk_features.size(0) * 3))            
+        
+        return contrastive_loss, (sim_matrix, sorted_labels, sorted_pls)
 
     def gather_tensors(self, tensor):
             """
