@@ -5,7 +5,16 @@ from ...ops.pointnet2.pointnet2_stack import pointnet2_modules as pointnet2_stac
 from ...utils import common_utils
 from .roi_head_template import RoIHeadTemplate
 from pcdet.utils.prototype_utils import feature_bank_registry
+import numpy as np
+from sklearn.metrics import precision_score
 
+def _arr2dict(array, ignore_zeros=False, ignore_nan=False):
+    def should_include(value):
+        return not ((ignore_zeros and value == 0) or (ignore_nan and np.isnan(value)))
+
+    classes = ['Car', 'Pedestrian', 'Cyclist']
+    classes = classes[:len(array)] 
+    return {cls: array[cind] for cind, cls in enumerate(classes) if should_include(array[cind])}
 
 class PVRCNNHead(RoIHeadTemplate):
     def __init__(self, input_channels, model_cfg, num_class=1,
@@ -42,6 +51,9 @@ class PVRCNNHead(RoIHeadTemplate):
             input_channels=pre_channel,
             output_channels=self.box_coder.code_size * self.num_class,
             fc_list=self.model_cfg.REG_FC
+        )
+        self.sem_cls_layers = self.make_fc_layers(
+            input_channels=pre_channel, output_channels=3, fc_list=self.model_cfg.CLS_FC
         )
 
         self.print_loss_when_eval = False
@@ -179,6 +191,17 @@ class PVRCNNHead(RoIHeadTemplate):
             return shared_gts, projection_gts
         return pooled_features
 
+    def evaluate_prototype_rcnn_sem_precision(self, prototypes, prototype_labels, tb_dict):
+        tb_dict = {} if tb_dict is None else tb_dict
+        prototype_labels = prototype_labels - 1
+        prototypes = prototypes.unsqueeze(-1)
+        with torch.no_grad():
+            prototype_preds = self.sem_cls_layers(prototypes)
+        prototype_preds = prototype_preds.squeeze(-1)
+        precision = precision_score(prototype_labels.view(-1).cpu().numpy(), prototype_preds.max(dim=-1)[1].view(-1).cpu().numpy(), average=None, labels=range(3), zero_division=np.nan)
+        precision_tb_dict = {'rcnn_sem_cls_precision': _arr2dict(precision)}
+        tb_dict.update(precision_tb_dict)
+        return tb_dict
     
 
     def forward(self, batch_dict, test_only=False):
@@ -211,7 +234,8 @@ class PVRCNNHead(RoIHeadTemplate):
             shared_pooled_gts, proj_pooled_gts = self.pool_features(batch_dict, use_gtboxes=True, shared=True, projector=True)
             batch_dict['shared_features_gt'] = shared_pooled_gts
             batch_dict['projected_features_gt'] = proj_pooled_gts
-
+            rcnn_sem_cls = self.sem_cls_layers(proj_pooled_gts.detach()).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C) #pass projections to obtain rcnn_sem_cls
+            batch_dict['batch_sem_cls_preds'] = rcnn_sem_cls.view(-1, 3)
         '''Pooling block using RoIs'''
         pooled_features = self.pool_features(batch_dict,use_gtboxes=False)
         batch_size_rcnn = pooled_features.shape[0]
@@ -237,8 +261,6 @@ class PVRCNNHead(RoIHeadTemplate):
                 for index in range(batch_size):
                     batch_mask = index
                     cls_preds = batch_gt_cls_preds[batch_mask]
-                    sigmoided =  torch.sigmoid(cls_preds)
-                    softplused = torch.nn.functional.softplus(cls_preds)
                     gt_rcnn_conf_preds.append(torch.sigmoid(cls_preds))
                 gt_rcnn_conf_preds = torch.cat(gt_rcnn_conf_preds, dim=0)   
                 batch_dict['gt_conf_scores'] = gt_rcnn_conf_preds.view(B,N,-1)
@@ -252,6 +274,7 @@ class PVRCNNHead(RoIHeadTemplate):
             batch_dict['batch_cls_preds'] = batch_cls_preds
             batch_dict['batch_box_preds'] = batch_box_preds
             batch_dict['cls_preds_normalized'] = False
+            
             # Temporarily add infos to targets_dict for metrics
             targets_dict['batch_box_preds'] = batch_box_preds
 

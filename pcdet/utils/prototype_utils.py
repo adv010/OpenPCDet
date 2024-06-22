@@ -286,6 +286,10 @@ class FeatureBank(Metric):
     #     car_centroids = torch.from_numpy(centroids).to(car_prototypes.device)
     #     return car_centroids, car_labels[:9]
 
+
+    def get_computed_protos(self):
+        return self.prototypes, self.proto_labels, self.num_updates
+    
     def generate_synthetic_samples(self, batch_tensors, noise_level=0.0001):
         noise = torch.randn_like(batch_tensors) * noise_level
         new_samples = batch_tensors + noise
