@@ -217,19 +217,19 @@ class AnchorHeadTemplate(nn.Module):
             dir_loss = dir_loss.reshape(batch_size, -1).sum(-1)
 
             dir_loss = dir_loss * self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS['dir_weight']
-            box_loss += dir_loss
+
             tb_dict['rpn_loss_dir'] = dir_loss
 
-        return box_loss, tb_dict
+        return box_loss, dir_loss, tb_dict
 
     def get_loss(self):
         cls_loss, tb_dict = self.get_cls_layer_loss()
-        box_loss, tb_dict_box = self.get_box_reg_layer_loss()
+        box_loss, dir_loss, tb_dict_box = self.get_box_reg_layer_loss()
         tb_dict.update(tb_dict_box)
-        rpn_loss = cls_loss + box_loss
+        rpn_loss = cls_loss + box_loss + dir_loss
 
         tb_dict['rpn_loss'] = rpn_loss
-        return cls_loss, box_loss, tb_dict
+        return cls_loss, box_loss, dir_loss, tb_dict
 
     def generate_predicted_boxes(self, batch_size, cls_preds, box_preds, dir_cls_preds=None):
         """

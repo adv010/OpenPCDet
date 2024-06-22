@@ -369,7 +369,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                 self._add_teacher_scores(batch_dict, batch_dict_ema, ulb_inds)
 
         disp_dict = {}
-        loss_rpn_cls, loss_rpn_box, tb_dict = self.pv_rcnn.dense_head.get_loss()
+        loss_rpn_cls, loss_rpn_box, loss_rpn_dir, tb_dict = self.pv_rcnn.dense_head.get_loss()
         loss_point, tb_dict = self.pv_rcnn.point_head.get_loss(tb_dict)
         loss_rcnn_cls, loss_rcnn_box, tb_dict = self.pv_rcnn.roi_head.get_loss(tb_dict)
 
@@ -378,6 +378,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         reduce_loss_fn = getattr(torch, self.model_cfg.REDUCE_LOSS, 'sum')
         loss += reduce_loss_fn(loss_rpn_cls[lbl_inds, ...])
         loss += reduce_loss_fn(loss_rpn_box[lbl_inds, ...]) + reduce_loss_fn(loss_rpn_box[ulb_inds, ...]) * self.unlabeled_weight
+        loss += reduce_loss_fn(loss_rpn_dir[lbl_inds, ...]) + reduce_loss_fn(loss_rpn_dir[ulb_inds, ...]) * self.unlabeled_weight
         loss += reduce_loss_fn(loss_point[lbl_inds, ...])
         loss += reduce_loss_fn(loss_rcnn_cls[lbl_inds, ...])
         loss += reduce_loss_fn(loss_rcnn_box[lbl_inds, ...])
@@ -426,12 +427,12 @@ class PVRCNN_SSL(Detector3DTemplate):
             loss += ulb_loss_cls_dist
             tb_dict_.update(cls_dist_dict)
 
-        rcnn_loss_sem_cls_lb, sem_cls_tb_dict_lb = self.get_box_sem_cls_layer_loss_lbl(batch_dict)
-        loss += rcnn_loss_sem_cls_lb
-        tb_dict_.update(sem_cls_tb_dict_lb)
-        rcnn_loss_sem_cls_ulb, sem_cls_tb_dict_ulb = self.get_box_sem_cls_layer_loss_ulb(ori_pseudo_projections, ori_labels, ori_gt_boxes)
-        loss += rcnn_loss_sem_cls_ulb
-        tb_dict_.update(sem_cls_tb_dict_ulb)
+        # rcnn_loss_sem_cls_lb, sem_cls_tb_dict_lb = self.get_box_sem_cls_layer_loss_lbl(batch_dict)
+        # loss += rcnn_loss_sem_cls_lb
+        # tb_dict_.update(sem_cls_tb_dict_lb)
+        # rcnn_loss_sem_cls_ulb, sem_cls_tb_dict_ulb = self.get_box_sem_cls_layer_loss_ulb(ori_pseudo_projections, ori_labels, ori_gt_boxes)
+        # loss += rcnn_loss_sem_cls_ulb
+        # tb_dict_.update(sem_cls_tb_dict_ulb)
 
         if self.model_cfg.get('STORE_SCORES_IN_PKL', False):
             self.dump_statistics(batch_dict, ulb_inds)
@@ -566,41 +567,41 @@ class PVRCNN_SSL(Detector3DTemplate):
             return
         return lp_cont_loss, sim_matrix
 
-    def get_box_sem_cls_layer_loss_lbl(self, batch_dict):
-        gt_boxes = torch.chunk(batch_dict['gt_boxes'],2,dim=0)[0]
-        gt_boxes = gt_boxes.view(-1,8)
-        nonzero_mask = torch.logical_not(torch.eq(gt_boxes, 0).all(dim=-1))
-        sem_cls_preds = torch.chunk(batch_dict['batch_sem_cls_preds'],2,dim=0)[0]
-        gt_boxes = gt_boxes[nonzero_mask]
-        sem_cls_targets = gt_boxes[:, -1].long() - 1
-        sem_cls_preds = sem_cls_preds[nonzero_mask]
-        batch_loss_cls = F.cross_entropy(sem_cls_preds, sem_cls_targets, reduction='mean')
-        loss_sem_cls_lbl = batch_loss_cls
-        precision_lbl = precision_score(sem_cls_targets.view(-1).cpu().numpy(), sem_cls_preds.max(dim=-1)[1].view(-1).cpu().numpy(), average=None, labels=range(3), zero_division=np.nan)
-        tb_dict = {
-            'loss_sem_cls_lbl': loss_sem_cls_lbl,
-            'rcnn_sem_cls_precision_lbl': _arr2dict2(precision_lbl),
-        }
-        return loss_sem_cls_lbl, tb_dict
+    # def get_box_sem_cls_layer_loss_lbl(self, batch_dict):
+    #     gt_boxes = torch.chunk(batch_dict['gt_boxes'],2,dim=0)[0]
+    #     gt_boxes = gt_boxes.view(-1,8)
+    #     nonzero_mask = torch.logical_not(torch.eq(gt_boxes, 0).all(dim=-1))
+    #     sem_cls_preds = torch.chunk(batch_dict['batch_sem_cls_preds'],2,dim=0)[0]
+    #     gt_boxes = gt_boxes[nonzero_mask]
+    #     sem_cls_targets = gt_boxes[:, -1].long() - 1
+    #     sem_cls_preds = sem_cls_preds[nonzero_mask]
+    #     batch_loss_cls = F.cross_entropy(sem_cls_preds, sem_cls_targets, reduction='mean')
+    #     loss_sem_cls_lbl = batch_loss_cls
+    #     precision_lbl = precision_score(sem_cls_targets.view(-1).cpu().numpy(), sem_cls_preds.max(dim=-1)[1].view(-1).cpu().numpy(), average=None, labels=range(3), zero_division=np.nan)
+    #     tb_dict = {
+    #         'loss_sem_cls_lbl': loss_sem_cls_lbl,
+    #         'rcnn_sem_cls_precision_lbl': _arr2dict2(precision_lbl),
+    #     }
+    #     return loss_sem_cls_lbl, tb_dict
 
-    def get_box_sem_cls_layer_loss_ulb(self, ori_projections, ori_labels, ori_gt_boxes):
-        nonzero_mask = torch.logical_not(torch.eq(ori_gt_boxes, 0).all(dim=-1))
-        ori_projections = ori_projections[nonzero_mask]
-        ori_labels = ori_labels[nonzero_mask]
-        ori_sem_preds = self.pv_rcnn.roi_head.sem_cls_layers(ori_projections.unsqueeze(-1))
-        sem_cls_targets = ori_labels.long() - 1
-        ori_sem_preds = ori_sem_preds.squeeze(-1)
-        sem_cls_preds= ori_sem_preds.view(-1, 3)
-        sem_cls_targets = sem_cls_targets.view(-1)
-        batch_loss_cls = F.cross_entropy(sem_cls_preds, sem_cls_targets, reduction='mean')
-        loss_sem_cls_ulb = batch_loss_cls
-        precision_ulb = precision_score(sem_cls_targets.view(-1).cpu().numpy(), sem_cls_preds.max(dim=-1)[1].view(-1).cpu().numpy(), average=None, labels=range(3), zero_division=np.nan)       
-        tb_dict = {
-            'loss_sem_cls_ulb': loss_sem_cls_ulb,
-            'rcnn_sem_cls_precision_ulb': _arr2dict2(precision_ulb),
-            'ulb_projection_classes' : _arr2dict2(np.unique(ori_labels.cpu().numpy(), return_counts=True)[1])
-        }
-        return loss_sem_cls_ulb, tb_dict
+    # def get_box_sem_cls_layer_loss_ulb(self, ori_projections, ori_labels, ori_gt_boxes):
+    #     nonzero_mask = torch.logical_not(torch.eq(ori_gt_boxes, 0).all(dim=-1))
+    #     ori_projections = ori_projections[nonzero_mask]
+    #     ori_labels = ori_labels[nonzero_mask]
+    #     ori_sem_preds = self.pv_rcnn.roi_head.sem_cls_layers(ori_projections.unsqueeze(-1))
+    #     sem_cls_targets = ori_labels.long() - 1
+    #     ori_sem_preds = ori_sem_preds.squeeze(-1)
+    #     sem_cls_preds= ori_sem_preds.view(-1, 3)
+    #     sem_cls_targets = sem_cls_targets.view(-1)
+    #     batch_loss_cls = F.cross_entropy(sem_cls_preds, sem_cls_targets, reduction='mean')
+    #     loss_sem_cls_ulb = batch_loss_cls
+    #     precision_ulb = precision_score(sem_cls_targets.view(-1).cpu().numpy(), sem_cls_preds.max(dim=-1)[1].view(-1).cpu().numpy(), average=None, labels=range(3), zero_division=np.nan)       
+    #     tb_dict = {
+    #         'loss_sem_cls_ulb': loss_sem_cls_ulb,
+    #         'rcnn_sem_cls_precision_ulb': _arr2dict2(precision_ulb),
+    #         'ulb_projection_classes' : _arr2dict2(np.unique(ori_labels.cpu().numpy(), return_counts=True)[1])
+    #     }
+    #     return loss_sem_cls_ulb, tb_dict
 
     @staticmethod
     def _prep_tb_dict(tb_dict, lbl_inds, ulb_inds, reduce_loss_fn):
@@ -905,9 +906,3 @@ class PVRCNN_SSL(Detector3DTemplate):
                 logger.info('Not updated weight %s: %s' % (key, str(state_dict[key].shape)))
 
         logger.info('==> Done (loaded %d/%d)' % (len(update_model_state), len(self.state_dict())))
-
-
-        # tb_dict.update(sem_cls_tb_dict_lb)
-        # tb_dict.update(sem_cls_tb_dict_ulb)
-        # rcnn_loss_sem_cls_lb, sem_cls_tb_dict_lb = self.get_box_sem_cls_layer_loss_lbl(self.forward_ret_dict)
-        # rcnn_loss_sem_cls_ulb, sem_cls_tb_dict_ulb = self.get_box_sem_cls_layer_loss_ulb(self.forward_ret_dict)
