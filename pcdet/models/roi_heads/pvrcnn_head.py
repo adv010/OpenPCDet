@@ -74,9 +74,7 @@ class PVRCNNHead(RoIHeadTemplate):
                 elif self.model_cfg.STG2_PROJ_FC_CFGS.ACTIVATION == 'Linear':
                     pass          
                 pre_channel = self.model_cfg.STG2_PROJ_FC[k]
-
-                if k != self.model_cfg.STG2_PROJ_FC.__len__() - 1 and self.model_cfg.STG2_PROJ_FC_CFGS.DP_RATIO > 0:
-                    stg2_projector_list.append(nn.Dropout(self.model_cfg.DP_RATIO))
+                stg2_projector_list.append(nn.Dropout(self.model_cfg.DP_RATIO))
 
             self.stg2_projector = nn.Sequential(*stg2_projector_list)
             
@@ -119,7 +117,7 @@ class PVRCNNHead(RoIHeadTemplate):
         if use_gtboxes:
             rois = batch_dict['gt_boxes'][..., 0:7] 
         elif use_ori_gtboxes:
-            rois = batch_dict['ori_gt_boxes'][..., 0:7].clone()
+            rois = batch_dict['ori_gt_boxes'][..., 0:7]
         else:
             rois = batch_dict['rois']
         point_coords = batch_dict["point_coords"]
@@ -191,7 +189,19 @@ class PVRCNNHead(RoIHeadTemplate):
             return shared_gts, projection_gts
         return pooled_features
 
-    def evaluate_prototype_rcnn_sem_precision(self, prototypes, prototype_labels, tb_dict):
+    def evaluate_class_prototype_rcnn_sem_precision(self, prototypes, prototype_labels, tb_dict):
+        tb_dict = {} if tb_dict is None else tb_dict
+        prototype_labels = prototype_labels - 1
+        prototypes = prototypes.unsqueeze(-1)
+        with torch.no_grad():
+            prototype_preds = self.sem_cls_layers(prototypes)
+        prototype_preds = prototype_preds.squeeze(-1)
+        class_labels = prototype_labels.unique()
+        precision = precision_score(class_labels.view(-1).cpu().numpy(), prototype_preds.max(dim=-1)[1].view(-1).cpu().numpy(), average=None, labels=range(3), zero_division=np.nan)
+        precision_tb_dict = {'rcnn_sem_cls_classproto_lbl_precision': _arr2dict(precision)}
+        return precision_tb_dict
+    
+    def evaluate_instance_prototype_rcnn_sem_precision(self, prototypes, prototype_labels, tb_dict):
         tb_dict = {} if tb_dict is None else tb_dict
         prototype_labels = prototype_labels - 1
         prototypes = prototypes.unsqueeze(-1)
@@ -199,10 +209,8 @@ class PVRCNNHead(RoIHeadTemplate):
             prototype_preds = self.sem_cls_layers(prototypes)
         prototype_preds = prototype_preds.squeeze(-1)
         precision = precision_score(prototype_labels.view(-1).cpu().numpy(), prototype_preds.max(dim=-1)[1].view(-1).cpu().numpy(), average=None, labels=range(3), zero_division=np.nan)
-        precision_tb_dict = {'rcnn_sem_cls_precision': _arr2dict(precision)}
-        tb_dict.update(precision_tb_dict)
-        return tb_dict
-    
+        precision_tb_dict = {'rcnn_sem_cls_instproto_lbl_precision': _arr2dict(precision)}
+        return precision_tb_dict
 
     def forward(self, batch_dict, test_only=False):
         """
@@ -234,8 +242,8 @@ class PVRCNNHead(RoIHeadTemplate):
             shared_pooled_gts, proj_pooled_gts = self.pool_features(batch_dict, use_gtboxes=True, shared=True, projector=True)
             batch_dict['shared_features_gt'] = shared_pooled_gts
             batch_dict['projected_features_gt'] = proj_pooled_gts
-            rcnn_sem_cls = self.sem_cls_layers(proj_pooled_gts.detach()).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C) #pass projections to obtain rcnn_sem_cls
-            batch_dict['batch_sem_cls_preds'] = rcnn_sem_cls.view(-1, 3)
+            rcnn_sem_cls = self.sem_cls_layers(proj_pooled_gts).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C) #pass projections to obtain rcnn_sem_cls
+            batch_dict['batch_sem_cls_preds'] = rcnn_sem_cls.view(-1, 3)        
         '''Pooling block using RoIs'''
         pooled_features = self.pool_features(batch_dict,use_gtboxes=False)
         batch_size_rcnn = pooled_features.shape[0]
