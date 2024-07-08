@@ -437,7 +437,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                 tb_dict['lpcont_loss'] = lpcont_loss.item()
                 tb_dict['sim_matrix'] = sim_matrix
         if self.model_cfg['ROI_HEAD'].get('ORI_SEM_CE', False) and bank.is_initialized():
-                loss += loss_sem_cls_ori
+                loss += 5 * loss_sem_cls_ori
                 tb_dict['loss_sem_cls_ori'] = tb_dicts['loss_sem_cls_ori']
                 tb_dict['rcnn_sem_cls_precision_ori'] = tb_dicts['rcnn_sem_cls_precision_ori']
                 tb_dict['ori_gt_classes'] = tb_dicts['ori_gt_classes']

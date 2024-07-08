@@ -160,7 +160,7 @@ MODEL:
         NAME: PVRCNNHead
         CLASS_AGNOSTIC: True
         ENABLE_VIS: False
-        ENABLE_PROTOTYPING: True
+        ENABLE_PROTOTYPING: False
         ENABLE_PROTO_CONTRASTIVE_LOSS: False
         PROTO_CONTRASTIVE_LOSS_WEIGHT: 1.0
         ENABLE_SOFT_TEACHER: False
@@ -170,16 +170,17 @@ MODEL:
         STG2_PROJ_FC_CFGS:
             ACTIVATION: ReLU
             BATCH_NORM: True
-            DP_RATIO: 0.3
+            DP_RATIO: 0.5
         ENABLE_LPCONT_LOSS: False
-        ENABLE_ORI_LPCONT_LOSS: True
+        ENABLE_ORI_LPCONT_LOSS: False
         CLIP_CE: False
         LPCONT_TEMPERATURE: 1.0
-        LPCONT_LOSS_WEIGHT: 0.1
+        LPCONT_LOSS_WEIGHT: 1.0
         LPCONT_CONF_THRESH: [0.5, 0.25, 0.25]
         CLS_FC: [256, 256]
         REG_FC: [256, 256]
         DP_RATIO: 0.3
+        ORI_SEM_CE: False
 
         NMS_CONFIG:
             TRAIN:

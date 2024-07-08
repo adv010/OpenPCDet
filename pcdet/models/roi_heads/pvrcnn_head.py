@@ -121,8 +121,13 @@ class PVRCNNHead(RoIHeadTemplate):
         else:
             rois = batch_dict['rois']
         point_coords = batch_dict["point_coords"]
-        point_features = batch_dict["point_features"]
-        point_cls_scores = batch_dict["point_cls_scores"]
+
+        if use_ori_gtboxes:
+            point_features = batch_dict['point_features_2']
+            point_cls_scores = batch_dict['point_cls_scores_2']
+        else:
+            point_features = batch_dict["point_features"]
+            point_cls_scores = batch_dict["point_cls_scores"]
 
         point_features = point_features * point_cls_scores.view(-1, 1)
 

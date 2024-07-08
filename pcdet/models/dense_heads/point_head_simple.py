@@ -78,6 +78,7 @@ class PointHeadSimple(PointHeadTemplate):
             point_features = batch_dict['point_features_before_fusion']
         else:
             point_features = batch_dict['point_features']
+            # batch_dict['point_features_2'] = point_features.clone()
         point_cls_preds = self.cls_layers(point_features)  # (total_points, num_class)
 
         ret_dict = {
@@ -87,6 +88,7 @@ class PointHeadSimple(PointHeadTemplate):
 
         point_cls_scores = torch.sigmoid(point_cls_preds)
         batch_dict['point_cls_scores'], _ = point_cls_scores.max(dim=-1)
+        batch_dict['point_cls_scores_2'], _ = point_cls_scores.clone().max(dim=-1)
 
         # should not use gt_roi for pseudo label generation
         if (self.training or self.print_loss_when_eval) and not test_only:
