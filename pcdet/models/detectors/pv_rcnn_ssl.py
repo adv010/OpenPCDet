@@ -418,15 +418,15 @@ class PVRCNN_SSL(Detector3DTemplate):
                 sim_matrix =  None
             else:
                 CLIP_CE = self.model_cfg['ROI_HEAD'].get('CLIP_CE', False)
-                ori_lpcont_loss, sim_matrix, positive_sum, negative_sum = self._get_lpcont_loss(batch_dict, bank, ori_pseudo_projections, ori_labels, ori_gt_boxes,CLIP_CE)
+                ori_lpcont_loss, sim_matrix, sim_metrics_dict = self._get_lpcont_loss(batch_dict, bank, ori_pseudo_projections, ori_labels, ori_gt_boxes,CLIP_CE)
+               
             if ori_lpcont_loss is not None:
                 loss += ori_lpcont_loss * self.model_cfg['ROI_HEAD']['LPCONT_LOSS_WEIGHT']
                 tb_dict['ori_lpcont_loss'] = ori_lpcont_loss.item()
-                tb_dict['log_positives_sum'] = positive_sum.item()
-                tb_dict['log_negatives_sum'] = negative_sum.item()
                 tb_dict['sim_matrix'] = sim_matrix
                 tb_dict['rcnn_sem_cls_precision_ori'] = tb_dicts['rcnn_sem_cls_precision_ori']
                 tb_dict['ori_gt_classes'] = tb_dicts['ori_gt_classes']
+                
         if self.model_cfg['ROI_HEAD'].get('ENABLE_LPCONT_LOSS', False):
             if not bank.is_initialized():
                 lpcont_loss = None
@@ -448,6 +448,10 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         tb_dict_ = self._prep_tb_dict(tb_dict, lbl_inds, ulb_inds, reduce_loss_fn)
         tb_dict_.update(**pl_count_dict)
+        try:
+            tb_dict_.update(**sim_metrics_dict)
+        except UnboundLocalError:
+            pass
 
         if self.model_cfg['ROI_HEAD'].get('ENABLE_ULB_CLS_DIST_LOSS', False):
             roi_head_forward_dict = self.pv_rcnn.roi_head.forward_ret_dict
@@ -570,10 +574,11 @@ class PVRCNN_SSL(Detector3DTemplate):
 
     def _get_lpcont_loss(self, batch_dict, bank, ori_pseudo_projections, ori_labels, ori_gt_boxes, CLIP_CE):
         topk_list=[5,5,5]
-        lp_cont_loss, sim_matrix, positive_sum, negative_sum = bank.get_lpcont_loss_ori(ori_pseudo_projections, ori_labels, topk_list, batch_dict['cur_epoch'],CLIP_CE)
+        # lp_cont_loss, sim_matrix, sim_metrics_dict= bank.get_lpcont_loss_ori(ori_pseudo_projections, ori_labels, topk_list, batch_dict['cur_epoch'],CLIP_CE)
+        lp_cont_loss, sim_matrix, sim_metrics_dict = bank.get_lpcont_loss_splitori(ori_pseudo_projections, ori_labels, topk_list, batch_dict['cur_epoch'],CLIP_CE)
         if lp_cont_loss is None:
             return
-        return lp_cont_loss, sim_matrix, positive_sum, negative_sum
+        return lp_cont_loss, sim_matrix, sim_metrics_dict
 
 
     def _get_lpcont_loss_pls(self, batch_dict, bank, pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes, CLIP_CE):
