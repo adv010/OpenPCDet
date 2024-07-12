@@ -137,7 +137,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             ori_labels = ori_labels[nonzero_mask]
             ori_rcnn_sem_preds = self.pv_rcnn.roi_head.sem_cls_layers(ori_projections.unsqueeze(-1))
             sem_cls_targets = ori_labels.long() - 1
-            ori_rcnn_sem_preds = ori_rcnn_sem_preds.squeeze(-1)
+            ori_rcnn_sem_preds = ori_rcnn_sem_preds.detach().squeeze(-1)
             sem_cls_preds= ori_rcnn_sem_preds.view(-1, 3)
             sem_cls_targets = sem_cls_targets.view(-1)
             precision_ori = precision_score(sem_cls_targets.view(-1).cpu().numpy(), sem_cls_preds.max(dim=-1)[1].view(-1).cpu().numpy(), average=None, labels=range(3), zero_division="warn")       
@@ -418,10 +418,12 @@ class PVRCNN_SSL(Detector3DTemplate):
                 sim_matrix =  None
             else:
                 CLIP_CE = self.model_cfg['ROI_HEAD'].get('CLIP_CE', False)
-                ori_lpcont_loss, sim_matrix = self._get_lpcont_loss(batch_dict, bank, ori_pseudo_projections, ori_labels, ori_gt_boxes,CLIP_CE)
+                ori_lpcont_loss, sim_matrix, positive_sum, negative_sum = self._get_lpcont_loss(batch_dict, bank, ori_pseudo_projections, ori_labels, ori_gt_boxes,CLIP_CE)
             if ori_lpcont_loss is not None:
                 loss += ori_lpcont_loss * self.model_cfg['ROI_HEAD']['LPCONT_LOSS_WEIGHT']
                 tb_dict['ori_lpcont_loss'] = ori_lpcont_loss.item()
+                tb_dict['log_positives_sum'] = positive_sum.item()
+                tb_dict['log_negatives_sum'] = negative_sum.item()
                 tb_dict['sim_matrix'] = sim_matrix
                 tb_dict['rcnn_sem_cls_precision_ori'] = tb_dicts['rcnn_sem_cls_precision_ori']
                 tb_dict['ori_gt_classes'] = tb_dicts['ori_gt_classes']
@@ -431,11 +433,13 @@ class PVRCNN_SSL(Detector3DTemplate):
                 sim_matrix = None            
             else:
                 CLIP_CE = self.model_cfg['ROI_HEAD'].get('CLIP_CE', False)
-                lpcont_loss, sim_matrix = self._get_lpcont_loss_pls(batch_dict, bank, pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes,CLIP_CE)
+                lpcont_loss, sim_matrix, positive_sum, negative_sum = self._get_lpcont_loss_pls(batch_dict, bank, pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes,CLIP_CE)
             if lpcont_loss is not None:
                 loss += lpcont_loss * self.model_cfg['ROI_HEAD']['LPCONT_LOSS_WEIGHT']
                 tb_dict['lpcont_loss'] = lpcont_loss.item()
                 tb_dict['sim_matrix'] = sim_matrix
+                tb_dict['log_positives_sum'] = positive_sum.item()
+                tb_dict['log_negatives_sum'] = negative_sum.item()
         if self.model_cfg['ROI_HEAD'].get('ORI_SEM_CE', False) and bank.is_initialized():
                 loss += 5 * loss_sem_cls_ori
                 tb_dict['loss_sem_cls_ori'] = tb_dicts['loss_sem_cls_ori']
@@ -566,31 +570,31 @@ class PVRCNN_SSL(Detector3DTemplate):
 
     def _get_lpcont_loss(self, batch_dict, bank, ori_pseudo_projections, ori_labels, ori_gt_boxes, CLIP_CE):
         topk_list=[5,5,5]
-        lp_cont_loss, sim_matrix = bank.get_lpcont_loss_ori(ori_pseudo_projections, ori_labels, topk_list, CLIP_CE)
+        lp_cont_loss, sim_matrix, positive_sum, negative_sum = bank.get_lpcont_loss_ori(ori_pseudo_projections, ori_labels, topk_list, batch_dict['cur_epoch'],CLIP_CE)
         if lp_cont_loss is None:
             return
-        return lp_cont_loss, sim_matrix
+        return lp_cont_loss, sim_matrix, positive_sum, negative_sum
 
 
     def _get_lpcont_loss_pls(self, batch_dict, bank, pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes, CLIP_CE):
         topk_list=[5,5,5]
-        lp_cont_loss ,sim_matrix = bank.get_lpcont_loss_pls(pseudo_projections, pseudo_labels, topk_list,pseudo_conf_scores, CLIP_CE)
+        lp_cont_loss, sim_matrix, positive_sum, negative_sum = bank.get_lpcont_loss_pls(pseudo_projections, pseudo_labels, topk_list,pseudo_conf_scores, CLIP_CE)
         if lp_cont_loss is None:
             return
-        return lp_cont_loss, sim_matrix
+        return lp_cont_loss, sim_matrix, positive_sum, negative_sum
 
 
     @staticmethod
     def _prep_tb_dict(tb_dict, lbl_inds, ulb_inds, reduce_loss_fn):
         tb_dict_ = {}
         for key in tb_dict.keys():
-            if key == 'proto_cont_loss' or key == 'ori_lpcont_loss' or key=='lpcont_loss' or key=='loss_sem_cls_ori' or key=='rcnn_sem_cls_precision_ori' or key=='ori_gt_classes':
+            if key == 'proto_cont_loss' or key == 'ori_lpcont_loss' or key=='lpcont_loss' or key=='loss_sem_cls_ori' or key=='rcnn_sem_cls_precision_ori' or key=='ori_gt_classes' or key=='log_positives_mean' or key=='log_negatives_mean':
                 tb_dict_[key] = tb_dict[key]
             elif 'loss' in key or 'acc' in key or 'point_pos_num' in key:
                 tb_dict_[f"{key}_labeled"] = reduce_loss_fn(tb_dict[key][lbl_inds, ...])
                 tb_dict_[f"{key}_unlabeled"] = reduce_loss_fn(tb_dict[key][ulb_inds, ...])
             elif 'sim_matrix' in key:
-                sim_matrix, labels, pseudo_labels = tb_dict[key]
+                sim_matrix, labels, pseudo_labels, proto_conf_scores = tb_dict[key]
                 sim_matrix = sim_matrix.detach().cpu().numpy()
                 labels = labels.cpu().numpy()
                 pseudo_labels = pseudo_labels.cpu().numpy()
@@ -606,7 +610,10 @@ class PVRCNN_SSL(Detector3DTemplate):
                 ax.set_yticklabels(labels)
                 ax.set_ylabel('Labeled features')
                 ax.set_xlabel('Pseudo features')
-                fig.tight_layout()
+                # for i in range(len(labels)):
+                #     ax.text(len(pseudo_labels), i, f'{proto_conf_scores[i]:.2f}', va='center', ha='left', color='black', fontsize=4)
+                plt.subplots_adjust(left=0.2, right=0.8, top=0.9, bottom=0.1)
+                # fig.tight_layout()
                 tb_dict_[key] = fig
             else:
                 tb_dict_[key] = tb_dict[key]
@@ -839,15 +846,15 @@ class PVRCNN_SSL(Detector3DTemplate):
         checkpoint = torch.load(filename, map_location=loc_type)
         model_state_disk = checkpoint['model_state']
 
-        filename_semcls = '/mnt/data/adat01/adv_OpenPCDet/output/cfgs/kitti_models/pv_rcnn/pretrain_instance_id_rcnn_sem_cls_precision2/ckpt/checkpoint_epoch_56.pth'
-        if not os.path.isfile(filename_semcls):
-            raise FileNotFoundError
-        checkpoint_rcnn_sem_cls = torch.load(filename_semcls, map_location=loc_type)
-        model_state_disk_semcls = checkpoint_rcnn_sem_cls['model_state']
-        print("Loading sem_cls_layers from '/mnt/data/adat01/adv_OpenPCDet/output/cfgs/kitti_models/pv_rcnn/pretrain_instance_id_rcnn_sem_cls_precision2/ckpt/checkpoint_epoch_56.pth")
-        target_cls_keys = ['roi_head.sem_cls_layers.0.weight', 'roi_head.sem_cls_layers.1.weight', 'roi_head.sem_cls_layers.1.bias', 'roi_head.sem_cls_layers.1.running_mean', 'roi_head.sem_cls_layers.1.running_var', 'roi_head.sem_cls_layers.1.num_batches_tracked', 'roi_head.sem_cls_layers.4.weight', 'roi_head.sem_cls_layers.5.weight', 'roi_head.sem_cls_layers.5.bias', 'roi_head.sem_cls_layers.5.running_mean', 'roi_head.sem_cls_layers.5.running_var', 'roi_head.sem_cls_layers.5.num_batches_tracked', 'roi_head.sem_cls_layers.7.weight', 'roi_head.sem_cls_layers.7.bias']
-        if 'version' in checkpoint:
-            logger.info('==> Checkpoint trained from version: %s' % checkpoint['version'])
+        # filename_semcls = '/mnt/data/adat01/adv_OpenPCDet/output/cfgs/kitti_models/pv_rcnn/pretrain_instance_id_rcnn_sem_cls_precision2/ckpt/checkpoint_epoch_56.pth'
+        # if not os.path.isfile(filename_semcls):
+        #     raise FileNotFoundError
+        # checkpoint_rcnn_sem_cls = torch.load(filename_semcls, map_location=loc_type)
+        # model_state_disk_semcls = checkpoint_rcnn_sem_cls['model_state']
+        # print("Loading sem_cls_layers from '/mnt/data/adat01/adv_OpenPCDet/output/cfgs/kitti_models/pv_rcnn/pretrain_instance_id_rcnn_sem_cls_precision2/ckpt/checkpoint_epoch_56.pth")
+        # target_cls_keys = ['roi_head.sem_cls_layers.0.weight', 'roi_head.sem_cls_layers.1.weight', 'roi_head.sem_cls_layers.1.bias', 'roi_head.sem_cls_layers.1.running_mean', 'roi_head.sem_cls_layers.1.running_var', 'roi_head.sem_cls_layers.1.num_batches_tracked', 'roi_head.sem_cls_layers.4.weight', 'roi_head.sem_cls_layers.5.weight', 'roi_head.sem_cls_layers.5.bias', 'roi_head.sem_cls_layers.5.running_mean', 'roi_head.sem_cls_layers.5.running_var', 'roi_head.sem_cls_layers.5.num_batches_tracked', 'roi_head.sem_cls_layers.7.weight', 'roi_head.sem_cls_layers.7.bias']
+        # if 'version' in checkpoint:
+        #     logger.info('==> Checkpoint trained from version: %s' % checkpoint['version'])
 
         update_model_state = {}
         for key, val in model_state_disk.items():
@@ -862,17 +869,17 @@ class PVRCNN_SSL(Detector3DTemplate):
             if new_key in self.state_dict() and self.state_dict()[new_key].shape == model_state_disk[key].shape:
                 update_model_state[new_key] = val
        
-        for keys,vals in model_state_disk_semcls.items():
-            if keys in target_cls_keys: #roi_head.sem_cls_layers.0.weight
-                new_keys = 'pv_rcnn.' + keys
-                if new_keys in self.state_dict() and self.state_dict()[new_keys].shape == model_state_disk_semcls[keys].shape:
-                    update_model_state[new_keys] = vals
-                new_keys = 'pv_rcnn_ema.' + keys
-                if new_keys in self.state_dict() and self.state_dict()[new_keys].shape == model_state_disk_semcls[keys].shape:
-                    update_model_state[new_keys] = vals
-                new_keys = keys
-                if new_keys in self.state_dict() and self.state_dict()[new_keys].shape == model_state_disk_semcls[keys].shape:
-                    update_model_state[new_keys] = vals
+        # for keys,vals in model_state_disk_semcls.items():
+        #     if keys in target_cls_keys: #roi_head.sem_cls_layers.0.weight
+        #         new_keys = 'pv_rcnn.' + keys
+        #         if new_keys in self.state_dict() and self.state_dict()[new_keys].shape == model_state_disk_semcls[keys].shape:
+        #             update_model_state[new_keys] = vals
+        #         new_keys = 'pv_rcnn_ema.' + keys
+        #         if new_keys in self.state_dict() and self.state_dict()[new_keys].shape == model_state_disk_semcls[keys].shape:
+        #             update_model_state[new_keys] = vals
+        #         new_keys = keys
+        #         if new_keys in self.state_dict() and self.state_dict()[new_keys].shape == model_state_disk_semcls[keys].shape:
+        #             update_model_state[new_keys] = vals
 
         state_dict = self.state_dict()
         state_dict.update(update_model_state)
