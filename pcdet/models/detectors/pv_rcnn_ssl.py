@@ -137,7 +137,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             ori_labels = ori_labels[nonzero_mask]
             ori_rcnn_sem_preds = self.pv_rcnn.roi_head.sem_cls_layers(ori_projections.unsqueeze(-1))
             sem_cls_targets = ori_labels.long() - 1
-            ori_rcnn_sem_preds = ori_rcnn_sem_preds.detach().squeeze(-1)
+            ori_rcnn_sem_preds = ori_rcnn_sem_preds.squeeze(-1)
             sem_cls_preds= ori_rcnn_sem_preds.view(-1, 3)
             sem_cls_targets = sem_cls_targets.view(-1)
             precision_ori = precision_score(sem_cls_targets.view(-1).cpu().numpy(), sem_cls_preds.max(dim=-1)[1].view(-1).cpu().numpy(), average=None, labels=range(3), zero_division="warn")       
@@ -433,13 +433,12 @@ class PVRCNN_SSL(Detector3DTemplate):
                 sim_matrix = None            
             else:
                 CLIP_CE = self.model_cfg['ROI_HEAD'].get('CLIP_CE', False)
-                lpcont_loss, sim_matrix, positive_sum, negative_sum = self._get_lpcont_loss_pls(batch_dict, bank, pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes,CLIP_CE)
+                lpcont_loss, sim_matrix, sim_metrics_dict = self._get_lpcont_loss_pls(batch_dict, bank, pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes,CLIP_CE)
             if lpcont_loss is not None:
                 loss += lpcont_loss * self.model_cfg['ROI_HEAD']['LPCONT_LOSS_WEIGHT']
                 tb_dict['lpcont_loss'] = lpcont_loss.item()
                 tb_dict['sim_matrix'] = sim_matrix
-                tb_dict['log_positives_sum'] = positive_sum.item()
-                tb_dict['log_negatives_sum'] = negative_sum.item()
+                tb_dict['sim_metrics_dict'] = sim_metrics_dict
         if self.model_cfg['ROI_HEAD'].get('ORI_SEM_CE', False) and bank.is_initialized():
                 loss += 5 * loss_sem_cls_ori
                 tb_dict['loss_sem_cls_ori'] = tb_dicts['loss_sem_cls_ori']
@@ -583,10 +582,10 @@ class PVRCNN_SSL(Detector3DTemplate):
 
     def _get_lpcont_loss_pls(self, batch_dict, bank, pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes, CLIP_CE):
         topk_list=[5,5,5]
-        lp_cont_loss, sim_matrix, positive_sum, negative_sum = bank.get_lpcont_loss_pls(pseudo_projections, pseudo_labels, topk_list,pseudo_conf_scores, CLIP_CE)
+        lp_cont_loss, sim_matrix, sim_metrics_dict = bank.get_lpcont_loss_pls(pseudo_projections, pseudo_labels, topk_list,pseudo_conf_scores, CLIP_CE)
         if lp_cont_loss is None:
             return
-        return lp_cont_loss, sim_matrix, positive_sum, negative_sum
+        return lp_cont_loss, sim_matrix, sim_metrics_dict
 
 
     @staticmethod

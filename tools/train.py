@@ -4,7 +4,7 @@ import glob
 import os
 from pathlib import Path
 from test import repeat_eval_ckpt
-
+import time
 import torch
 import torch.nn as nn
 from tensorboardX import SummaryWriter
@@ -100,6 +100,10 @@ def parse_config():
 def main():
 
     args, cfg = parse_config()
+    '''Queuing jobs'''
+    # sleep_duration_seconds = 6 * 60 * 60
+    # print(f"Sleeping for {sleep_duration_seconds} seconds...")
+    # time.sleep(sleep_duration_seconds)
     if args.launcher == 'none':
         dist_train = False
         total_gpus = 1
