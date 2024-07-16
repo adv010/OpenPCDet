@@ -355,7 +355,7 @@ class FeatureBank(Metric):
     #     sim_metrics_dict['negative_sum_mean'] = negative_sum_mean
     #     return contrastive_loss,  (sim_matrix, sorted_labels, sorted_pls, proto_conf_scores), sim_metrics_dict
 
-    def get_lpcont_loss_splitori(self, pseudo_positives, pseudo_positive_labels, topk_list, epoch, CLIP_CE=False):
+    def get_lpcont_loss_splitori(self, pseudo_positives, pseudo_positive_labels, topk_list, epoch, LPCONT_CLASS_WEIGHTING=False):
         """
         param pseudo_positives: Pseudo positive student features(Mk, Channel=256)
         param topk_labels: Labels for pseudo positive student features
@@ -445,14 +445,16 @@ class FeatureBank(Metric):
         negative_sum = (torch.exp(sim_matrix) * negative_mask).sum(dim=0, keepdims=True) #/((unique_labels.size(0)-1) * counts.min())
         pairwise_negative_sum =  torch.log(negative_sum).sum()
         # negative_sum_mean = pairwise_negative_sum.mean()
-        unscaled_contrastive_loss = weighted_positive_sum - pairwise_negative_sum
-        #weighted_contrastive_loss = weighted_positive_sum - pairwise_negative_sum
+        if LPCONT_CLASS_WEIGHTING==True:
+            unscaled_contrastive_loss = weighted_positive_sum - pairwise_negative_sum
+        else:
+            unscaled_contrastive_loss = positive_sum - pairwise_negative_sum
         # unscaled_contrastive_loss = positive_sum 
         contrastive_loss = contrastive_loss +  -1 * (unscaled_contrastive_loss / (sorted_prototypes.size(0) * pseudo_topk_features.size(0) * 3))
         return contrastive_loss,  (sim_matrix, sorted_labels, sorted_pls, proto_conf_scores), sim_metrics_dict
 
 
-    def get_lpcont_loss_pls(self, pseudo_positives, pseudo_positive_labels, topk_list, pseudo_conf_scores = None, CLIP_CE=False):
+    def get_lpcont_loss_pls(self, pseudo_positives, pseudo_positive_labels, topk_list, pseudo_conf_scores = None, LPCONT_CLASS_WEIGHTING=False):
         """
         param pseudo_positives: Pseudo positive student features(Mk, Channel=256)
         param topk_labels: Labels for pseudo positive student features
@@ -460,7 +462,7 @@ class FeatureBank(Metric):
         """
         N = len(self.prototypes)
         contrastive_loss = torch.tensor(0.0).to(pseudo_positives.device) #contrastive_loss2 = torch.tensor(0.0).to(pseudo_positives.device)
-
+        weighted_positive_sum = torch.tensor(0.0).to(pseudo_positives.device)       
         labeled_bank_info = torch.cat([self.prototypes, self.proto_conf_scores.unsqueeze(-1), self.proto_labels.unsqueeze(-1)], dim=-1)
         pseudo_batch_info = torch.cat([pseudo_positives, pseudo_conf_scores.unsqueeze(-1), pseudo_positive_labels.unsqueeze(-1)], dim=-1)
 
@@ -503,56 +505,64 @@ class FeatureBank(Metric):
         norm_sorted_prototypes = F.normalize(sorted_prototypes, dim=-1)
         norm_pseudo_topk_features = F.normalize(sorted_pseudo_positives, dim=-1)
         sim_matrix = norm_sorted_prototypes @ norm_pseudo_topk_features.t()
-        sim_matrix_metrics = sim_matrix.detach().cpu().numpy()
-        self.temperature = 0.9
+        self.temperature = 1.0
         exp_sim_pos_matrix = torch.exp(sim_matrix * positive_mask /self.temperature)
         # sim_pos_matrix_row = exp_sim_pos_matrix.clone()
         unique_classes = torch.unique(sorted_pls)
-
+        sim_matrix_metrics = sim_matrix.detach().cpu().numpy()
         sim_metrics_dict = {}
 
         if 1 in unique_classes.tolist():
             car_mask = sorted_labels==1
             car_mask_pl = sorted_pls==1
-            car_indices = torch.nonzero(car_mask).squeeze(1).cpu().numpy()
-            car_neg_indices = torch.nonzero(~car_mask).squeeze(1).cpu().numpy()
-            car_indices_pl = torch.nonzero(car_mask_pl).squeeze(1).cpu().numpy()
-            car_neg_indices_pl = torch.nonzero(~car_mask_pl).squeeze(1).cpu().numpy()
-            sim_car_negatives_mean = sim_matrix_metrics[np.meshgrid(car_neg_indices,car_neg_indices_pl)[0], np.meshgrid(car_neg_indices,car_neg_indices_pl)[1]].mean()
-            sim_car_positives_mean = sim_matrix_metrics[np.meshgrid(car_indices,car_indices_pl)[0], np.meshgrid(car_indices,car_indices_pl)[1]].mean()
+            car_indices = torch.nonzero(car_mask).squeeze(1)
+            car_neg_indices = torch.nonzero(~car_mask).squeeze(1)
+            car_indices_pl = torch.nonzero(car_mask_pl).squeeze(1)
+            car_neg_indices_pl = torch.nonzero(~car_mask_pl).squeeze(1)
+            sim_car_negatives_mean = sim_matrix_metrics[np.meshgrid(car_neg_indices.detach().cpu().numpy(),car_neg_indices_pl.detach().cpu().numpy())[0], np.meshgrid(car_neg_indices.detach().cpu().numpy(),car_neg_indices_pl.detach().cpu().numpy())[1]].mean()
+            sim_car_positives_mean = sim_matrix_metrics[np.meshgrid(car_indices.detach().cpu().numpy(),car_indices_pl.detach().cpu().numpy())[0], np.meshgrid(car_indices.detach().cpu().numpy(),car_indices_pl.detach().cpu().numpy())[1]].mean()
             sim_metrics_dict['sim_car_negatives_mean'] = sim_car_negatives_mean
             sim_metrics_dict['sim_car_positives_mean'] = sim_car_positives_mean
+            sim_car_positives = (1/car_indices.shape[0])*sim_matrix[torch.meshgrid(car_indices,car_indices_pl)[0], torch.meshgrid(car_indices,car_indices_pl)[1]]
+            weighted_positive_sum += sim_car_positives.sum()
 
         if 2 in unique_classes.tolist():
             ped_mask = sorted_labels==2
             ped_mask_pl = sorted_pls==2
-            ped_indices = torch.nonzero(ped_mask).squeeze(1).cpu().numpy()
-            ped_neg_indices = torch.nonzero(~ped_mask).squeeze(1).cpu().numpy()
-            ped_indices_pl = torch.nonzero(ped_mask_pl).squeeze(1).cpu().numpy()
-            ped_neg_indices_pl = torch.nonzero(~ped_mask_pl).squeeze(1).cpu().numpy()
-            sim_ped_negatives_mean = sim_matrix_metrics[np.meshgrid(ped_neg_indices,ped_neg_indices_pl)[0], np.meshgrid(ped_neg_indices,ped_neg_indices_pl)[1]].mean()
-            sim_ped_positives_mean = sim_matrix_metrics[np.meshgrid(ped_indices,ped_indices_pl)[0], np.meshgrid(ped_indices,ped_indices_pl)[1]].mean()
+            ped_indices = torch.nonzero(ped_mask).squeeze(1)
+            ped_neg_indices = torch.nonzero(~ped_mask).squeeze(1)
+            ped_indices_pl = torch.nonzero(ped_mask_pl).squeeze(1)
+            ped_neg_indices_pl = torch.nonzero(~ped_mask_pl).squeeze(1)
+            sim_ped_negatives_mean = sim_matrix_metrics[np.meshgrid(ped_neg_indices.detach().cpu().numpy(),ped_neg_indices_pl.detach().cpu().numpy())[0], np.meshgrid(ped_neg_indices.detach().cpu().numpy(),ped_neg_indices_pl.detach().cpu().numpy())[1]].mean()
+            sim_ped_positives_mean = sim_matrix_metrics[np.meshgrid(ped_indices.detach().cpu().numpy(),ped_indices_pl.detach().cpu().numpy())[0], np.meshgrid(ped_indices.detach().cpu().numpy(),ped_indices_pl.detach().cpu().numpy())[1]].mean()
             sim_metrics_dict['sim_ped_negatives_mean'] = sim_ped_negatives_mean
             sim_metrics_dict['sim_ped_positives_mean'] = sim_ped_positives_mean
-        
+            sim_ped_positives = (1/ped_indices.shape[0])*sim_matrix[torch.meshgrid(ped_indices,ped_indices_pl)[0], torch.meshgrid(ped_indices,ped_indices_pl)[1]]
+            weighted_positive_sum += sim_ped_positives.sum()
+
         if 3 in unique_classes.tolist():
             cyc_mask = sorted_labels==3
             cyc_mask_pl = sorted_pls==3
-            cyc_indices = torch.nonzero(cyc_mask).squeeze(1).cpu().numpy()
-            cyc_neg_indices = torch.nonzero(~cyc_mask).squeeze(1).cpu().numpy()
-            cyc_indices_pl = torch.nonzero(cyc_mask_pl).squeeze(1).cpu().numpy()
-            cyc_neg_indices_pl = torch.nonzero(~cyc_mask_pl).squeeze(1).cpu().numpy()
-            sim_cyc_negatives_mean = sim_matrix_metrics[np.meshgrid(cyc_neg_indices,cyc_neg_indices_pl)[0], np.meshgrid(cyc_neg_indices,cyc_neg_indices_pl)[1]].mean()
-            sim_cyc_positives_mean = sim_matrix_metrics[np.meshgrid(cyc_indices,cyc_indices_pl)[0], np.meshgrid(cyc_indices,cyc_indices_pl)[1]].mean()
+            cyc_indices = torch.nonzero(cyc_mask).squeeze(1)
+            cyc_neg_indices = torch.nonzero(~cyc_mask).squeeze(1)
+            cyc_indices_pl = torch.nonzero(cyc_mask_pl).squeeze(1)
+            cyc_neg_indices_pl = torch.nonzero(~cyc_mask_pl).squeeze(1)
+            sim_cyc_negatives_mean = sim_matrix_metrics[np.meshgrid(cyc_neg_indices.detach().cpu().numpy(),cyc_neg_indices_pl.detach().cpu().numpy())[0], np.meshgrid(cyc_neg_indices.detach().cpu().numpy(),cyc_neg_indices_pl.detach().cpu().numpy())[1]].mean()
+            sim_cyc_positives_mean = sim_matrix_metrics[np.meshgrid(cyc_indices.detach().cpu().numpy(),cyc_indices_pl.detach().cpu().numpy())[0], np.meshgrid(cyc_indices.detach().cpu().numpy(),cyc_indices_pl.detach().cpu().numpy())[1]].mean()
             sim_metrics_dict['sim_cyc_negatives_mean'] = sim_cyc_negatives_mean
             sim_metrics_dict['sim_cyc_positives_mean'] = sim_cyc_positives_mean
-                
+            sim_cyc_positives = (1/cyc_indices.shape[0])*sim_matrix[torch.meshgrid(cyc_indices,cyc_indices_pl)[0], torch.meshgrid(cyc_indices,cyc_indices_pl)[1]]
+            weighted_positive_sum += sim_cyc_positives.sum()         
+
         positive_sum = torch.log(exp_sim_pos_matrix).sum() # Sum of log(exp(positives))
         # number_negative_pairs = negative_mask.sum(dim=0, keepdims=True) # Number of negative pairs for each positive
         negative_sum = (torch.exp(sim_matrix) * negative_mask).sum(dim=0, keepdims=True) #/((unique_labels.size(0)-1) * counts.min())
-        pairwise_negatives_sum =  torch.log(negative_sum).sum()
-        #unscaled_contrastive_loss = positive_sum 
-        unscaled_contrastive_loss = ((positive_sum - pairwise_negatives_sum)) 
+        pairwise_negative_sum =  torch.log(negative_sum).sum()
+        if LPCONT_CLASS_WEIGHTING==True:
+            unscaled_contrastive_loss = weighted_positive_sum - pairwise_negative_sum
+        else:
+            unscaled_contrastive_loss = positive_sum - pairwise_negative_sum
+        # unscaled_contrastive_loss = weighted_positive_sum - pairwise_negatives_sum 
         contrastive_loss = contrastive_loss +  -1 * (unscaled_contrastive_loss / (sorted_prototypes.size(0) * norm_pseudo_topk_features.size(0) * 3))            
         
         return contrastive_loss, (sim_matrix, sorted_labels, sorted_pls, sorted_conf_scores), sim_metrics_dict

@@ -417,8 +417,8 @@ class PVRCNN_SSL(Detector3DTemplate):
                 ori_lpcont_loss = None
                 sim_matrix =  None
             else:
-                CLIP_CE = self.model_cfg['ROI_HEAD'].get('CLIP_CE', False)
-                ori_lpcont_loss, sim_matrix, sim_metrics_dict = self._get_lpcont_loss(batch_dict, bank, ori_pseudo_projections, ori_labels, ori_gt_boxes,CLIP_CE)
+                LPCONT_CLASS_WEIGHTING = self.model_cfg['ROI_HEAD'].get('LPCONT_CLASS_WEIGHTING', False)
+                ori_lpcont_loss, sim_matrix, sim_metrics_dict = self._get_lpcont_loss(batch_dict, bank, ori_pseudo_projections, ori_labels, ori_gt_boxes,LPCONT_CLASS_WEIGHTING)
                
             if ori_lpcont_loss is not None:
                 loss += ori_lpcont_loss * self.model_cfg['ROI_HEAD']['LPCONT_LOSS_WEIGHT']
@@ -432,8 +432,8 @@ class PVRCNN_SSL(Detector3DTemplate):
                 lpcont_loss = None
                 sim_matrix = None            
             else:
-                CLIP_CE = self.model_cfg['ROI_HEAD'].get('CLIP_CE', False)
-                lpcont_loss, sim_matrix, sim_metrics_dict = self._get_lpcont_loss_pls(batch_dict, bank, pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes,CLIP_CE)
+                LPCONT_CLASS_WEIGHTING = self.model_cfg['ROI_HEAD'].get('LPCONT_CLASS_WEIGHTING', False)
+                lpcont_loss, sim_matrix, sim_metrics_dict = self._get_lpcont_loss_pls(batch_dict, bank, pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes,LPCONT_CLASS_WEIGHTING)
             if lpcont_loss is not None:
                 loss += lpcont_loss * self.model_cfg['ROI_HEAD']['LPCONT_LOSS_WEIGHT']
                 tb_dict['lpcont_loss'] = lpcont_loss.item()
@@ -571,18 +571,18 @@ class PVRCNN_SSL(Detector3DTemplate):
             return
         return proto_cont_loss.view(B, N)[ulb_inds][ulb_nonzero_mask].mean()
 
-    def _get_lpcont_loss(self, batch_dict, bank, ori_pseudo_projections, ori_labels, ori_gt_boxes, CLIP_CE):
+    def _get_lpcont_loss(self, batch_dict, bank, ori_pseudo_projections, ori_labels, ori_gt_boxes, LPCONT_CLASS_WEIGHTING):
         topk_list=[5,5,5]
-        # lp_cont_loss, sim_matrix, sim_metrics_dict= bank.get_lpcont_loss_ori(ori_pseudo_projections, ori_labels, topk_list, batch_dict['cur_epoch'],CLIP_CE)
-        lp_cont_loss, sim_matrix, sim_metrics_dict = bank.get_lpcont_loss_splitori(ori_pseudo_projections, ori_labels, topk_list, batch_dict['cur_epoch'],CLIP_CE)
+        # lp_cont_loss, sim_matrix, sim_metrics_dict= bank.get_lpcont_loss_ori(ori_pseudo_projections, ori_labels, topk_list, batch_dict['cur_epoch'],LPCONT_CLASS_WEIGHTING)
+        lp_cont_loss, sim_matrix, sim_metrics_dict = bank.get_lpcont_loss_splitori(ori_pseudo_projections, ori_labels, topk_list, batch_dict['cur_epoch'],LPCONT_CLASS_WEIGHTING)
         if lp_cont_loss is None:
             return
         return lp_cont_loss, sim_matrix, sim_metrics_dict
 
 
-    def _get_lpcont_loss_pls(self, batch_dict, bank, pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes, CLIP_CE):
+    def _get_lpcont_loss_pls(self, batch_dict, bank, pseudo_projections, pseudo_labels, pseudo_conf_scores, pseudo_boxes, LPCONT_CLASS_WEIGHTING):
         topk_list=[5,5,5]
-        lp_cont_loss, sim_matrix, sim_metrics_dict = bank.get_lpcont_loss_pls(pseudo_projections, pseudo_labels, topk_list,pseudo_conf_scores, CLIP_CE)
+        lp_cont_loss, sim_matrix, sim_metrics_dict = bank.get_lpcont_loss_pls(pseudo_projections, pseudo_labels, topk_list,pseudo_conf_scores, LPCONT_CLASS_WEIGHTING)
         if lp_cont_loss is None:
             return
         return lp_cont_loss, sim_matrix, sim_metrics_dict
