@@ -175,7 +175,11 @@ MODEL:
         CLS_FC: [256, 256]
         REG_FC: [256, 256]
         DP_RATIO: 0.3
-
+        STG2_PROJ_FC: [256, 256]
+        STG2_PROJ_FC_CFGS:
+            ACTIVATION: ReLU
+            BATCH_NORM: True
+            DP_RATIO: 0.5
         NMS_CONFIG:
             TRAIN:
                 NMS_TYPE: nms_gpu
@@ -277,11 +281,11 @@ MODEL:
     FEATURE_BANK_LIST:
         - NAME: gt_aug_lbl_prototypes
           BANK_SIZE: null # Determined the total number of labeled instances in all classes for each split during runtime
-          FEATURE_SIZE: 27648  # 128 * 6 * 6 * 6: 128 channels of 6x6x6 grid points
+          FEATURE_SIZE: 256  # 128 * 6 * 6 * 6: 128 channels of 6x6x6 grid points
           TEMPERATURE: 0.1
           DIRECT_UPDATE: False
           RESET_STATE_INTERVAL: 37  # 1% setting for ~3700 KITTI samples
-          MOMENTUM: 0.9
+          MOMENTUM: 0.7
           FILTER_MIN_POINTS_IN_GT: 20
     METRICS_BANK_LIST:
         - NAME: rcnn_roi_metrics

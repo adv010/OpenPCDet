@@ -66,7 +66,7 @@ def calc_mean_mAP():
         fw.write(str(exp_names))
     all_eval_results = []
     for _exp in exp_names:
-        curr_eval_list_file = os.path.join("output/cfgs/kitti_models/pv_rcnn_ssl_60", _exp, "eval/eval_with_train/eval_list_val.txt")
+        curr_eval_list_file = os.path.join("output/kitti_models/pv_rcnn_ssl_60", _exp, "eval/eval_with_train/eval_list_val.txt")
         if eval_list is None and os.path.isfile(curr_eval_list_file):
             with open(curr_eval_list_file) as f_eval:
                 eval_list = list(set(map(int, f_eval.readlines())))# take only unique entries 
@@ -78,7 +78,7 @@ def calc_mean_mAP():
 
         
         
-        curr_res_dir = os.path.join("output/cfgs/kitti_models/pv_rcnn_ssl_60", _exp)
+        curr_res_dir = os.path.join("output/kitti_models/pv_rcnn_ssl_60", _exp)
         if not os.path.isdir(curr_res_dir): 
             continue
 

@@ -12,7 +12,7 @@ class FeatureBank(Metric):
 
         super().__init__()
         self.tag = kwargs.get('NAME', None)
-
+        self.num_classes = 3 
         self.temperature = kwargs.get('TEMPERATURE')
         self.feat_size = kwargs.get('FEATURE_SIZE')
         self.bank_size = kwargs.get('BANK_SIZE')  # e.g., num. of classes or labeled instances
@@ -57,19 +57,39 @@ class FeatureBank(Metric):
             self.iterations.append(rois_iter)           # (N,)
 
     def compute(self):
-        unique_smpl_ids = torch.unique(torch.cat(self.smpl_ids))
+        try:
+            unique_smpl_ids = torch.unique(torch.cat((self.smpl_ids,), dim=0))
+        except:
+            unique_smpl_ids = torch.unique(torch.cat((self.smpl_ids), dim=0))
         if len(unique_smpl_ids) < self.reset_state_interval:
             return None
 
-        features = torch.cat(self.feats)
-        labels = torch.cat(self.labels).int()
-        ins_ids = torch.cat(self.ins_ids).int().cpu().numpy()
-        iterations = torch.cat(self.iterations).int().cpu().numpy()
+        try:
+            features = torch.cat((self.feats,), dim=0)
+            ins_ids = torch.cat((self.ins_ids,),dim=0).int().cpu().numpy()
+            labels = torch.cat((self.labels,), dim=0).int()
+            iterations = torch.cat((self.iterations,),dim=0).int().cpu().numpy()
+            ins_ids = torch.cat((self.ins_ids,), dim=0).int().cpu().numpy()
+            iterations = torch.cat((self.iterations,), dim=0).int().cpu().numpy()
+            # conf_scores = torch.cat((self.conf_scores,),dim=0)
+        except:
+            features = torch.cat((self.feats), dim=0)
+            ins_ids = torch.cat(self.ins_ids).int().cpu().numpy()
+            labels = torch.cat((self.labels), dim=0).int()
+            iterations = torch.cat(self.iterations).int().cpu().numpy()
+            ins_ids = torch.cat((self.ins_ids), dim=0).int().cpu().numpy()
+            iterations = torch.cat((self.iterations), dim=0).int().cpu().numpy()            
+            # conf_scores = torch.cat((self.conf_scores),dim=0)
+            # pl_labels = torch.cat((self.pl_labels),dim=0).int()
+
         assert len(features) == len(labels) == len(ins_ids) == len(iterations), \
-            "length of features, labels, ins_ids, and iterations should be the same"
+            "length of features, labels, ins_ids and iterations should be the same"
         sorted_ins_ids, arg_sorted_ins_ids = np.sort(ins_ids), np.argsort(ins_ids)
         unique_ins_ids, split_indices = np.unique(sorted_ins_ids, return_index=True)
+        # self.proto_conf_scores = conf_scores[arg_sorted_ins_ids[split_indices]] # Update proto_conf_scores at every compute() call -> with fresh batch's conf_scores
 
+        if not self.initialized:
+            self._init(unique_ins_ids, labels[arg_sorted_ins_ids[split_indices]])
         if not self.initialized:
             self._init(unique_ins_ids, labels[arg_sorted_ins_ids[split_indices]])
 
@@ -79,7 +99,10 @@ class FeatureBank(Metric):
         for grouped_inds in inds_groupby_ins_ids:
             grouped_inds = grouped_inds[np.argsort(iterations[grouped_inds])]
             ins_id = ins_ids[grouped_inds[0]]
-            proto_id = self.insId_protoId_mapping[ins_id]
+            try:
+                proto_id = self.insId_protoId_mapping[ins_id]
+            except KeyError:
+                pass
             assert torch.allclose(labels[grouped_inds[0]], labels[grouped_inds]), "labels should be the same for the same instance id"
 
             if not self.initialized or self.direct_update:
@@ -120,11 +143,11 @@ class FeatureBank(Metric):
         classwise_sim = cos_sim.new_zeros(input_features.shape[0], 3)
         lbs = self.proto_labels.expand_as(cos_sim).long()
         classwise_sim.scatter_add_(1, lbs, norm_cos_sim)
-        # classwise_sim.scatter_add_(1, lbs, cos_sim)
-        # protos_cls_counts = torch.bincount(self.proto_labels).view(1, -1)
-        # classwise_sim /= protos_cls_counts  # Note: not probability
         classwise_sim /= classwise_sim.mean(dim=0)
         return classwise_sim
+    
+    def get_computed_protos(self):
+        return  self.classwise_prototypes, self.prototypes, self.proto_labels, self.num_updates
 
     def get_pairwise_protos_sim_matrix(self):
         sorted_lbs, arg_sorted_lbs = torch.sort(self.proto_labels)

@@ -9,7 +9,7 @@ from pcdet.ops.iou3d_nms import iou3d_nms_utils
 from pcdet.ops.roiaware_pool3d import roiaware_pool3d_utils
 from .detector3d_template import Detector3DTemplate
 from .pv_rcnn import PVRCNN
-
+from matplotlib import pyplot as plt
 from pcdet.utils import common_utils
 from pcdet.utils.stats_utils import metrics_registry
 from pcdet.utils.prototype_utils import feature_bank_registry
@@ -70,14 +70,13 @@ class PVRCNN_SSL(Detector3DTemplate):
         }
 
     def _prep_bank_inputs(self, batch_dict, inds, num_points_threshold=20):
-        selected_batch_dict = self._clone_gt_boxes_and_feats(batch_dict)
-        with torch.no_grad():
-            batch_gt_feats = self.pv_rcnn.roi_head.pool_features(selected_batch_dict, use_gtboxes=True)
+        projections_gt = batch_dict['projected_features_gt']
+        projections_gt = projections_gt.view(*batch_dict['gt_boxes'].shape[:2], -1)
+        projections_gt = torch.chunk(projections_gt,2,dim=0)[0] #  Teacher's labeled projections on GT boxes
 
-        batch_gt_feats = batch_gt_feats.view(*batch_dict['gt_boxes'].shape[:2], -1)
         bank_inputs = defaultdict(list)
         for ix in inds:
-            gt_boxes = selected_batch_dict['gt_boxes'][ix]
+            gt_boxes = batch_dict['gt_boxes'][ix]
             nonzero_mask = torch.logical_not(torch.eq(gt_boxes, 0).all(dim=-1))
             if nonzero_mask.sum() == 0:
                 print(f"no gt instance in frame {batch_dict['frame_id'][ix]}")
@@ -85,7 +84,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             gt_boxes = gt_boxes[nonzero_mask]
             sample_mask = batch_dict['points'][:, 0].int() == ix
             points = batch_dict['points'][sample_mask, 1:4]
-            gt_feat = batch_gt_feats[ix][nonzero_mask]
+            gt_feat = projections_gt[ix][nonzero_mask]
             gt_labels = gt_boxes[:, 7].int() - 1
             gt_boxes = gt_boxes[:, :7]
             ins_idxs = batch_dict['instance_idx'][ix][nonzero_mask].int()
@@ -132,6 +131,7 @@ class PVRCNN_SSL(Detector3DTemplate):
     @staticmethod
     def _split_batch(batch_dict, tag='ema'):
         assert tag in ['ema', 'pre_gt_sample'], f'{tag} not in list [ema, pre_gt_sample]'
+        batch_dict['frame_id_ema'] = batch_dict['frame_id']
         batch_dict_out = {}
         keys = list(batch_dict.keys())
         for k in keys:
@@ -151,7 +151,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         unlabeled_inds = torch.nonzero(1 - labeled_mask).squeeze(1).long()
         batch_dict['unlabeled_inds'] = unlabeled_inds
         batch_dict['labeled_inds'] = labeled_inds
-        batch_dict['ori_unlabeled_boxes'] = batch_dict['gt_boxes'][unlabeled_inds, ...].clone().detach()
+        batch_dict['ori_unlabeled_boxes'] = batch_dict['gt_boxes'][unlabeled_inds, ...].detach()
         return labeled_inds, unlabeled_inds
 
     @staticmethod
@@ -227,7 +227,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTOTYPING', False):
             # Update the bank with student's features from augmented labeled data
             bank = feature_bank_registry.get('gt_aug_lbl_prototypes')
-            sa_gt_lbl_inputs = self._prep_bank_inputs(batch_dict, lbl_inds, bank.num_points_thresh)
+            sa_gt_lbl_inputs = self._prep_bank_inputs(batch_dict_ema, lbl_inds, bank.num_points_thresh)
             bank.update(**sa_gt_lbl_inputs, iteration=batch_dict['cur_iteration'])
 
         # For metrics calculation
@@ -264,16 +264,22 @@ class PVRCNN_SSL(Detector3DTemplate):
                 loss += proto_cont_loss * self.model_cfg['ROI_HEAD']['PROTO_CONTRASTIVE_LOSS_WEIGHT']
                 tb_dict['proto_cont_loss'] = proto_cont_loss.item()
         if self.model_cfg['ROI_HEAD'].get('ENABLE_INSTANCE_SUP_LOSS', False):
-            lbl_inst_cont_loss, supcon_classwise_loss = self._get_instance_contrastive_loss(tb_dict,batch_dict,batch_dict_ema,lbl_inds,ulb_inds)
+            lbl_inst_cont_loss, sim_matrix, sim_metrics_dict, supcon_classwise_loss = self._get_instance_contrastive_loss(tb_dict,batch_dict,batch_dict_ema,lbl_inds,ulb_inds)
             if lbl_inst_cont_loss is not None:
                 loss +=  lbl_inst_cont_loss * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT']
                 tb_dict['instloss_car'] = supcon_classwise_loss['instloss_car']
                 tb_dict['instloss_ped'] = supcon_classwise_loss['instloss_ped']
                 tb_dict['instloss_cyc'] = supcon_classwise_loss['instloss_cyc']
                 tb_dict['instloss_all'] = supcon_classwise_loss['instloss_all']
+                tb_dict['sim_matrix'] = sim_matrix
+                tb_dict['sim_metrics_dict'] = sim_metrics_dict
 
         tb_dict_ = self._prep_tb_dict(tb_dict, lbl_inds, ulb_inds, reduce_loss_fn)
         tb_dict_.update(**pl_count_dict)
+        try:
+            tb_dict_.update(**sim_metrics_dict)
+        except UnboundLocalError:
+            pass       
 
         if self.model_cfg['ROI_HEAD'].get('ENABLE_ULB_CLS_DIST_LOSS', False):
             roi_head_forward_dict = self.pv_rcnn.roi_head.forward_ret_dict
@@ -287,6 +293,12 @@ class PVRCNN_SSL(Detector3DTemplate):
         if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTOTYPING', False):
             for tag in feature_bank_registry.tags():
                 feature_bank_registry.get(tag).compute()
+            if feature_bank_registry._banks['gt_aug_lbl_prototypes']._computed is not None:
+                prototype_cls_features, prototype_id_features, prototype_id_labels, num_updates  = bank.get_computed_protos()
+                class_proto_precision_dict= self.pv_rcnn_ema.roi_head.evaluate_class_prototype_rcnn_sem_precision(prototype_cls_features, torch.unique(prototype_id_labels), tb_dict_)
+                inst_proto_precision_dict = self.pv_rcnn_ema.roi_head.evaluate_instance_prototype_rcnn_sem_precision(prototype_id_features, prototype_id_labels, tb_dict_)
+                tb_dict_.update(**class_proto_precision_dict)
+                tb_dict_.update(**inst_proto_precision_dict)
 
         # update dynamic thresh alg
         if self.thresh_alg is not None and (results := self.thresh_alg.compute()):
@@ -422,9 +434,6 @@ class PVRCNN_SSL(Detector3DTemplate):
         ids_sa_common = torch.from_numpy(ids_sa_common).to(labels_sa.device)
         ids_wa_common = torch.from_numpy(ids_wa_common).to(labels_sa.device)
 
-        instance_idx_sa_common = valid_instances.clone()
-        instance_idx_wa_common = valid_instances.clone()
-
         labels_sa_common = torch.index_select(labels_sa, 0,ids_sa_common)
         labels_wa_common = torch.index_select(labels_wa, 0, ids_wa_common)
         assert torch.equal(labels_sa_common, labels_wa_common)
@@ -453,16 +462,34 @@ class PVRCNN_SSL(Detector3DTemplate):
         if not start_epoch<=batch_dict['cur_epoch']<stop_epoch:
             return None, None
         temperature = self.model_cfg['ROI_HEAD'].get('TEMPERATURE', 1.0)
+        # temperature = 1.0
         
         sorted_pairs = self._sort_instance_pairs(batch_dict, batch_dict_wa, lbl_inds)
         
         if sorted_pairs is None:
             return None, tb_dict
 
-        labels_sa, labels_wa, embed_ft_sa, embed_ft_wa = sorted_pairs
-        batch_size_labeled = labels_sa.shape[0]
-        device = embed_ft_sa.device
-        labels = torch.cat((labels_sa,labels_wa), dim=0)
+        unsorted_labels_sa, unsorted_labels_wa, unsorted_embed_ft_sa, unsorted_embed_ft_wa = sorted_pairs
+
+        combined_embed_features = torch.cat([unsorted_embed_ft_sa.unsqueeze(1), unsorted_embed_ft_wa.unsqueeze(1)], dim=1) # B*N,num_pairs,channel_dim
+        num_pairs = combined_embed_features.shape[1]
+        assert num_pairs == 2  # contrast_count = 2
+        contrast_feature = torch.cat(torch.unbind(combined_embed_features, dim=1), dim=0)
+
+        '''Create Contrastive Mask'''
+        unsorted_labels_sa = unsorted_labels_sa.contiguous().view(-1, 1)
+        unsorted_labels_wa = unsorted_labels_wa.contiguous().view(-1, 1)
+        labels = torch.cat((unsorted_labels_sa, unsorted_labels_wa), dim=0)
+        labels_sa, sorted_args = torch.sort(labels.squeeze())
+        device = combined_embed_features.device
+        features = contrast_feature[sorted_args] 
+        normalized_features = F.normalize(features,dim=-1) # F.normalize(contrast_feature.view(-1,combined_embed_features.shape[-1]),dim=-1) 
+        sim_supcon_matrix = torch.div(torch.matmul(normalized_features, normalized_features.T),temperature)
+        sim_matrix_metrics = sim_supcon_matrix.detach().cpu().numpy()
+        mask = torch.eq(labels_sa.unsqueeze(1), labels_sa.T.unsqueeze(0)).float().to(device)
+        logits_mask = mask.fill_diagonal_(0) # mask out self-contrastive cases
+        continous_mask = (sim_supcon_matrix/2+0.5).data
+
 
         '''# Record stats of num_pairs per batch'''
         # batch_dict['lbl_inst_freq'] =  torch.bincount(labels_sa.view(-1).int().detach(),minlength = 4).tolist()[1:]       #Record freq of each class in batch
@@ -471,27 +498,12 @@ class PVRCNN_SSL(Detector3DTemplate):
         # batch_dict['negative_pairs_duped'] = [4*k*i for k,i in zip(batch_dict['negative_pairs_duped'],batch_dict['lbl_inst_freq'])]
 
 
-        combined_embed_features = torch.cat([embed_ft_sa.unsqueeze(1), embed_ft_wa.unsqueeze(1)], dim=1) # B*N,num_pairs,channel_dim
-        num_pairs = combined_embed_features.shape[1]
-        assert num_pairs == 2  # contrast_count = 2
-
-        '''Create Contrastive Mask'''
-        labels_sa = labels_sa.contiguous().view(-1, 1)
-        mask = torch.eq(labels_sa, labels_sa.T).float().to(device) # (B*N, B*N)
-        mask = mask.repeat(num_pairs, num_pairs)        # Tiling mask from N,N -> 2N, 2N)
-        logits_mask = torch.scatter(torch.ones_like(mask),1,torch.arange(batch_size_labeled * num_pairs).view(-1, 1).to(device),0)    # mask-out self-contrast cases
-        mask = mask * logits_mask
-
         ''' Visualize mask'''
         # plt.imshow(mask.cpu().numpy(), cmap='viridis')
         # plt.colorbar()
         # plt.savefig("mask.png")
         # plt.clf()
         
-        contrast_feature = torch.cat(torch.unbind(combined_embed_features, dim=1), dim=0)   # B,2,256 -> Tuple(B,256) with len(2) -> (2*B,256)
-        contrast_feature = F.normalize(contrast_feature.view(-1,combined_embed_features.shape[-1]),dim=-1) # normalized features for cosine similarity
-        sim_supcon_matrix = torch.div(torch.matmul(contrast_feature, contrast_feature.T),temperature)  # compute similarity matrix
-
         # for numerical stability
         logits_max, _ = torch.max(sim_supcon_matrix, dim=1, keepdim=True)
         logits = sim_supcon_matrix - logits_max.detach()
@@ -505,33 +517,83 @@ class PVRCNN_SSL(Detector3DTemplate):
         if instance_loss is None:
             return
 
-        instloss_car = instance_loss[labels==1].mean()
-        instloss_ped = instance_loss[labels==2].mean()
-        instloss_cyc = instance_loss[labels==3].mean()
+        instloss_car = instance_loss[labels_sa==1].mean()
+        instloss_ped = instance_loss[labels_sa==2].mean()
+        instloss_cyc = instance_loss[labels_sa==3].mean()
         instloss_all = instance_loss.mean()
+        sim_metrics_dict = {}
+        car_mask = labels_sa==1
+        car_indices = torch.nonzero(car_mask).squeeze(1)
+        car_neg_indices = torch.nonzero(~car_mask).squeeze(1)
+        car_indices_pl = torch.nonzero(car_mask).squeeze(1)
+        car_neg_indices_pl = torch.nonzero(~car_mask).squeeze(1)
+        sim_car_negatives_mean = sim_matrix_metrics[np.meshgrid(car_neg_indices.detach().cpu().numpy(),car_neg_indices_pl.detach().cpu().numpy())[0], np.meshgrid(car_neg_indices.detach().cpu().numpy(),car_neg_indices_pl.detach().cpu().numpy())[1]].mean()
+        sim_car_positives_mean = sim_matrix_metrics[np.meshgrid(car_indices.detach().cpu().numpy(),car_indices_pl.detach().cpu().numpy())[0], np.meshgrid(car_indices.detach().cpu().numpy(),car_indices_pl.detach().cpu().numpy())[1]].mean()
+        sim_metrics_dict['sim_car_negatives_mean'] = sim_car_negatives_mean
+        sim_metrics_dict['sim_car_positives_mean'] = sim_car_positives_mean
 
+        ped_mask = labels_sa==2
+        ped_indices = torch.nonzero(ped_mask).squeeze(1)
+        ped_neg_indices = torch.nonzero(~ped_mask).squeeze(1)
+        ped_indices_pl = torch.nonzero(ped_mask).squeeze(1)
+        ped_neg_indices_pl = torch.nonzero(~ped_mask).squeeze(1)
+        sim_ped_negatives_mean = sim_matrix_metrics[np.meshgrid(ped_neg_indices.detach().cpu().numpy(),ped_neg_indices_pl.detach().cpu().numpy())[0], np.meshgrid(ped_neg_indices.detach().cpu().numpy(),ped_neg_indices_pl.detach().cpu().numpy())[1]].mean()
+        sim_ped_positives_mean = sim_matrix_metrics[np.meshgrid(ped_indices.detach().cpu().numpy(),ped_indices_pl.detach().cpu().numpy())[0], np.meshgrid(ped_indices.detach().cpu().numpy(),ped_indices_pl.detach().cpu().numpy())[1]].mean()
+        sim_metrics_dict['sim_ped_negatives_mean'] = sim_ped_negatives_mean
+        sim_metrics_dict['sim_ped_positives_mean'] = sim_ped_positives_mean
+
+        cyc_mask = labels_sa==3
+        cyc_indices = torch.nonzero(cyc_mask).squeeze(1)
+        cyc_neg_indices = torch.nonzero(~cyc_mask).squeeze(1)
+        cyc_indices_pl = torch.nonzero(cyc_mask).squeeze(1)
+        cyc_neg_indices_pl = torch.nonzero(~cyc_mask).squeeze(1)
+        sim_cyc_negatives_mean = sim_matrix_metrics[np.meshgrid(cyc_neg_indices.detach().cpu().numpy(),cyc_neg_indices_pl.detach().cpu().numpy())[0], np.meshgrid(cyc_neg_indices.detach().cpu().numpy(),cyc_neg_indices_pl.detach().cpu().numpy())[1]].mean()
+        sim_cyc_positives_mean = sim_matrix_metrics[np.meshgrid(cyc_indices.detach().cpu().numpy(),cyc_indices_pl.detach().cpu().numpy())[0], np.meshgrid(cyc_indices.detach().cpu().numpy(),cyc_indices_pl.detach().cpu().numpy())[1]].mean()
+        sim_metrics_dict['sim_cyc_negatives_mean'] = sim_cyc_negatives_mean
+        sim_metrics_dict['sim_cyc_positives_mean'] = sim_cyc_positives_mean
 
         supcon_classwise_loss= {
-                        'instloss_car': instance_loss[labels==1].mean().item() * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT'],
-                        'instloss_ped': instance_loss[labels==2].mean().item() * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT'],
-                        'instloss_cyc': instance_loss[labels==2].mean().item() * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT'],
-                        'instloss_all': instance_loss.mean().item() * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT'],
+                        'instloss_car': instloss_car.item() * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT'],
+                        'instloss_ped': instloss_ped.item() * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT'],
+                        'instloss_cyc': instloss_cyc.item() * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT'],
+                        'instloss_all': instloss_all.item() * self.model_cfg['ROI_HEAD']['INSTANCE_CONTRASTIVE_LOSS_WEIGHT'],
                 }
 
-        return instloss_all, supcon_classwise_loss
+        return instloss_all, (sim_matrix_metrics, labels_sa.cpu().numpy(), labels_sa.cpu().numpy()), sim_metrics_dict, supcon_classwise_loss
 
     @staticmethod
     def _prep_tb_dict(tb_dict, lbl_inds, ulb_inds, reduce_loss_fn):
         tb_dict_ = {}
         for key in tb_dict.keys():
-            if key == 'proto_cont_loss' or key=='instloss_car' or key=='instloss_ped' or key=='instloss_cyc' or key=='instloss_all':
+            if key == 'proto_cont_loss' or key=='instloss_car' or key=='instloss_ped' or key=='instloss_cyc' or key=='instloss_all' or key=='loss_sem_cls_ori' or key=='rcnn_sem_cls_precision_ori' or key=='ori_gt_classes' or key=='log_positives_mean' or key=='log_negatives_mean':
                 tb_dict_[key] = tb_dict[key]
             elif 'loss' in key or 'acc' in key or 'point_pos_num' in key:
                 tb_dict_[f"{key}_labeled"] = reduce_loss_fn(tb_dict[key][lbl_inds, ...])
                 tb_dict_[f"{key}_unlabeled"] = reduce_loss_fn(tb_dict[key][ulb_inds, ...])
+            elif 'sim_matrix' in key:
+                sim_matrix, labels, pseudo_labels = tb_dict[key]
+                sim_matrix = sim_matrix
+                labels = labels
+                pseudo_labels = pseudo_labels
+                fig, ax = plt.subplots(figsize=(max(4, len(pseudo_labels) * 0.2), max(4, len(labels) * 0.2))) 
+                ax.imshow(sim_matrix, interpolation='nearest', cmap=plt.cm.Blues,vmin=0, vmax=1) #(sim_matrix, interpolation='nearest', cmap=plt.cm.Blues,vmin=0, vmax=1)
+                ax.set_title(" SupCon Similarity matrix")
+                fig.colorbar(ax.imshow(sim_matrix, interpolation='nearest', cmap=plt.cm.Blues))
+                x_tick_marks = np.arange(len(pseudo_labels))
+                ax.set_xticks(x_tick_marks)
+                ax.set_xticklabels(pseudo_labels, rotation=45)
+                y_tick_marks = np.arange(len(labels))   
+                ax.set_yticks(y_tick_marks)
+                ax.set_yticklabels(labels)
+                ax.set_ylabel('Labeled_wa features')
+                ax.set_xlabel('Labeled_sa features')
+                # for i in range(len(labels)):
+                #     ax.text(len(pseudo_labels), i, f'{proto_conf_scores[i]:.2f}', va='center', ha='left', color='black', fontsize=4)
+                plt.subplots_adjust(left=0.2, right=0.8, top=0.9, bottom=0.1)
+                # fig.tight_layout()
+                tb_dict_[key] = fig
             else:
                 tb_dict_[key] = tb_dict[key]
-
         return tb_dict_
 
     def _add_teacher_scores(self, batch_dict, batch_dict_ema, ulb_inds):
@@ -586,12 +648,12 @@ class PVRCNN_SSL(Detector3DTemplate):
         conf_scores_wa_ulb, sem_scores_wa_ulb = self._get_thresh_alg_inputs(pl_conf_scores, pl_sem_logits)
         thresh_inputs['conf_scores_wa'] = torch.cat([conf_scores_wa_lbl, conf_scores_wa_ulb])
         thresh_inputs['sem_scores_wa'] = torch.cat([sem_scores_wa_lbl, sem_scores_wa_ulb])
-        thresh_inputs['gt_labels_wa'] = self.pad_tensor(batch_dict_ema['gt_boxes'][..., 7:8], max_len=100).detach().clone()
-        thresh_inputs['gts_wa'] = self.pad_tensor(batch_dict_ema['gt_boxes'], max_len=100).detach().clone()
+        thresh_inputs['gt_labels_wa'] = self.pad_tensor(batch_dict_ema['gt_boxes'][..., 7:8], max_len=100).detach()
+        thresh_inputs['gts_wa'] = self.pad_tensor(batch_dict_ema['gt_boxes'], max_len=100).detach()
         pls_ws = [torch.cat([pl['pred_boxes'], pl['pred_labels'].view(-1, 1)], dim=-1) for pl in pls_teacher_wa]
-        thresh_inputs['pls_wa'] = torch.cat([self.pad_tensor(pl.unsqueeze(0), max_len=100) for pl in pls_ws]).detach().clone()
+        thresh_inputs['pls_wa'] = torch.cat([self.pad_tensor(pl.unsqueeze(0), max_len=100) for pl in pls_ws]).detach()
         # TODO: Note that the following sem_scores rect are not filtered (since adamatch is dependent on them)
-        ulb_rect_scores = torch.cat([self.pad_tensor(scores.unsqueeze(0), max_len=100) for scores in pl_rect_scores]).detach().clone()
+        ulb_rect_scores = torch.cat([self.pad_tensor(scores.unsqueeze(0), max_len=100) for scores in pl_rect_scores]).detach()
         lb_rect_scores = torch.ones_like(ulb_rect_scores)
         thresh_inputs['scores_rect'] = torch.cat([lb_rect_scores, ulb_rect_scores])
         self.thresh_alg.update(**thresh_inputs)
@@ -759,7 +821,15 @@ class PVRCNN_SSL(Detector3DTemplate):
         loc_type = torch.device('cpu') if to_cpu else None
         checkpoint = torch.load(filename, map_location=loc_type)
         model_state_disk = checkpoint['model_state']
-
+        # filename_semcls = '/mnt/data/adat01/adv_OpenPCDet/output/cfgs/kitti_models/pv_rcnn/pretrain_instance_id_rcnn_sem_cls_precision2/ckpt/checkpoint_epoch_56.pth'
+        # if not os.path.isfile(filename_semcls):
+        #     raise FileNotFoundError
+        # checkpoint_rcnn_sem_cls = torch.load(filename_semcls, map_location=loc_type)
+        # model_state_disk_semcls = checkpoint_rcnn_sem_cls['model_state']
+        # print("Loading sem_cls_layers from '/mnt/data/adat01/adv_OpenPCDet/output/cfgs/kitti_models/pv_rcnn/pretrain_instance_id_rcnn_sem_cls_precision2/ckpt/checkpoint_epoch_56.pth")
+        # target_cls_keys = ['roi_head.sem_cls_layers.0.weight', 'roi_head.sem_cls_layers.1.weight', 'roi_head.sem_cls_layers.1.bias', 'roi_head.sem_cls_layers.1.running_mean', 'roi_head.sem_cls_layers.1.running_var', 'roi_head.sem_cls_layers.1.num_batches_tracked', 'roi_head.sem_cls_layers.4.weight', 'roi_head.sem_cls_layers.5.weight', 'roi_head.sem_cls_layers.5.bias', 'roi_head.sem_cls_layers.5.running_mean', 'roi_head.sem_cls_layers.5.running_var', 'roi_head.sem_cls_layers.5.num_batches_tracked', 'roi_head.sem_cls_layers.7.weight', 'roi_head.sem_cls_layers.7.bias']
+        # if 'version' in checkpoint:
+        #     logger.info('==> Checkpoint trained from version: %s' % checkpoint['version'])
         if 'version' in checkpoint:
             logger.info('==> Checkpoint trained from version: %s' % checkpoint['version'])
 
@@ -775,6 +845,18 @@ class PVRCNN_SSL(Detector3DTemplate):
             new_key = key
             if new_key in self.state_dict() and self.state_dict()[new_key].shape == model_state_disk[key].shape:
                 update_model_state[new_key] = val
+
+        # for keys,vals in model_state_disk_semcls.items():
+        #     if keys in target_cls_keys: #roi_head.sem_cls_layers.0.weight
+        #         new_keys = 'pv_rcnn.' + keys
+        #         if new_keys in self.state_dict() and self.state_dict()[new_keys].shape == model_state_disk_semcls[keys].shape:
+        #             update_model_state[new_keys] = vals
+        #         new_keys = 'pv_rcnn_ema.' + keys
+        #         if new_keys in self.state_dict() and self.state_dict()[new_keys].shape == model_state_disk_semcls[keys].shape:
+        #             update_model_state[new_keys] = vals
+        #         new_keys = keys
+        #         if new_keys in self.state_dict() and self.state_dict()[new_keys].shape == model_state_disk_semcls[keys].shape:
+        #             update_model_state[new_keys] = vals
 
         state_dict = self.state_dict()
         state_dict.update(update_model_state)
