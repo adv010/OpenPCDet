@@ -1,14 +1,15 @@
-<img src="docs/open_mmlab.png" align="right" width="30%">
-![image](https://github.com/user-attachments/assets/ce99f8f5-a3d7-438b-b7b0-90e511843a92)
+This repo deals with the the challenges in Point Clouds for 3D Object Detection in the Semi-Supervised Learning setting of 1% labeled annotation. We utilize embedding-level information to construct the decision boundary. We implement a feature bank with instancewise feature guidance, and perform information exchange between labeled and pseudo-labeled feature-level information to improve mean Average Precision across Car, Pedestrian and Cyclist classes with varying levels of difficulty.  Our baseline is 3DIoUMatch with PV-RCNN backbone. Performance of our methods are elucidated in the image below. As shown, with improved feature-level guidance, our methods improve the performance of the vulnerable, data-imbalanced classes of Cyclist and Pedestrian.
+
+
+<p align="center">
+  <img src="docs/LPCont_results.png" width="95%" height="320">
+</p>
 
 
 
+# About OpenPCDet Framework
+`OpenPCDet` is a general PyTorch-based codebase for 3D object detection from point cloud.  As an open source project for LiDAR-based 3D scene perception that supports multiple LiDAR-based state-of-the-art perception models with highly refactored codes for both one-stage and two-stage 3D detection frameworks. Examples include Point-RCNN, PV-RCNN, PV-RCNN++, CenterPoint, SECOND, MPP-Net, and several others.
 
-# About OPenPCDet Framework
-`OpenPCDet` is a general PyTorch-based codebase for 3D object detection from point cloud. 
-It currently supports multiple state-of-the-art 3D object detection methods with highly refactored codes for both one-stage and two-stage 3D detection frameworks.
-`OpenPCDet` is an open source project for LiDAR-based 3D scene perception that supports multiple
-LiDAR-based perception models as shown above.
 
 ### `OpenPCDet` design pattern
 
