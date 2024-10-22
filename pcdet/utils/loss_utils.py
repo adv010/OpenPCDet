@@ -2,8 +2,96 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
 
 from . import box_utils
+
+
+class DINOLoss(nn.Module):
+    def __init__(
+            self, **kwargs):
+        super().__init__()
+        self.student_temp = kwargs.get('STUDENT_TEMP', 0.1)
+        self.teacher_temp = kwargs.get('TEACHER_TEMP', 0.04)
+        self.center_momentum = kwargs.get('CENTER_MOMENTUM', 0.9)
+        self.register_buffer("center", torch.zeros(1, kwargs.get('OUT_DIM', 128)))
+        self.updated = True
+        self.reduce_handle = None
+        self.len_teacher_output = None
+        self.async_batch_center = None
+
+    @torch.no_grad()
+    def softmax_center_teacher(self, teacher_output):
+        self.apply_center_update()
+        # teacher centering and sharpening
+        return F.softmax((teacher_output - self.center) / self.teacher_temp, dim=-1)
+
+    @torch.no_grad()
+    def sinkhorn_knopp_teacher(self, teacher_output, teacher_temp, n_iterations=3):
+        teacher_output = teacher_output.float()
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+        Q = torch.exp(teacher_output / teacher_temp).t()  # Q is K-by-B for consistency with notations from our paper
+        B = Q.shape[1] * world_size  # number of samples to assign
+        K = Q.shape[0]  # how many prototypes
+
+        # make the matrix sums to 1
+        sum_Q = torch.sum(Q)
+        if dist.is_initialized():
+            dist.all_reduce(sum_Q)
+        Q /= sum_Q
+
+        for it in range(n_iterations):
+            # normalize each row: total weight per prototype must be 1/K
+            sum_of_rows = torch.sum(Q, dim=1, keepdim=True)
+            if dist.is_initialized():
+                dist.all_reduce(sum_of_rows)
+            Q /= sum_of_rows
+            Q /= K
+
+            # normalize each column: total weight per sample must be 1/B
+            Q /= torch.sum(Q, dim=0, keepdim=True)
+            Q /= B
+
+        Q *= B  # the columns must sum to 1 so that Q is an assignment
+        return Q.t()
+
+    def forward(self, s1, s2, t1_centered, t2_centered):
+        """
+        Cross-entropy between softmax outputs of the teacher and student networks.
+        """
+        total_loss = 0
+        lsm1 = F.log_softmax(s1 / self.student_temp, dim=-1)
+        lsm2 = F.log_softmax(s2 / self.student_temp, dim=-1)
+        loss1 = torch.sum(t1_centered * lsm2, dim=-1)
+        loss2 = torch.sum(t2_centered * lsm1, dim=-1)
+        total_loss -= loss1.mean() + loss2.mean()
+
+        return total_loss
+
+    @torch.no_grad()
+    def update_center(self, teacher_output):
+        self.reduce_center_update(teacher_output)
+
+    @torch.no_grad()
+    def reduce_center_update(self, teacher_output):
+        self.updated = False
+        self.len_teacher_output = len(teacher_output)
+        self.async_batch_center = torch.sum(teacher_output, dim=0, keepdim=True)
+        if dist.is_initialized():
+            self.reduce_handle = dist.all_reduce(self.async_batch_center, async_op=True)
+
+    @torch.no_grad()
+    def apply_center_update(self):
+        if self.updated is False:
+            world_size = dist.get_world_size() if dist.is_initialized() else 1
+
+            if self.reduce_handle is not None:
+                self.reduce_handle.wait()
+            _t = self.async_batch_center / (self.len_teacher_output * world_size)
+
+            self.center = self.center * self.center_momentum + _t * (1 - self.center_momentum)
+
+            self.updated = True
 
 
 class SigmoidFocalClassificationLoss(nn.Module):

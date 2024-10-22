@@ -171,7 +171,12 @@ MODEL:
             WEIGHT: 1.0
             VISUALIZE: False
         ROI_CONT_LOSS:
+            ENABLE: False
+        DINO_LOSS:
             ENABLE: True
+            OUT_DIM: 128
+            TEACHER_TEMP: 0.04
+            STUDENT_TEMP: 0.1
         ENABLE_PROTO_CONTRASTIVE_LOSS: False
         ENABLE_LPCONT_LOSS: False
         PROTO_CONTRASTIVE_LOSS_WEIGHT: 1.0
@@ -294,7 +299,7 @@ MODEL:
           RESET_STATE_INTERVAL: 32
           BG_THRESH: 0.25
         - NAME: pl_metrics
-          ENABLE: True
+          ENABLE: False
           RESET_STATE_INTERVAL: 32
           STATE_SIZE: 500  # func of reset_state_interval * max num rois per sample
           BG_THRESH: 0.25

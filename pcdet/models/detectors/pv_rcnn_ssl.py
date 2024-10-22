@@ -14,7 +14,7 @@ from pcdet.utils.prototype_utils import FeatureBankV2
 from pcdet.ssod import AdaptiveThresholding
 from tools.visual_utils import open3d_vis_utils as V
 from pcdet.ops.roiaware_pool3d.roiaware_pool3d_utils import points_in_boxes_gpu
-
+from pcdet.utils.loss_utils import DINOLoss
 
 class PVRCNN_SSL(Detector3DTemplate):
     def __init__(self, model_cfg, num_class, dataset):
@@ -48,6 +48,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         data_sampler = dataset.data_augmentor.data_augmentor_queue[0]
         instance_ids = data_sampler.instance_ids
         self.bank = FeatureBankV2(instance_ids, **model_cfg.FEATURE_BANK)
+        self.dino_loss = DINOLoss(**self.model_cfg.ROI_HEAD.DINO_LOSS)
 
         self.temperature = self.model_cfg['ROI_HEAD']['INST_CONT_LOSS']['TEMPERATURE']
         self.iou_pos_thresh = self.model_cfg['ROI_HEAD']['INST_CONT_LOSS']['IOU_POS_THRESH']
@@ -68,9 +69,15 @@ class PVRCNN_SSL(Detector3DTemplate):
             "point_cls_scores": batch_dict['point_cls_scores'].clone().detach()
         }
 
-    @torch.no_grad()
-    def get_roi_feats_wa(self, batch_dict, chunk=False):
-        batch_feats = self.pv_rcnn_ema.roi_head.pool_features(batch_dict, use_gtboxes=True, use_projector=True)
+    def _clone_dict(self, batch_dict, keys, by_ref=False):
+        return {k: batch_dict[k] if by_ref else batch_dict[k].clone() for k in keys}
+
+    def get_roi_feats_proj(self, batch_dict, chunk=False, model='teacher'):
+        if model == 'teacher':
+            with torch.no_grad():
+                batch_feats = self.pv_rcnn_ema.roi_head.pool_features(batch_dict, use_gtboxes=True, use_projector=True)
+        else:
+            batch_feats = self.pv_rcnn.roi_head.pool_features(batch_dict, use_gtboxes=True, use_projector=True)
         batch_feats = batch_feats.view(*batch_dict['gt_boxes'].shape[:2], -1)
         pad_inds = torch.where(torch.eq(batch_dict['gt_boxes'], 0).all(dim=-1))
         batch_feats[pad_inds] = 0
@@ -87,12 +94,10 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         return out_dict
 
-    def get_roi_feats_sa(self, batch_dict, bbox_name='gt_boxes'):
+    # TODO: remove/replace this function with the new get_roi_feats and make sure it works correctly.
+    def get_roi_feats_student(self, batch_dict, bbox_name='gt_boxes'):
         # TODO(farzad): check if the feats of the padded rois are set to zero.
-        if bbox_name == 'gt_boxes':
-            roi_feats_sa = self.pv_rcnn.roi_head.pool_features(batch_dict, use_gtboxes=True, use_projector=True)
-        else:
-            roi_feats_sa = self.pv_rcnn.roi_head.pool_features(batch_dict, use_ori_gtboxes=True, use_projector=True)
+        roi_feats_sa = self.pv_rcnn.roi_head.pool_features(batch_dict, use_gtboxes=True, use_projector=True)
         roi_boxes_sa = batch_dict[bbox_name]
         roi_feats_sa = roi_feats_sa.view(*roi_boxes_sa.shape[:2], -1)
         roi_feats_sa_ulb = roi_feats_sa.chunk(2, dim=0)[1]  # get unlabeled feats
@@ -128,15 +133,19 @@ class PVRCNN_SSL(Detector3DTemplate):
         pred_dicts, recall_dicts = self.pv_rcnn.post_processing(batch_dict)
 
         return pred_dicts, recall_dicts, {}
+
     @torch.no_grad()
-    def _gen_pseudo_labels(self, batch_dict_ema):
+    def _forward_test_teacher(self, batch_dict):
         # self.pv_rcnn_ema.eval()  # https://github.com/yezhen17/3DIoUMatch-PVRCNN/issues/6
         for cur_module in self.pv_rcnn_ema.module_list:
             try:
-                batch_dict_ema = cur_module(batch_dict_ema, test_only=True)
+                batch_dict = cur_module(batch_dict, test_only=True)
             except TypeError as e:
-                batch_dict_ema = cur_module(batch_dict_ema)
+                batch_dict = cur_module(batch_dict)
 
+    def _forward_student(self, batch_dict):
+        for cur_module in self.pv_rcnn.module_list:
+            batch_dict = cur_module(batch_dict)
 
     @staticmethod
     def _split_batch(batch_dict, tag='ema'):
@@ -149,7 +158,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             if k.endswith(f'_{tag}'):
                 batch_dict_out[k[:-(len(tag)+1)]] = batch_dict[k]
                 batch_dict.pop(k)
-            if k in ['batch_size']:
+            if k in ['batch_size', 'unlabeled_inds']:
                 batch_dict_out[k] = batch_dict[k]
         return batch_dict_out
 
@@ -192,11 +201,24 @@ class PVRCNN_SSL(Detector3DTemplate):
                 batch_dict_out[k] = copy.deepcopy(v)
         return batch_dict_out
 
+    def _get_dino_feats(self, batch_dict, input_keys, rois, model='teacher', reverse_by=None):
+        batch_dict_tmp = self._clone_dict(batch_dict, input_keys, by_ref=True)
+        batch_dict_tmp['gt_boxes'] = rois if reverse_by is None else rois.clone()
+        batch_dict_tmp['instance_idx'] = torch.zeros(rois.shape[:2])  # dummy
+        if reverse_by is not None:
+            batch_dict_tmp = self.reverse_augmentation(batch_dict_tmp, reverse_by, key='gt_boxes')
+        if model == 'teacher':
+            self._forward_test_teacher(batch_dict_tmp)
+        else:
+            self._forward_student(batch_dict_tmp)
+        roi_output_dict = self.get_roi_feats_proj(batch_dict_tmp, model=model)
+        return roi_output_dict['feats']
+
     def _forward_training(self, batch_dict):
         lbl_inds, ulb_inds = self._prep_batch_dict(batch_dict)
         batch_dict_ema = self._split_batch(batch_dict, tag='ema')
 
-        self._gen_pseudo_labels(batch_dict_ema)
+        self._forward_test_teacher(batch_dict_ema)
         preds_ema, _ = self.pv_rcnn_ema.post_processing(batch_dict_ema, no_recall_dict=True)
         pls = self._filter_pls(preds_ema, ulb_inds)
         self._fill_with_pls(batch_dict, pls['boxes'], pls['masks'], ulb_inds, lbl_inds)
@@ -214,7 +236,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTOTYPING', False):
             # TODO(farzad): is cloning (all) required?
             batch_dict_clone = self._clone_gt_boxes_and_feats(batch_dict_ema)
-            lbl_roi_feats_wa, _ = self.get_roi_feats_wa(batch_dict_clone, chunk=True)
+            lbl_roi_feats_wa, _ = self.get_roi_feats_proj(batch_dict_clone, chunk=True)
             self.bank.update(**lbl_roi_feats_wa)
 
         disp_dict = {}
@@ -244,13 +266,13 @@ class PVRCNN_SSL(Detector3DTemplate):
             loss += ulb_loss_cls_dist
             tb_dict.update(cls_dist_dict)
         if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTO_CONTRASTIVE_LOSS', False):
-            roi_feats_sa, roi_labels = self.get_roi_feats_sa(batch_dict)
+            roi_feats_sa, roi_labels = self.get_roi_feats_student(batch_dict)
             proto_cont_loss, pl_sim_logits, bank_labels = self.bank.get_proto_contrastive_loss(roi_feats_sa, roi_labels)
             loss += proto_cont_loss * self.model_cfg['ROI_HEAD']['PROTO_CONTRASTIVE_LOSS_WEIGHT']
             tb_dict['proto_cont_loss'] = proto_cont_loss.item()
             pls['sim_logits'] = pl_sim_logits
         if self.model_cfg['ROI_HEAD'].get('ENABLE_LPCONT_LOSS', False):
-            roi_feats_sa, roi_labels = self.get_roi_feats_sa(batch_dict)
+            roi_feats_sa, roi_labels = self.get_roi_feats_student(batch_dict)
             # NOTE: we temporarily use true roi ious between PLs and GTs as weights
             # to find the upper bound performance of the loss and to make it independent of the FG/BG scores
             ulb_gt_boxes = batch_dict['gt_boxes'].chunk(2)[1]
@@ -264,7 +286,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         if self.model_cfg['ROI_HEAD']['INST_CONT_LOSS'].get('ENABLE', False):
             with torch.no_grad():
                 batch_dict_clone = self._clone_gt_boxes_and_feats(batch_dict_ema)
-                ulb_pl_dict_wa = self.get_roi_feats_wa(batch_dict_clone, chunk=True)[1]
+                ulb_pl_dict_wa = self.get_roi_feats_proj(batch_dict_clone, chunk=True)[1]
                 ulb_pl_feats_wa = F.normalize(ulb_pl_dict_wa['feats'], dim=-1)
                 keep_pl_idns = torch.eq(ulb_pl_feats_wa, 0).all(dim=-1).logical_not().nonzero(as_tuple=True)
                 ulb_pl_feats_wa = ulb_pl_feats_wa[keep_pl_idns]
@@ -332,7 +354,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                 batch_dict_clone['instance_idx'] = torch.zeros(rois_sa.shape[:2], device=rois_sa.device)  # dummy
                 batch_dict_clone = self.reverse_augmentation(batch_dict_clone, batch_dict, key='gt_boxes')
 
-                roi_dict_wa = self.get_roi_feats_wa(batch_dict_clone)
+                roi_dict_wa = self.get_roi_feats_proj(batch_dict_clone)
                 roi_feats_wa = roi_dict_wa['feats']
                 assert torch.eq(roi_feats_wa, 0).all(dim=-1).logical_not().all().item(), 'wa feats should not be zero!'
                 # filter out rois with too few points
@@ -373,6 +395,29 @@ class PVRCNN_SSL(Detector3DTemplate):
             plt.colorbar()
             tb_dict['sim_matrix_info'] = plt.gcf()
             tb_dict['roi_cont_loss_unlabeled'] = inst_cont_loss.item()
+
+        if self.model_cfg['ROI_HEAD']['DINO_LOSS'].get('ENABLE', False):
+            with torch.no_grad():
+                rois = batch_dict['rois']
+                # TODO: To avoid distributed processing complications, we prefer a fixed tensor size temporarily.
+                # TODO: Later we can sort rois based on the number of points and use the top N rois
+                # points_thresh = self.model_cfg['ROI_HEAD']['INST_CONT_LOSS'].get('NUM_POINTS_THRESHOLD', 10)
+                # valid_rois_mask = self.mask_dense_rois(batch_dict['points'], rois, num_points=points_thresh)
+                zeros = torch.zeros(rois.shape[:2], device=rois.device)  # dummy
+                # TODO: Design decision: should we use only student rois for both teacher and student?
+                rois = torch.cat([rois, zeros.unsqueeze(2)], dim=-1)  # Warning: no clone
+                input_keys = ['points', 'voxels', 'voxel_coords', 'voxel_num_points', 'batch_size', 'unlabeled_inds']
+                t2 = self._get_dino_feats(batch_dict, input_keys, rois)
+                t1 = self._get_dino_feats(batch_dict_ema, input_keys, rois, reverse_by=batch_dict)
+            s2 = self.pv_rcnn.roi_head.forward_ret_dict['proj_feats']
+            s1 = self._get_dino_feats(batch_dict_ema, input_keys, rois, model='student', reverse_by=batch_dict)
+            s1 = s1.view(-1, s1.shape[-1])
+            teacher_output = torch.cat([t1, t2], dim=0).view(-1, t1.shape[-1])  # (BxN, C) N=128
+            t1_centered, t2_centered = self.dino_loss.softmax_center_teacher(teacher_output).chunk(2)
+            self.dino_loss.update_center(teacher_output)
+            dino_loss = self.dino_loss.forward(s1, s2, t1_centered, t2_centered)
+            tb_dict['dino_loss_unlabeled'] = dino_loss.item()
+            loss += dino_loss * self.model_cfg['ROI_HEAD']['DINO_LOSS'].get('WEIGHT', 1.0)
 
         # update dynamic thresh alg
         if self.model_cfg.ADAPTIVE_THRESHOLDING.ENABLE:
