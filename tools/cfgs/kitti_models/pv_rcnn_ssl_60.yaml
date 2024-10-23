@@ -177,6 +177,7 @@ MODEL:
             OUT_DIM: 128
             TEACHER_TEMP: 0.04
             STUDENT_TEMP: 0.1
+            NORM_LAST_LAYER: True
         ENABLE_PROTO_CONTRASTIVE_LOSS: False
         ENABLE_LPCONT_LOSS: False
         PROTO_CONTRASTIVE_LOSS_WEIGHT: 1.0
