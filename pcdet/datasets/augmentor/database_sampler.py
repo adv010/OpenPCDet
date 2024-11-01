@@ -24,6 +24,8 @@ class DataBaseSampler(object):
 
         for db_info_path in sampler_cfg.DB_INFO_PATH:
             db_info_path = self.root_path.resolve() / db_info_path
+            if not os.path.exists(str(db_info_path)):
+                db_info_path = sampler_cfg.DB_INFO_PATH
             try:
                 with open(str(db_info_path), 'rb') as f:
                     infos = pickle.load(f)

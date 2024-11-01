@@ -2,6 +2,10 @@ import argparse
 import datetime
 import glob
 import os
+import pickle
+from collections import defaultdict
+
+import numpy as np
 from pathlib import Path
 from test import repeat_eval_ckpt
 
@@ -16,6 +20,7 @@ from pcdet.utils import common_utils
 from train_utils.optimization import build_optimizer, build_scheduler
 from train_utils.train_utils import train_model
 import subprocess
+
 
 
 def get_git_commit_number():
@@ -51,7 +56,8 @@ def parse_config():
     parser.add_argument('--start_epoch', type=int, default=0, help='')
     parser.add_argument('--num_epochs_to_eval', type=int, default=0, help='number of checkpoints to be evaluated')
     parser.add_argument('--save_to_file', action='store_true', default=False, help='')
-    parser.add_argument('--split', type=str, default='train_0.01_1')
+    parser.add_argument('--split', type=str, default='train')
+    parser.add_argument('--lbl_ratio', type=float, default=None, help='ratio of labeled data')
     parser.add_argument('--repeat', type=int, default=5)
     parser.add_argument('--thresh', type=str, default='0.5, 0.25, 0.25')
     parser.add_argument('--sem_thresh', type=str, default='0.4, 0.4, 0.4')
@@ -73,9 +79,47 @@ def parse_config():
     if args.set_cfgs is not None:
         cfg_from_list(args.set_cfgs, cfg)
 
-    cfg.DATA_CONFIG.DATA_SPLIT['train'] = args.split
+    cfg.DATA_CONFIG.LBL_RATIO = args.lbl_ratio
     assert cfg.DATA_CONFIG.DATA_AUGMENTOR.AUG_CONFIG_LIST[0].NAME == 'gt_sampling'  # hardcode
-    cfg.DATA_CONFIG.DATA_AUGMENTOR.AUG_CONFIG_LIST[0].DB_INFO_PATH = [args.dbinfos]
+    if args.lbl_ratio is not None:
+        assert args.split == 'train' and args.dbinfos == 'kitti_dbinfos_train.pkl'
+        data_path = Path(cfg.DATA_CONFIG.DATA_PATH)
+        output_dir = Path(cfg.ROOT_DIR / 'output' / cfg.EXP_GROUP_PATH / cfg.TAG / args.extra_tag)
+        train_split_full_path = data_path / "ImageSets" / "train.txt"
+        train_split_rnd_path = output_dir / f"train_{args.lbl_ratio}_rnd.txt"
+        db_infos_full_path = data_path.resolve() / args.dbinfos
+        db_infos_rnd_path = str(output_dir / f"kitti_dbinfos_train_{args.lbl_ratio}_rnd.pkl")
+
+        # Load the train split and randomly sample the instances and save the new split
+        newlines = []
+        with open(train_split_full_path, "r") as f:
+            lines = f.read().strip().split('\n')
+            inds = np.random.choice(len(lines), int(len(lines) * args.lbl_ratio), replace=False)
+            for i in inds:
+                newlines.append(f'{lines[i]} {i}')
+        with open(train_split_rnd_path, "w") as fw:
+            fw.write('\n'.join(newlines))
+        sample_id_list = [x.strip().split(' ')[0] for x in newlines]
+
+        # Load the full db_infos and filter out the instances that are not in the sample_id_list
+        with open(str(db_infos_full_path), 'rb') as f:
+            db_infos_full = pickle.load(f)
+        db_infos_rnd = defaultdict(list)
+        for sample_id in sample_id_list:
+            for class_name in cfg.CLASS_NAMES:
+                for instance in db_infos_full[class_name]:
+                    if instance['image_idx'] == sample_id:
+                        db_infos_rnd[class_name].append(instance)
+        with open(db_infos_rnd_path, 'wb') as f:
+            pickle.dump(db_infos_rnd, f)
+
+        # Overwrite the db_info_path and split in the config
+        cfg.DATA_CONFIG.DATA_AUGMENTOR.AUG_CONFIG_LIST[0].DB_INFO_PATH = [db_infos_rnd_path]
+        cfg.DATA_CONFIG.DATA_SPLIT['train'] = str(train_split_rnd_path)
+    else:
+        cfg.DATA_CONFIG.DATA_AUGMENTOR.AUG_CONFIG_LIST[0].DB_INFO_PATH = [args.dbinfos]
+        cfg.DATA_CONFIG.DATA_SPLIT['train'] = args.split
+
     cfg.DATA_CONFIG.REPEAT = args.repeat
 
     cfg.MODEL.THRESH = [float(x) for x in args.thresh.split(',')]

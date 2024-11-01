@@ -1,5 +1,6 @@
 import copy
 import pickle
+from pathlib import Path
 from collections import defaultdict
 
 import numpy as np
@@ -30,6 +31,8 @@ class KittiDatasetSSL(DatasetTemplate):
 
         split_dir = self.root_path / 'ImageSets' / (self.split + '.txt')
         # self.test = self.split == 'test' or self.split == 'val'
+        if not split_dir.exists():
+            split_dir = Path(self.split)
 
         if not self.training:
             self.sample_id_list = [x.strip() for x in open(split_dir).readlines()] if split_dir.exists() else None

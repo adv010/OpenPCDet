@@ -10,6 +10,8 @@ DATA_SPLIT: {
 
 REPEAT: 1
 
+LBL_RATIO: 0.05
+
 INFO_PATH: {
     'train': [kitti_infos_train.pkl],
     'test': [kitti_infos_val.pkl],
