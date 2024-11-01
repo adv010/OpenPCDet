@@ -25,32 +25,12 @@ class KittiDataset(DatasetTemplate):
         )
         self.split = self.dataset_cfg.DATA_SPLIT[self.mode]
         self.root_split_path = self.root_path / ('training' if self.split != 'test' else 'testing')
-        self.repeat = self.dataset_cfg.REPEAT
 
         split_dir = self.root_path / 'ImageSets' / (self.split + '.txt')
-        
-        print(split_dir)
-        # self.sample_id_list = [x.strip() for x in open(split_dir).readlines()] if split_dir.exists() else None
-        if not self.training:
-            self.sample_id_list = [x.strip() for x in open(split_dir).readlines()] if split_dir.exists() else None
-        else:
-            self.sample_id_list = [x.strip().split(' ')[0] for x in
-                               open(split_dir).readlines()] if split_dir.exists() else None
-            self.sample_index_list = [x.strip().split(' ')[1] for x in
-                                  open(split_dir).readlines()] if split_dir.exists() else None
+        self.sample_id_list = [x.strip() for x in open(split_dir).readlines()] if split_dir.exists() else None
 
         self.kitti_infos = []
         self.include_kitti_data(self.mode)
-
-        if self.training:
-            temp = []
-            for i in self.sample_index_list:
-                temp.append(self.kitti_infos[int(i)])
-            self.kitti_infos = temp
-            assert len(self.kitti_infos) == len(self.sample_id_list)
-
-        if self.logger is not None:
-            self.logger.info('Total samples for KITTI dataset: %d' % (len(self.kitti_infos)))
 
     def include_kitti_data(self, mode):
         if self.logger is not None:
@@ -67,8 +47,8 @@ class KittiDataset(DatasetTemplate):
 
         self.kitti_infos.extend(kitti_infos)
 
-        # if self.logger is not None:
-        #     self.logger.info('Total samples for KITTI dataset: %d' % (len(kitti_infos)))
+        if self.logger is not None:
+            self.logger.info('Total samples for KITTI dataset: %d' % (len(kitti_infos)))
 
     def set_split(self, split):
         super().__init__(
@@ -102,7 +82,7 @@ class KittiDataset(DatasetTemplate):
 
     def get_image_shape(self, idx):
         img_file = self.root_split_path / 'image_2' / ('%s.png' % idx)
-        assert img_file.exists(), self.root_split_path
+        assert img_file.exists()
         return np.array(io.imread(img_file).shape[:2], dtype=np.int32)
 
     def get_label(self, idx):
@@ -245,14 +225,13 @@ class KittiDataset(DatasetTemplate):
         import torch
 
         database_save_path = Path(self.root_path) / ('gt_database' if split == 'train' else ('gt_database_%s' % split))
-        db_info_save_path = Path(self.root_path) / ('kitti_dbinfos_%s_%d.pkl' % (split, len(self.sample_id_list)))
+        db_info_save_path = Path(self.root_path) / ('kitti_dbinfos_%s.pkl' % split)
 
         database_save_path.mkdir(parents=True, exist_ok=True)
         all_db_infos = {}
 
-        # with open(info_path, 'rb') as f:
-        #    infos = pickle.load(f)
-        infos = self.kitti_infos
+        with open(info_path, 'rb') as f:
+            infos = pickle.load(f)
 
         for k in range(len(infos)):
             print('gt_database sample: %d/%d' % (k + 1, len(infos)))
@@ -387,16 +366,11 @@ class KittiDataset(DatasetTemplate):
         if self._merge_all_iters_to_one_epoch:
             return len(self.kitti_infos) * self.total_epochs
 
-        if self.training:
-            return len(self.kitti_infos) * self.repeat
-        else:
-            return len(self.kitti_infos)
+        return len(self.kitti_infos)
 
     def __getitem__(self, index):
         if self._merge_all_iters_to_one_epoch:
             index = index % len(self.kitti_infos)
-
-        index = index % len(self.kitti_infos)
 
         info = copy.deepcopy(self.kitti_infos[index])
 
@@ -488,46 +462,6 @@ def create_kitti_infos(dataset_cfg, class_names, data_path, save_path, workers=4
     print('---------------Start create groundtruth database for data augmentation---------------')
     dataset.set_split(train_split)
     dataset.create_groundtruth_database(train_filename, split=train_split)
-
-    print('---------------Data preparation Done---------------')
-
-def create_part_dbinfos(dataset_cfg, class_names, data_path, save_path, workers=4, part_split='xxx'):
-    dataset_cfg.DATA_SPLIT['train'] = part_split
-    dataset = KittiDataset(dataset_cfg=dataset_cfg, class_names=class_names, root_path=data_path, training=True)
-    train_split, val_split = 'train', 'val'
-
-    train_filename = save_path / ('kitti_infos_%s.pkl' % train_split)
-    val_filename = save_path / ('kitti_infos_%s.pkl' % val_split)
-    trainval_filename = save_path / 'kitti_infos_trainval.pkl'
-    test_filename = save_path / 'kitti_infos_test.pkl'
-
-    # print('---------------Start to generate data infos---------------')
-
-    # dataset.set_split(train_split)
-    # kitti_infos_train = dataset.get_infos(num_workers=workers, has_label=True, count_inside_pts=True)
-    # with open(train_filename, 'wb') as f:
-    #     pickle.dump(kitti_infos_train, f)
-    # print('Kitti info train file is saved to %s' % train_filename)
-    #
-    # dataset.set_split(val_split)
-    # kitti_infos_val = dataset.get_infos(num_workers=workers, has_label=True, count_inside_pts=True)
-    # with open(val_filename, 'wb') as f:
-    #     pickle.dump(kitti_infos_val, f)
-    # print('Kitti info val file is saved to %s' % val_filename)
-    #
-    # with open(trainval_filename, 'wb') as f:
-    #     pickle.dump(kitti_infos_train + kitti_infos_val, f)
-    # print('Kitti info trainval file is saved to %s' % trainval_filename)
-
-    # dataset.set_split('test')
-    # kitti_infos_test = dataset.get_infos(num_workers=workers, has_label=False, count_inside_pts=False)
-    # with open(test_filename, 'wb') as f:
-    #     pickle.dump(kitti_infos_test, f)
-    # print('Kitti info test file is saved to %s' % test_filename)
-
-    print('---------------Start create groundtruth database for data augmentation---------------')
-    dataset.set_split(part_split)
-    dataset.create_groundtruth_database(train_filename, split=part_split)
 
     print('---------------Data preparation Done---------------')
 
