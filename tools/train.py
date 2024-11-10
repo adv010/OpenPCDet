@@ -4,7 +4,7 @@ import glob
 import os
 import pickle
 from collections import defaultdict
-
+import time
 import numpy as np
 from pathlib import Path
 from test import repeat_eval_ckpt
@@ -97,6 +97,9 @@ def parse_config():
             inds = np.random.choice(len(lines), int(len(lines) * args.lbl_ratio), replace=False)
             for i in inds:
                 newlines.append(f'{lines[i]} {i}')
+        train_split_rnd_dir = os.path.dirname(train_split_rnd_path)
+        if not os.path.exists(train_split_rnd_dir):
+            os.makedirs(train_split_rnd_dir)
         with open(train_split_rnd_path, "w") as fw:
             fw.write('\n'.join(newlines))
         sample_id_list = [x.strip().split(' ')[0] for x in newlines]
@@ -110,6 +113,9 @@ def parse_config():
                 for instance in db_infos_full[class_name]:
                     if instance['image_idx'] == sample_id:
                         db_infos_rnd[class_name].append(instance)
+        db_infos_rnd_dir = os.path.dirname(db_infos_rnd_path)
+        if not os.path.exists(db_infos_rnd_dir):
+            os.makedirs(db_infos_rnd_dir)
         with open(db_infos_rnd_path, 'wb') as f:
             pickle.dump(db_infos_rnd, f)
 
@@ -118,7 +124,8 @@ def parse_config():
         cfg.DATA_CONFIG.DATA_SPLIT['train'] = str(train_split_rnd_path)
     else:
         cfg.DATA_CONFIG.DATA_AUGMENTOR.AUG_CONFIG_LIST[0].DB_INFO_PATH = [args.dbinfos]
-        cfg.DATA_CONFIG.DATA_SPLIT['train'] = args.split
+        cfg.DATA_CONFIG.DATA_SPLIT['train'] = str(args.split) #args.split
+   
 
     cfg.DATA_CONFIG.REPEAT = args.repeat
 
@@ -261,6 +268,8 @@ def main():
     else:
         test_loader_during_train = None
 
+    # print("sleeping for 14000 seconds until prev expt done")
+    # time.sleep(14000)
     train_model(
         model,
         optimizer,
