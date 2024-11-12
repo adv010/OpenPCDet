@@ -168,7 +168,7 @@ MODEL:
             TEMPERATURE: 0.1
             IOU_POS_THRESH: [0.7, 0.7, 0.7]
             CLS_WEIGHT: [1.0, 4.0, 4.0]
-            WEIGHT: 1.0
+            WEIGHT: 0.5
             VISUALIZE: False
         ROI_CONT_LOSS:
             ENABLE: False
@@ -177,6 +177,7 @@ MODEL:
             OUT_DIM: 128
             TEACHER_TEMP: 0.04
             STUDENT_TEMP: 0.1
+            WEIGHT: 0.5
             NORM_LAST_LAYER: True
         ENABLE_PROTO_CONTRASTIVE_LOSS: False
         ENABLE_LPCONT_LOSS: False
@@ -279,6 +280,7 @@ MODEL:
     RPN_REG_LOSS_ULB: False  # 3DIoUMatch: UNLABELED_SUPERVISE_REG: True
     RCNN_CLS_LOSS_ULB: False  # 3DIoUMatch: UNLABELED_SUPERVISE_OBJ: False
     RCNN_REG_LOSS_ULB: False  # 3DIoUMatch: UNLABELED_SUPERVISE_REFINE: True
+    ENABLE_PL_LOSSES: True
 
     UNLABELED_WEIGHT: 1.0
     SUPERVISE_MODE: 0

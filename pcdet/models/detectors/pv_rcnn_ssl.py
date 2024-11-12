@@ -39,6 +39,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         self.unlabeled_weight = model_cfg.UNLABELED_WEIGHT
         self.no_nms = model_cfg.NO_NMS
         self.supervise_mode = model_cfg.SUPERVISE_MODE
+        self.enable_weight= self.model_cfg.ENABLE_PL_LOSSES
 
         # Overwrite the threshold values from the config/args.
         self.model_cfg.ADAPTIVE_THRESHOLDING['CONF_THRESH'] = self.thresh
@@ -248,8 +249,8 @@ class PVRCNN_SSL(Detector3DTemplate):
         loss += torch.mean(loss_rpn_cls[lbl_inds, ...])
         loss += torch.mean(loss_rpn_box[lbl_inds, ...])
         loss += torch.mean(loss_point[lbl_inds, ...])
-        loss += torch.mean(loss_rcnn_cls[lbl_inds, ...])
-        loss += torch.mean(loss_rcnn_box[lbl_inds, ...])
+        loss += torch.mean(loss_rcnn_cls[lbl_inds, ...]) * float(self.enable_weight)
+        loss += torch.mean(loss_rcnn_box[lbl_inds, ...]) * float(self.enable_weight)
 
         if self.rpn_cls_ulb:
             loss += torch.mean(loss_rpn_cls[ulb_inds, ...]) * self.unlabeled_weight
