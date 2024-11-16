@@ -163,11 +163,11 @@ MODEL:
         ENABLE_SOFT_TEACHER: False
         ENABLE_ULB_CLS_DIST_LOSS: False
         ENABLE_PROTOTYPING: False
+        TEMPERATURE: 0.1
+        CLS_WEIGHT: [1.0, 4.0, 4.0]
         INST_CONT_LOSS:
             ENABLE: False
-            TEMPERATURE: 0.1
             IOU_POS_THRESH: [0.7, 0.7, 0.7]
-            CLS_WEIGHT: [1.0, 4.0, 4.0]
             WEIGHT: 1.0
             VISUALIZE: False
         ROI_CONT_LOSS:
