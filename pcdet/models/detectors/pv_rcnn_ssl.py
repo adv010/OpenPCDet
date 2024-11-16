@@ -48,12 +48,13 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         data_sampler = dataset.data_augmentor.data_augmentor_queue[0]
         instance_ids = data_sampler.instance_ids
-        self.bank = FeatureBankV2(instance_ids, **model_cfg.FEATURE_BANK)
-        self.dino_loss = DINOLoss(**self.model_cfg.ROI_HEAD.DINO_LOSS)
+        if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTOTYPING', False):
+            self.bank = FeatureBankV2(instance_ids, **model_cfg.FEATURE_BANK)
+        if self.model_cfg['ROI_HEAD']['DINO_LOSS'].get('ENABLE', False):
+            self.dino_loss = DINOLoss(**self.model_cfg.ROI_HEAD.DINO_LOSS)
 
-        self.temperature = self.model_cfg['ROI_HEAD']['INST_CONT_LOSS']['TEMPERATURE']
-        self.iou_pos_thresh = self.model_cfg['ROI_HEAD']['INST_CONT_LOSS']['IOU_POS_THRESH']
-        self.inst_cont_loss_cls_weight = self.model_cfg['ROI_HEAD']['INST_CONT_LOSS']['CLS_WEIGHT']
+        self.temperature = self.model_cfg['ROI_HEAD']['TEMPERATURE']
+        self.cls_weight = self.model_cfg['ROI_HEAD']['CLS_WEIGHT']
 
         for metrics_configs in model_cfg.get("METRICS_BANK_LIST", []):
             if metrics_configs.ENABLE:
@@ -315,13 +316,14 @@ class PVRCNN_SSL(Detector3DTemplate):
             ulb_roi_feats_sa = F.normalize(ulb_roi_feats_sa, dim=-1)
             sim_matrix = ulb_roi_feats_sa @ ulb_pl_feats_wa.T
             logits = sim_matrix / self.temperature
-            iou_thresh = torch.tensor(self.iou_pos_thresh, device=ious.device)[ulb_roi_labels_sa].unsqueeze(1).expand_as(ious)
+            iou_pos_thresh = self.iou_pos_thresh = self.model_cfg['ROI_HEAD']['INST_CONT_LOSS']['IOU_POS_THRESH']
+            iou_thresh = torch.tensor(iou_pos_thresh, device=ious.device)[ulb_roi_labels_sa].unsqueeze(1).expand_as(ious)
             positive_mask = (ious > iou_thresh).float()
             log_prob = F.log_softmax(logits, dim=1)
             log_prob = log_prob * positive_mask
             num_pos = positive_mask.sum(dim=1)
             inst_cont_loss = -log_prob.sum(dim=1) / (num_pos + 1e-8)
-            cls_weights = torch.tensor(self.inst_cont_loss_cls_weight, device=inst_cont_loss.device)[ulb_roi_labels_sa]
+            cls_weights = torch.tensor(self.cls_weight, device=inst_cont_loss.device)[ulb_roi_labels_sa]
             inst_cont_loss = inst_cont_loss * cls_weights
             inst_cont_loss = inst_cont_loss.mean()
             loss += inst_cont_loss * self.model_cfg['ROI_HEAD']['INST_CONT_LOSS'].get('WEIGHT', 1.0)
@@ -385,7 +387,7 @@ class PVRCNN_SSL(Detector3DTemplate):
 
             logits = sim_matrix / self.temperature  # TODO: Define a new TEMPERATURE for the ROI_CONT_LOSS
             inst_cont_loss = F.cross_entropy(logits, labels, reduction='none')
-            cls_weights = torch.tensor(self.inst_cont_loss_cls_weight, device=inst_cont_loss.device)[roi_labels_sa - 1]
+            cls_weights = torch.tensor(self.cls_weight, device=inst_cont_loss.device)[roi_labels_sa - 1]
             inst_cont_loss = inst_cont_loss * cls_weights
             inst_cont_loss = inst_cont_loss.mean()
             # TODO: Define a new WEIGHT for the ROI_CONT_LOSS
