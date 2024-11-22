@@ -36,7 +36,9 @@ MODEL:
         NAME: MeanVFE
 
     BACKBONE_3D:
-        NAME: VoxelBackBone8x
+        NAME: VoxelMAE #VoxelBackBone8x
+        MASKED_RATIO: 0.5
+        SHARED_FC: [256, 256]
 
     MAP_TO_BEV:
         NAME: HeightCompression

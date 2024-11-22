@@ -20,10 +20,16 @@ class Detector3DTemplate(nn.Module):
         self.class_names = dataset.class_names
         self.register_buffer('global_step', torch.LongTensor(1).zero_())
 
+        # self.module_topology = [
+        #     'vfe', 'backbone_3d', 'map_to_bev_module', 'pfe',
+        #     'backbone_2d', 'dense_head',  'point_head', 'roi_head'
+        # ]
+
+
         self.module_topology = [
-            'vfe', 'backbone_3d', 'map_to_bev_module', 'pfe',
-            'backbone_2d', 'dense_head',  'point_head', 'roi_head'
+            'vfe', 'backbone_3d'
         ]
+
 
     @property
     def mode(self):

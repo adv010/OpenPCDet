@@ -141,7 +141,8 @@ class PVRCNN_SSL(Detector3DTemplate):
         # self.pv_rcnn_ema.eval()  # https://github.com/yezhen17/3DIoUMatch-PVRCNN/issues/6
         for cur_module in self.pv_rcnn_ema.module_list:
             try:
-                batch_dict = cur_module(batch_dict, test_only=True)
+                # batch_dict = cur_module(batch_dict, test_only=True)
+                batch_dict = cur_module(batch_dict)
             except TypeError as e:
                 batch_dict = cur_module(batch_dict)
 
@@ -219,15 +220,17 @@ class PVRCNN_SSL(Detector3DTemplate):
     def _forward_training(self, batch_dict):
         lbl_inds, ulb_inds = self._prep_batch_dict(batch_dict)
         batch_dict_ema = self._split_batch(batch_dict, tag='ema')
-
+        # print(batch_dict_ema['frame_id'])
+        # print(batch_dict['frame_id'])
+        # exit()
         self._forward_test_teacher(batch_dict_ema)
-        preds_ema, _ = self.pv_rcnn_ema.post_processing(batch_dict_ema, no_recall_dict=True)
-        pls = self._filter_pls(preds_ema, ulb_inds)
-        self._fill_with_pls(batch_dict, pls['boxes'], pls['masks'], ulb_inds, lbl_inds)
+        # preds_ema, _ = self.pv_rcnn_ema.post_processing(batch_dict_ema, no_recall_dict=True)
+        # pls = self._filter_pls(preds_ema, ulb_inds)
+        # self._fill_with_pls(batch_dict, pls['boxes'], pls['masks'], ulb_inds, lbl_inds)
 
-        # Note! Form now on, the `gt_boxes` of `batch_dict_ema` for unlabeled samples are replaced with filtered pls.
-        # TODO: find usages of `gt_boxes` in `batch_dict_ema` for unlabeled samples and adapt them with this new change.
-        self._fill_with_pls(batch_dict_ema, pls['boxes'], pls['masks'], ulb_inds, lbl_inds)
+        # # Note! Form now on, the `gt_boxes` of `batch_dict_ema` for unlabeled samples are replaced with filtered pls.
+        # # TODO: find usages of `gt_boxes` in `batch_dict_ema` for unlabeled samples and adapt them with this new change.
+        # self._fill_with_pls(batch_dict_ema, pls['boxes'], pls['masks'], ulb_inds, lbl_inds)
 
         # apply student's augs on teacher's pseudo-labels (filtered) only (not points)
         batch_dict = self.apply_augmentation(batch_dict, batch_dict, ulb_inds, key='gt_boxes')
@@ -235,215 +238,229 @@ class PVRCNN_SSL(Detector3DTemplate):
         for cur_module in self.pv_rcnn.module_list:
             batch_dict = cur_module(batch_dict)
 
-        if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTOTYPING', False):
-            # TODO(farzad): is cloning (all) required?
-            batch_dict_clone = self._clone_gt_boxes_and_feats(batch_dict_ema)
-            lbl_roi_feats_wa, _ = self.get_roi_feats_proj(batch_dict_clone, chunk=True)
-            self.bank.update(**lbl_roi_feats_wa)
+        # if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTOTYPING', False):
+        #     # TODO(farzad): is cloning (all) required?
+        #     batch_dict_clone = self._clone_gt_boxes_and_feats(batch_dict_ema)
+        #     lbl_roi_feats_wa, _ = self.get_roi_feats_proj(batch_dict_clone, chunk=True)
+        #     self.bank.update(**lbl_roi_feats_wa)
 
         disp_dict = {}
-        loss_rpn_cls, loss_rpn_box, tb_dict = self.pv_rcnn.dense_head.get_loss()
-        loss_point, tb_dict = self.pv_rcnn.point_head.get_loss(tb_dict)
-        loss_rcnn_cls, loss_rcnn_box, tb_dict = self.pv_rcnn.roi_head.get_loss(tb_dict)
+        tb_dict = {}
+        # loss_rpn_cls, loss_rpn_box, tb_dict = self.pv_rcnn.dense_head.get_loss()
+        # loss_point, tb_dict = self.pv_rcnn.point_head.get_loss(tb_dict)
+        # loss_rcnn_cls, loss_rcnn_box, tb_dict = self.pv_rcnn.roi_head.get_loss(tb_dict)
+
+        #batch_dict_ema['predicted_reconstructed'].shape : torch.Size([2, 1, 41, 1600, 1408])
+        #batch_dict['predicted_reconstructed'].shape : torch.Size([2, 1, 41, 1600, 1408])
+        # TODO : Could we apply DINO / I-JEPA here?
 
         loss = 0
-        loss += torch.mean(loss_rpn_cls[lbl_inds, ...])
-        loss += torch.mean(loss_rpn_box[lbl_inds, ...])
-        loss += torch.mean(loss_point[lbl_inds, ...])
-        loss += torch.mean(loss_rcnn_cls[lbl_inds, ...]) * float(self.enable_weight)
-        loss += torch.mean(loss_rcnn_box[lbl_inds, ...]) * float(self.enable_weight)
+        loss_masked_voxel, tb_dict = self.pv_rcnn.backbone_3d.get_loss(tb_dict)
+        tb_dict = {
+                    'loss_voxel_mae': loss_masked_voxel.item(),
+                    **tb_dict
+                }
 
-        if self.rpn_cls_ulb:
-            loss += torch.mean(loss_rpn_cls[ulb_inds, ...]) * self.unlabeled_weight
-        if self.rpn_reg_ulb:
-            loss += torch.mean(loss_rpn_box[ulb_inds, ...]) * self.unlabeled_weight
-        if self.rcnn_cls_ulb:
-            loss += torch.mean(loss_rcnn_cls[ulb_inds, ...]) * self.unlabeled_weight
-        if self.rcnn_reg_ulb:
-            loss += torch.mean(loss_rcnn_box[ulb_inds, ...]) * self.unlabeled_weight
+        loss = loss_masked_voxel
+        # loss += torch.mean(loss_rpn_cls[lbl_inds, ...])
+        # loss += torch.mean(loss_rpn_box[lbl_inds, ...])
+        # loss += torch.mean(loss_point[lbl_inds, ...])
+        # loss += torch.mean(loss_rcnn_cls[lbl_inds, ...]) * float(self.enable_weight)
+        # loss += torch.mean(loss_rcnn_box[lbl_inds, ...]) * float(self.enable_weight)
 
-        if self.model_cfg['ROI_HEAD'].get('ENABLE_ULB_CLS_DIST_LOSS', False):
-            roi_head_forward_dict = self.pv_rcnn.roi_head.forward_ret_dict
-            ulb_loss_cls_dist, cls_dist_dict = self.pv_rcnn.roi_head.get_ulb_cls_dist_loss(roi_head_forward_dict)
-            loss += ulb_loss_cls_dist
-            tb_dict.update(cls_dist_dict)
-        if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTO_CONTRASTIVE_LOSS', False):
-            roi_feats_sa, roi_labels = self.get_roi_feats_student(batch_dict)
-            proto_cont_loss, pl_sim_logits, bank_labels = self.bank.get_proto_contrastive_loss(roi_feats_sa, roi_labels)
-            loss += proto_cont_loss * self.model_cfg['ROI_HEAD']['PROTO_CONTRASTIVE_LOSS_WEIGHT']
-            tb_dict['proto_cont_loss'] = proto_cont_loss.item()
-            pls['sim_logits'] = pl_sim_logits
-        if self.model_cfg['ROI_HEAD'].get('ENABLE_LPCONT_LOSS', False):
-            roi_feats_sa, roi_labels = self.get_roi_feats_student(batch_dict)
-            # NOTE: we temporarily use true roi ious between PLs and GTs as weights
-            # to find the upper bound performance of the loss and to make it independent of the FG/BG scores
-            ulb_gt_boxes = batch_dict['gt_boxes'].chunk(2)[1]
-            ulb_ori_gt_boxes = batch_dict['ori_gt_boxes'].chunk(2)[1]
-            _, true_ious = self._calc_roi_ious(ulb_gt_boxes, ulb_ori_gt_boxes)
-            lpcont_loss, sim_matrix, proto_labels = self.bank.get_lpcont_loss(roi_feats_sa, roi_labels, weights=true_ious)
-            if lpcont_loss is not None:
-                loss += lpcont_loss * self.model_cfg['ROI_HEAD']['LPCONT_LOSS_WEIGHT']
-                tb_dict['lpcont_loss'] = lpcont_loss.item()
-                tb_dict['sim_matrix_info'] = self._get_sim_matrix_fig(sim_matrix, roi_labels, proto_labels)
-        if self.model_cfg['ROI_HEAD']['INST_CONT_LOSS'].get('ENABLE', False):
-            with torch.no_grad():
-                batch_dict_clone = self._clone_gt_boxes_and_feats(batch_dict_ema)
-                ulb_pl_dict_wa = self.get_roi_feats_proj(batch_dict_clone, chunk=True)[1]
-                ulb_pl_feats_wa = F.normalize(ulb_pl_dict_wa['feats'], dim=-1)
-                keep_pl_idns = torch.eq(ulb_pl_feats_wa, 0).all(dim=-1).logical_not().nonzero(as_tuple=True)
-                ulb_pl_feats_wa = ulb_pl_feats_wa[keep_pl_idns]
+        # if self.rpn_cls_ulb:
+        #     loss += torch.mean(loss_rpn_cls[ulb_inds, ...]) * self.unlabeled_weight
+        # if self.rpn_reg_ulb:
+        #     loss += torch.mean(loss_rpn_box[ulb_inds, ...]) * self.unlabeled_weight
+        # if self.rcnn_cls_ulb:
+        #     loss += torch.mean(loss_rcnn_cls[ulb_inds, ...]) * self.unlabeled_weight
+        # if self.rcnn_reg_ulb:
+        #     loss += torch.mean(loss_rcnn_box[ulb_inds, ...]) * self.unlabeled_weight
 
-                ulb_pls_sa = batch_dict['gt_boxes'][..., :7].chunk(2)[1]
-                ulb_pls_sa = ulb_pls_sa[keep_pl_idns]
-                ulb_rois_sa = self.pv_rcnn.roi_head.forward_ret_dict['rois'].chunk(2)[1]
-                ulb_roi_labels_sa = self.pv_rcnn.roi_head.forward_ret_dict['roi_labels'].chunk(2)[1] - 1
-                # filter out rois with too few points
-                num_points_thresh = self.model_cfg['ROI_HEAD']['INST_CONT_LOSS'].get('NUM_POINTS_THRESHOLD', 10)
-                ulb_valid_rois_mask = self.mask_dense_rois(batch_dict['points'], ulb_rois_sa, ulb_inds, num_points_thresh)
-                ulb_rois_sa = ulb_rois_sa[ulb_valid_rois_mask]
-                ulb_roi_labels_sa = ulb_roi_labels_sa[ulb_valid_rois_mask]
-                # TODO: add wa feats of ulb_rois_sa with enough points to the bank!
-                keep_roi_inds = ulb_valid_rois_mask.nonzero(as_tuple=True)
-                ious = iou3d_nms_utils.boxes_iou3d_gpu(ulb_rois_sa, ulb_pls_sa)
-                # `mask` sets the iou between rois of different samples to zero.
-                smpl_pl_ids = keep_pl_idns[0]
-                smpl_roi_ids = keep_roi_inds[0]
-                mask = smpl_roi_ids.unsqueeze(1) == smpl_pl_ids.unsqueeze(0)
-                ious = ious * mask.float()
+        # if self.model_cfg['ROI_HEAD'].get('ENABLE_ULB_CLS_DIST_LOSS', False):
+        #     roi_head_forward_dict = self.pv_rcnn.roi_head.forward_ret_dict
+        #     ulb_loss_cls_dist, cls_dist_dict = self.pv_rcnn.roi_head.get_ulb_cls_dist_loss(roi_head_forward_dict)
+        #     loss += ulb_loss_cls_dist
+        #     tb_dict.update(cls_dist_dict)
+        # if self.model_cfg['ROI_HEAD'].get('ENABLE_PROTO_CONTRASTIVE_LOSS', False):
+        #     roi_feats_sa, roi_labels = self.get_roi_feats_student(batch_dict)
+        #     proto_cont_loss, pl_sim_logits, bank_labels = self.bank.get_proto_contrastive_loss(roi_feats_sa, roi_labels)
+        #     loss += proto_cont_loss * self.model_cfg['ROI_HEAD']['PROTO_CONTRASTIVE_LOSS_WEIGHT']
+        #     tb_dict['proto_cont_loss'] = proto_cont_loss.item()
+        #     pls['sim_logits'] = pl_sim_logits
+        # if self.model_cfg['ROI_HEAD'].get('ENABLE_LPCONT_LOSS', False):
+        #     roi_feats_sa, roi_labels = self.get_roi_feats_student(batch_dict)
+        #     # NOTE: we temporarily use true roi ious between PLs and GTs as weights
+        #     # to find the upper bound performance of the loss and to make it independent of the FG/BG scores
+        #     ulb_gt_boxes = batch_dict['gt_boxes'].chunk(2)[1]
+        #     ulb_ori_gt_boxes = batch_dict['ori_gt_boxes'].chunk(2)[1]
+        #     _, true_ious = self._calc_roi_ious(ulb_gt_boxes, ulb_ori_gt_boxes)
+        #     lpcont_loss, sim_matrix, proto_labels = self.bank.get_lpcont_loss(roi_feats_sa, roi_labels, weights=true_ious)
+        #     if lpcont_loss is not None:
+        #         loss += lpcont_loss * self.model_cfg['ROI_HEAD']['LPCONT_LOSS_WEIGHT']
+        #         tb_dict['lpcont_loss'] = lpcont_loss.item()
+        #         tb_dict['sim_matrix_info'] = self._get_sim_matrix_fig(sim_matrix, roi_labels, proto_labels)
+        # if self.model_cfg['ROI_HEAD']['INST_CONT_LOSS'].get('ENABLE', False):
+        #     with torch.no_grad():
+        #         batch_dict_clone = self._clone_gt_boxes_and_feats(batch_dict_ema)
+        #         ulb_pl_dict_wa = self.get_roi_feats_proj(batch_dict_clone, chunk=True)[1]
+        #         ulb_pl_feats_wa = F.normalize(ulb_pl_dict_wa['feats'], dim=-1)
+        #         keep_pl_idns = torch.eq(ulb_pl_feats_wa, 0).all(dim=-1).logical_not().nonzero(as_tuple=True)
+        #         ulb_pl_feats_wa = ulb_pl_feats_wa[keep_pl_idns]
 
-            ulb_roi_feats_sa = self.pv_rcnn.roi_head.forward_ret_dict['proj_feats'].chunk(2)[1]
-            ulb_roi_feats_sa = ulb_roi_feats_sa[ulb_valid_rois_mask.view(-1)]
-            ulb_roi_feats_sa = F.normalize(ulb_roi_feats_sa, dim=-1)
-            sim_matrix = ulb_roi_feats_sa @ ulb_pl_feats_wa.T
-            logits = sim_matrix / self.temperature
-            iou_pos_thresh = self.iou_pos_thresh = self.model_cfg['ROI_HEAD']['INST_CONT_LOSS']['IOU_POS_THRESH']
-            iou_thresh = torch.tensor(iou_pos_thresh, device=ious.device)[ulb_roi_labels_sa].unsqueeze(1).expand_as(ious)
-            positive_mask = (ious > iou_thresh).float()
-            log_prob = F.log_softmax(logits, dim=1)
-            log_prob = log_prob * positive_mask
-            num_pos = positive_mask.sum(dim=1)
-            inst_cont_loss = -log_prob.sum(dim=1) / (num_pos + 1e-8)
-            cls_weights = torch.tensor(self.cls_weight, device=inst_cont_loss.device)[ulb_roi_labels_sa]
-            inst_cont_loss = inst_cont_loss * cls_weights
-            inst_cont_loss = inst_cont_loss.mean()
-            loss += inst_cont_loss * self.model_cfg['ROI_HEAD']['INST_CONT_LOSS'].get('WEIGHT', 1.0)
-            plt.clf()
-            plt.imshow(sim_matrix.detach().cpu().numpy(), cmap='plasma', vmin=0, vmax=1, aspect='auto')
-            plt.colorbar()
+        #         ulb_pls_sa = batch_dict['gt_boxes'][..., :7].chunk(2)[1]
+        #         ulb_pls_sa = ulb_pls_sa[keep_pl_idns]
+        #         ulb_rois_sa = self.pv_rcnn.roi_head.forward_ret_dict['rois'].chunk(2)[1]
+        #         ulb_roi_labels_sa = self.pv_rcnn.roi_head.forward_ret_dict['roi_labels'].chunk(2)[1] - 1
+        #         # filter out rois with too few points
+        #         num_points_thresh = self.model_cfg['ROI_HEAD']['INST_CONT_LOSS'].get('NUM_POINTS_THRESHOLD', 10)
+        #         ulb_valid_rois_mask = self.mask_dense_rois(batch_dict['points'], ulb_rois_sa, ulb_inds, num_points_thresh)
+        #         ulb_rois_sa = ulb_rois_sa[ulb_valid_rois_mask]
+        #         ulb_roi_labels_sa = ulb_roi_labels_sa[ulb_valid_rois_mask]
+        #         # TODO: add wa feats of ulb_rois_sa with enough points to the bank!
+        #         keep_roi_inds = ulb_valid_rois_mask.nonzero(as_tuple=True)
+        #         ious = iou3d_nms_utils.boxes_iou3d_gpu(ulb_rois_sa, ulb_pls_sa)
+        #         # `mask` sets the iou between rois of different samples to zero.
+        #         smpl_pl_ids = keep_pl_idns[0]
+        #         smpl_roi_ids = keep_roi_inds[0]
+        #         mask = smpl_roi_ids.unsqueeze(1) == smpl_pl_ids.unsqueeze(0)
+        #         ious = ious * mask.float()
 
-            if self.model_cfg['ROI_HEAD']['INST_CONT_LOSS'].get('VISUALIZE', False):
-                points_sa = batch_dict['points']
-                ulb_points_mask = points_sa[:, 0] == ulb_inds[0]  # only visualize the first ulb sample
-                ulb_points_sa = points_sa[ulb_points_mask, 1:4]
-                ulb_pls_labels = batch_dict['gt_boxes'][..., -1].chunk(2)[1] - 1
-                ulb_pls_labels = ulb_pls_labels[keep_pl_idns]
-                ulb_roi_scores_sa = torch.zeros(ulb_rois_sa.shape[0])
-                attributes = {"id": np.arange(ulb_rois_sa.shape[0]),
-                              'positive': (positive_mask.sum(dim=-1) > 0).cpu().numpy()}
-                self.vis(ulb_points_sa, ulb_pls_sa.squeeze(), ulb_pls_labels.squeeze(),
-                         ulb_rois_sa.squeeze(), ulb_roi_labels_sa.squeeze(), ulb_roi_scores_sa, attributes=attributes)
+        #     ulb_roi_feats_sa = self.pv_rcnn.roi_head.forward_ret_dict['proj_feats'].chunk(2)[1]
+        #     ulb_roi_feats_sa = ulb_roi_feats_sa[ulb_valid_rois_mask.view(-1)]
+        #     ulb_roi_feats_sa = F.normalize(ulb_roi_feats_sa, dim=-1)
+        #     sim_matrix = ulb_roi_feats_sa @ ulb_pl_feats_wa.T
+        #     logits = sim_matrix / self.temperature
+        #     iou_pos_thresh = self.iou_pos_thresh = self.model_cfg['ROI_HEAD']['INST_CONT_LOSS']['IOU_POS_THRESH']
+        #     iou_thresh = torch.tensor(iou_pos_thresh, device=ious.device)[ulb_roi_labels_sa].unsqueeze(1).expand_as(ious)
+        #     positive_mask = (ious > iou_thresh).float()
+        #     log_prob = F.log_softmax(logits, dim=1)
+        #     log_prob = log_prob * positive_mask
+        #     num_pos = positive_mask.sum(dim=1)
+        #     inst_cont_loss = -log_prob.sum(dim=1) / (num_pos + 1e-8)
+        #     cls_weights = torch.tensor(self.cls_weight, device=inst_cont_loss.device)[ulb_roi_labels_sa]
+        #     inst_cont_loss = inst_cont_loss * cls_weights
+        #     inst_cont_loss = inst_cont_loss.mean()
+        #     loss += inst_cont_loss * self.model_cfg['ROI_HEAD']['INST_CONT_LOSS'].get('WEIGHT', 1.0)
+        #     plt.clf()
+        #     plt.imshow(sim_matrix.detach().cpu().numpy(), cmap='plasma', vmin=0, vmax=1, aspect='auto')
+        #     plt.colorbar()
 
-            tb_dict['inst_cont_loss_unlabeled'] = inst_cont_loss.item()
-            tb_dict['sim_matrix_info'] = plt.gcf()
-            tb_dict['pos_ratio'] = (num_pos > 0).float().mean().item()
+        #     if self.model_cfg['ROI_HEAD']['INST_CONT_LOSS'].get('VISUALIZE', False):
+        #         points_sa = batch_dict['points']
+        #         ulb_points_mask = points_sa[:, 0] == ulb_inds[0]  # only visualize the first ulb sample
+        #         ulb_points_sa = points_sa[ulb_points_mask, 1:4]
+        #         ulb_pls_labels = batch_dict['gt_boxes'][..., -1].chunk(2)[1] - 1
+        #         ulb_pls_labels = ulb_pls_labels[keep_pl_idns]
+        #         ulb_roi_scores_sa = torch.zeros(ulb_rois_sa.shape[0])
+        #         attributes = {"id": np.arange(ulb_rois_sa.shape[0]),
+        #                       'positive': (positive_mask.sum(dim=-1) > 0).cpu().numpy()}
+        #         self.vis(ulb_points_sa, ulb_pls_sa.squeeze(), ulb_pls_labels.squeeze(),
+        #                  ulb_rois_sa.squeeze(), ulb_roi_labels_sa.squeeze(), ulb_roi_scores_sa, attributes=attributes)
 
-        if self.model_cfg['ROI_HEAD']['ROI_CONT_LOSS'].get('ENABLE', False):
-            with torch.no_grad():
-                # Get wa features of sa rois
-                batch_dict_clone = self._clone_gt_boxes_and_feats(batch_dict_ema)
-                rois_sa = self.pv_rcnn.roi_head.forward_ret_dict['rois'].clone()
-                roi_labels_sa = self.pv_rcnn.roi_head.forward_ret_dict['roi_labels'].clone()
-                batch_dict_clone['gt_boxes'] = torch.cat([rois_sa, roi_labels_sa.unsqueeze(2)], dim=-1)
-                batch_dict_clone['instance_idx'] = torch.zeros(rois_sa.shape[:2], device=rois_sa.device)  # dummy
-                batch_dict_clone = self.reverse_augmentation(batch_dict_clone, batch_dict, key='gt_boxes')
+        #     tb_dict['inst_cont_loss_unlabeled'] = inst_cont_loss.item()
+        #     tb_dict['sim_matrix_info'] = plt.gcf()
+        #     tb_dict['pos_ratio'] = (num_pos > 0).float().mean().item()
 
-                roi_dict_wa = self.get_roi_feats_proj(batch_dict_clone)
-                roi_feats_wa = roi_dict_wa['feats']
-                assert torch.eq(roi_feats_wa, 0).all(dim=-1).logical_not().all().item(), 'wa feats should not be zero!'
-                # filter out rois with too few points
-                # TODO: Define a new NUM_POINTS_THRESHOLD for the ROI_CONT_LOSS
-                points_thresh = self.model_cfg['ROI_HEAD']['INST_CONT_LOSS'].get('NUM_POINTS_THRESHOLD', 10)
-                valid_rois_mask = self.mask_dense_rois(batch_dict['points'], rois_sa, num_points=points_thresh)
-                roi_feats_wa = roi_feats_wa[valid_rois_mask]
-                roi_labels_sa = roi_labels_sa[valid_rois_mask]
+        # if self.model_cfg['ROI_HEAD']['ROI_CONT_LOSS'].get('ENABLE', False):
+        #     with torch.no_grad():
+        #         # Get wa features of sa rois
+        #         batch_dict_clone = self._clone_gt_boxes_and_feats(batch_dict_ema)
+        #         rois_sa = self.pv_rcnn.roi_head.forward_ret_dict['rois'].clone()
+        #         roi_labels_sa = self.pv_rcnn.roi_head.forward_ret_dict['roi_labels'].clone()
+        #         batch_dict_clone['gt_boxes'] = torch.cat([rois_sa, roi_labels_sa.unsqueeze(2)], dim=-1)
+        #         batch_dict_clone['instance_idx'] = torch.zeros(rois_sa.shape[:2], device=rois_sa.device)  # dummy
+        #         batch_dict_clone = self.reverse_augmentation(batch_dict_clone, batch_dict, key='gt_boxes')
 
-            roi_feats_sa = self.pv_rcnn.roi_head.forward_ret_dict['proj_feats']
-            roi_feats_sa = roi_feats_sa[valid_rois_mask.view(-1)]
+        #         roi_dict_wa = self.get_roi_feats_proj(batch_dict_clone)
+        #         print("Visualize rois_sa")
+        #         # self.vis(batch_dict_ema['points'], None, None, rois_sa.squeeze(), roi_labels_sa.squeeze(), None)
+        #         roi_feats_wa = roi_dict_wa['feats']
+        #         assert torch.eq(roi_feats_wa, 0).all(dim=-1).logical_not().all().item(), 'wa feats should not be zero!'
+        #         # filter out rois with too few points
+        #         # TODO: Define a new NUM_POINTS_THRESHOLD for the ROI_CONT_LOSS
+        #         points_thresh = self.model_cfg['ROI_HEAD']['INST_CONT_LOSS'].get('NUM_POINTS_THRESHOLD', 10)
+        #         valid_rois_mask = self.mask_dense_rois(batch_dict['points'], rois_sa, num_points=points_thresh)
+        #         roi_feats_wa = roi_feats_wa[valid_rois_mask]
+        #         roi_labels_sa = roi_labels_sa[valid_rois_mask]
 
-            assert roi_feats_sa.shape[0] == roi_feats_wa.shape[0], 'roi_feats_sa and roi_feats_wa should have the same size!'
-            num_rois = roi_feats_sa.shape[0]
-            roi_feats_sa_wa = torch.cat([roi_feats_sa, roi_feats_wa], dim=0)
-            sim_matrix = roi_feats_sa_wa @ roi_feats_sa_wa.T
-            mask = torch.eye(2*num_rois, device=sim_matrix.device).logical_not()  # exclude diagonal
-            sim_matrix = sim_matrix[mask].view(-1, sim_matrix.shape[0] - 1)
-            pos_col_inds1 = torch.arange(num_rois, 2 * num_rois) - 1
-            pos_col_inds2 = torch.arange(num_rois)
-            labels = torch.cat([pos_col_inds1, pos_col_inds2]).to(sim_matrix.device)
-            roi_labels_sa = roi_labels_sa.repeat(2)  # repeat for the wa feats
+        #     roi_feats_sa = self.pv_rcnn.roi_head.forward_ret_dict['proj_feats']
+        #     roi_feats_sa = roi_feats_sa[valid_rois_mask.view(-1)]
 
-            # Initial roi cont loss (0eb2ef2)
-            # sim_matrix = roi_feats_sa @ roi_feats_wa.T
-            # labels = torch.arange(logits.shape[0], dtype=torch.long, device=logits.device)
+        #     assert roi_feats_sa.shape[0] == roi_feats_wa.shape[0], 'roi_feats_sa and roi_feats_wa should have the same size!'
+        #     num_rois = roi_feats_sa.shape[0]
+        #     roi_feats_sa_wa = torch.cat([roi_feats_sa, roi_feats_wa], dim=0)
+        #     sim_matrix = roi_feats_sa_wa @ roi_feats_sa_wa.T
+        #     mask = torch.eye(2*num_rois, device=sim_matrix.device).logical_not()  # exclude diagonal
+        #     sim_matrix = sim_matrix[mask].view(-1, sim_matrix.shape[0] - 1)
+        #     pos_col_inds1 = torch.arange(num_rois, 2 * num_rois) - 1
+        #     pos_col_inds2 = torch.arange(num_rois)
+        #     labels = torch.cat([pos_col_inds1, pos_col_inds2]).to(sim_matrix.device)
+        #     roi_labels_sa = roi_labels_sa.repeat(2)  # repeat for the wa feats
 
-            logits = sim_matrix / self.temperature  # TODO: Define a new TEMPERATURE for the ROI_CONT_LOSS
-            inst_cont_loss = F.cross_entropy(logits, labels, reduction='none')
-            cls_weights = torch.tensor(self.cls_weight, device=inst_cont_loss.device)[roi_labels_sa - 1]
-            inst_cont_loss = inst_cont_loss * cls_weights
-            inst_cont_loss = inst_cont_loss.mean()
-            # TODO: Define a new WEIGHT for the ROI_CONT_LOSS
-            loss += inst_cont_loss * self.model_cfg['ROI_HEAD']['INST_CONT_LOSS'].get('WEIGHT', 1.0)
+        #     # Initial roi cont loss (0eb2ef2)
+        #     # sim_matrix = roi_feats_sa @ roi_feats_wa.T
+        #     # labels = torch.arange(logits.shape[0], dtype=torch.long, device=logits.device)
 
-            plt.clf()
-            plt.imshow(sim_matrix.detach().cpu().numpy(), cmap='plasma', vmin=0, vmax=1, aspect='auto')
-            plt.colorbar()
-            tb_dict['sim_matrix_info'] = plt.gcf()
-            tb_dict['roi_cont_loss_unlabeled'] = inst_cont_loss.item()
+        #     logits = sim_matrix / self.temperature  # TODO: Define a new TEMPERATURE for the ROI_CONT_LOSS
+        #     inst_cont_loss = F.cross_entropy(logits, labels, reduction='none')
+        #     cls_weights = torch.tensor(self.cls_weight, device=inst_cont_loss.device)[roi_labels_sa - 1]
+        #     inst_cont_loss = inst_cont_loss * cls_weights
+        #     inst_cont_loss = inst_cont_loss.mean()
+        #     # TODO: Define a new WEIGHT for the ROI_CONT_LOSS
+        #     loss += inst_cont_loss * self.model_cfg['ROI_HEAD']['INST_CONT_LOSS'].get('WEIGHT', 1.0)
 
-        if self.model_cfg['ROI_HEAD']['DINO_LOSS'].get('ENABLE', False):
-            with torch.no_grad():
-                rois = batch_dict['rois']
-                # TODO: To avoid distributed processing complications, we prefer a fixed tensor size temporarily.
-                # TODO: Later we can sort rois based on the number of points and use the top N rois
-                # points_thresh = self.model_cfg['ROI_HEAD']['INST_CONT_LOSS'].get('NUM_POINTS_THRESHOLD', 10)
-                # valid_rois_mask = self.mask_dense_rois(batch_dict['points'], rois, num_points=points_thresh)
-                zeros = torch.zeros(rois.shape[:2], device=rois.device)  # dummy
-                # TODO: Design decision: should we use only student rois for both teacher and student?
-                rois = torch.cat([rois, zeros.unsqueeze(2)], dim=-1)  # Warning: no clone
-                input_keys = ['points', 'voxels', 'voxel_coords', 'voxel_num_points', 'batch_size', 'unlabeled_inds']
-                t2 = self._get_dino_feats(batch_dict, input_keys, rois)
-                t1 = self._get_dino_feats(batch_dict_ema, input_keys, rois, reverse_by=batch_dict)
-            s2 = self.pv_rcnn.roi_head.forward_ret_dict['proj_feats']
-            s1 = self._get_dino_feats(batch_dict_ema, input_keys, rois, model='student', reverse_by=batch_dict)
-            s1 = s1.view(-1, s1.shape[-1])
-            teacher_output = torch.cat([t1, t2], dim=0).view(-1, t1.shape[-1])  # (BxN, C) N=128
-            t1_centered, t2_centered = self.dino_loss.softmax_center_teacher(teacher_output).chunk(2)
-            self.dino_loss.update_center(teacher_output)
-            dino_loss = self.dino_loss.forward(s1, s2, t1_centered, t2_centered)
-            tb_dict['dino_loss_unlabeled'] = dino_loss.item()
-            loss += dino_loss * self.model_cfg['ROI_HEAD']['DINO_LOSS'].get('WEIGHT', 1.0)
+        #     plt.clf()
+        #     plt.imshow(sim_matrix.detach().cpu().numpy(), cmap='plasma', vmin=0, vmax=1, aspect='auto')
+        #     plt.colorbar()
+        #     tb_dict['sim_matrix_info'] = plt.gcf()
+        #     tb_dict['roi_cont_loss_unlabeled'] = inst_cont_loss.item()
+
+        # if self.model_cfg['ROI_HEAD']['DINO_LOSS'].get('ENABLE', False):
+            # with torch.no_grad():
+            #     rois = batch_dict['rois']
+            #     # TODO: To avoid distributed processing complications, we prefer a fixed tensor size temporarily.
+            #     # TODO: Later we can sort rois based on the number of points and use the top N rois
+            #     # points_thresh = self.model_cfg['ROI_HEAD']['INST_CONT_LOSS'].get('NUM_POINTS_THRESHOLD', 10)
+            #     # valid_rois_mask = self.mask_dense_rois(batch_dict['points'], rois, num_points=points_thresh)
+            #     zeros = torch.zeros(rois.shape[:2], device=rois.device)  # dummy
+            #     # TODO: Design decision: should we use only student rois for both teacher and student?
+            #     rois = torch.cat([rois, zeros.unsqueeze(2)], dim=-1)  # Warning: no clone
+            #     input_keys = ['points', 'voxels', 'voxel_coords', 'voxel_num_points', 'batch_size', 'unlabeled_inds']
+            #     t2 = self._get_dino_feats(batch_dict, input_keys, rois)
+            #     t1 = self._get_dino_feats(batch_dict_ema, input_keys, rois, reverse_by=batch_dict)
+            # s2 = self.pv_rcnn.roi_head.forward_ret_dict['proj_feats']
+            # s1 = self._get_dino_feats(batch_dict_ema, input_keys, rois, model='student', reverse_by=batch_dict)
+            # s1 = s1.view(-1, s1.shape[-1])
+            # teacher_output = torch.cat([t1, t2], dim=0).view(-1, t1.shape[-1])  # (BxN, C) N=128
+            # t1_centered, t2_centered = self.dino_loss.softmax_center_teacher(teacher_output).chunk(2)
+            # self.dino_loss.update_center(teacher_output)
+            # dino_loss = self.dino_loss.forward(s1, s2, t1_centered, t2_centered)
+            # tb_dict['dino_loss_unlabeled'] = dino_loss.item()
+            # loss += dino_loss * self.model_cfg['ROI_HEAD']['DINO_LOSS'].get('WEIGHT', 1.0)
 
         # update dynamic thresh alg
-        if self.model_cfg.ADAPTIVE_THRESHOLDING.ENABLE:
-            # Note that the thresholding algorithms use pl information *before* filtering.
-            gt_labels = batch_dict['ori_gt_boxes'][..., -1].long() - 1
-            self._update_thresh_alg(pls['boxes'], pls['scores'], pls['sem_logits'],  gt_labels, preds_ema, lbl_inds)
-            if results := self.thresh_alg.compute():
-                tb_dict.update(results)
+        # if self.model_cfg.ADAPTIVE_THRESHOLDING.ENABLE:
+        #     # Note that the thresholding algorithms use pl information *before* filtering.
+        #     gt_labels = batch_dict['ori_gt_boxes'][..., -1].long() - 1
+        #     self._update_thresh_alg(pls['boxes'], pls['scores'], pls['sem_logits'],  gt_labels, preds_ema, lbl_inds)
+        #     if results := self.thresh_alg.compute():
+        #         tb_dict.update(results)
 
         # update metrics
-        for tag in metrics_registry.tags():
-            if tag == 'pl_metrics':
-                pl_sim_logits = pls['sim_logits'] if 'sim_logits' in pls.keys() else None
-                # Note that the metrics use pl information *after* filtering.
-                self._update_pl_metrics(pls['boxes'], pls['rect_scores'], pls['weights'], pls['masks'],
-                                        batch_dict_ema['ori_gt_boxes'][ulb_inds], pl_sim_logits=pl_sim_logits)
-            if results := metrics_registry.get(tag).compute():
-                tb_dict.update({f"{tag}/{k}": v for k, v in zip(*results)})
+        # for tag in metrics_registry.tags():
+        #     if tag == 'pl_metrics':
+        #         pl_sim_logits = pls['sim_logits'] if 'sim_logits' in pls.keys() else None
+        #         # Note that the metrics use pl information *after* filtering.
+        #         self._update_pl_metrics(pls['boxes'], pls['rect_scores'], pls['weights'], pls['masks'],
+        #                                 batch_dict_ema['ori_gt_boxes'][ulb_inds], pl_sim_logits=pl_sim_logits)
+        #     if results := metrics_registry.get(tag).compute():
+        #         tb_dict.update({f"{tag}/{k}": v for k, v in zip(*results)})
 
-        if self.model_cfg.get('STORE_SCORES_IN_PKL', False):
-            self.dump_statistics(batch_dict, ulb_inds)
+        # if self.model_cfg.get('STORE_SCORES_IN_PKL', False):
+        #     self.dump_statistics(batch_dict, ulb_inds)
 
-        tb_dict = self._split_lbl_ulb_logs(tb_dict, lbl_inds, ulb_inds)
+        # tb_dict = self._split_lbl_ulb_logs(tb_dict, lbl_inds, ulb_inds)
         ret_dict = {
             'loss': loss
         }
@@ -588,14 +605,14 @@ class PVRCNN_SSL(Detector3DTemplate):
 
     @staticmethod
     def vis(points, gt_boxes, gt_labels, ref_boxes=None, ref_labels=None, ref_scores=None, attributes=None):
-        gt_boxes = gt_boxes.cpu().numpy()
+        gt_boxes = gt_boxes.cpu().numpy() if gt_boxes is not None else None
         points = points.cpu().numpy()
-        gt_labels = gt_labels.cpu().numpy()
+        gt_labels = gt_labels.cpu().numpy() if gt_labels is not None else None
         ref_boxes = ref_boxes.cpu().numpy() if ref_boxes is not None else None
         ref_labels = ref_labels.cpu().numpy() if ref_labels is not None else None
         ref_scores = ref_scores.cpu().numpy() if ref_scores is not None else None
-        V.draw_scenes(points=points, gt_boxes=gt_boxes, gt_labels=gt_labels, ref_boxes=ref_boxes,
-                      ref_labels=ref_labels, ref_scores=ref_scores, attributes=attributes)
+        V.draw_scenes(points=points, gt_boxes=gt_boxes, ref_boxes=ref_boxes,
+                      ref_scores=ref_scores, ref_labels=ref_labels)
 
     def _update_thresh_alg(self, pl_boxes, pl_conf_scores, pl_sem_logits, gt_labels, preds_ema, lbl_inds):
         thresh_inputs = dict()
