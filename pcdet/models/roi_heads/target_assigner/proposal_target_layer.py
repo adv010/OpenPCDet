@@ -67,17 +67,9 @@ class ProposalTargetLayer(nn.Module):
             while k >= 0 and cur_gt_boxes[k].sum() == 0:
                 k -= 1
             cur_gt_boxes = cur_gt_boxes[:k + 1]
-            cur_gt_boxes = cur_gt_boxes.new_zeros((1, cur_gt_boxes.shape[1])) if len(
-                cur_gt_boxes) == 0 else cur_gt_boxes
-
-            if index in batch_dict['unlabeled_inds']:
-                subsample_unlabeled_rois = getattr(self, self.roi_sampler_cfg.UNLABELED_SAMPLER_TYPE, None)
-                if self.roi_sampler_cfg.UNLABELED_SAMPLER_TYPE is None:
-                    sampled_inds, cur_reg_valid_mask, cur_cls_labels, roi_ious, gt_assignment, cur_interval_mask = self.subsample_labeled_rois(cur_rois, cur_roi_labels, cur_gt_boxes)
-                else:
-                    sampled_inds, cur_reg_valid_mask, cur_cls_labels, roi_ious, gt_assignment, cur_interval_mask = subsample_unlabeled_rois(cur_rois, cur_roi_labels, cur_gt_boxes)
-            else:
-                sampled_inds, cur_reg_valid_mask, cur_cls_labels, roi_ious, gt_assignment, cur_interval_mask = self.subsample_labeled_rois(cur_rois, cur_roi_labels, cur_gt_boxes)
+            cur_gt_boxes = cur_gt_boxes.new_zeros((1, cur_gt_boxes.shape[1])) if len(cur_gt_boxes) == 0 else cur_gt_boxes
+            (sampled_inds, cur_reg_valid_mask, cur_cls_labels, roi_ious, gt_assignment,
+             cur_interval_mask) = self.subsample_labeled_rois(cur_rois, cur_roi_labels, cur_gt_boxes)
             batch_rois[index] = batch_dict['rois'][index][sampled_inds]
             batch_gt_of_rois[index] = cur_gt_boxes[gt_assignment[sampled_inds]]
             batch_roi_ious[index] = roi_ious

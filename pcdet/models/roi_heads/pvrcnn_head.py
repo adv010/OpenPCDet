@@ -1,9 +1,13 @@
 import torch.nn.functional as F
 import torch.nn as nn
+import torch
 from ...ops.pointnet2.pointnet2_stack import pointnet2_modules as pointnet2_stack_modules
 from ...utils import common_utils
 from .roi_head_template import RoIHeadTemplate
 from torch.nn.utils import weight_norm
+import numpy as np
+from sklearn.metrics import precision_score
+
 
 class PVRCNNHead(RoIHeadTemplate):
     def __init__(self, input_channels, model_cfg, num_class=1,
@@ -214,3 +218,59 @@ class PVRCNNHead(RoIHeadTemplate):
             self.forward_ret_dict = targets_dict
 
         return batch_dict
+
+
+class PVRCNNHeadWithSemCls(PVRCNNHead):
+    def __init__(self, input_channels, model_cfg, num_class=1, **kwargs):
+        super().__init__(input_channels, model_cfg, num_class=num_class, **kwargs)
+        self.sem_cls_layer = None
+
+    def get_box_sem_cls_layer_loss(self, forward_ret_dict):
+        batch_size = forward_ret_dict['rcnn_cls_labels'].shape[0]
+
+        sem_cls_preds = forward_ret_dict['rcnn_sem_cls']
+        sem_cls_targets = forward_ret_dict['roi_labels'] - 1
+        # obj_cls_targets = forward_ret_dict['rcnn_cls_labels'].view(-1)
+        weights_lbl = forward_ret_dict['gt_iou_of_rois'].chunk(2)[0].view(-1)
+        weights_ulb = torch.zeros_like(weights_lbl)
+        weights = torch.cat([weights_lbl, weights_ulb])
+        weights = (weights >= 0.55).float()
+        sem_cls_targets_gt = forward_ret_dict['gt_of_rois'][..., -1].view(-1) - 1
+        # lbl_gt_iou_rois = forward_ret_dict['gt_iou_of_rois'].chunk(2)[0].view(-1)
+        # ulb_roi_scores = torch.sigmoid(forward_ret_dict['roi_scores'].chunk(2)[1].view(-1))
+        # weights = torch.cat([lbl_gt_iou_rois, ulb_roi_scores])
+        sem_cls_preds = sem_cls_preds.view(-1, 3)
+
+        sem_cls_targets = sem_cls_targets.view(-1)
+        batch_loss_cls = F.cross_entropy(sem_cls_preds, sem_cls_targets, reduction='none')
+
+        # cls_valid_mask = (obj_cls_targets >= 0).float()
+        batch_loss_cls = batch_loss_cls.reshape(batch_size, -1)
+        # cls_valid_mask = cls_valid_mask.reshape(batch_size, -1)
+        weights = weights.reshape(batch_size, -1)
+        loss_sem_cls = (batch_loss_cls * weights).sum(-1) / torch.clamp(weights.sum(-1), min=1.0)
+
+        precision = precision_score(sem_cls_targets.view(-1).cpu().numpy(),
+                                    sem_cls_preds.max(dim=-1)[1].view(-1).cpu().numpy(),
+                                    sample_weight=weights.view(-1).cpu().numpy(), average=None, labels=range(3),
+                                    zero_division=np.nan)
+        target_precision = precision_score(sem_cls_targets_gt.cpu().numpy(), sem_cls_targets.view(-1).cpu().numpy(),
+                                           sample_weight=weights.view(-1).cpu().numpy(), average=None, labels=range(3),
+                                           zero_division=np.nan)
+
+        tb_dict = {
+            'loss_sem_cls': loss_sem_cls,
+            'rcnn_sem_cls_precision': self._arr2dict(precision),
+            'rcnn_sem_cls_target_precision': self._arr2dict(target_precision),
+        }
+        return loss_sem_cls, tb_dict
+
+    def _arr2dict(self, array, ignore_zeros=False, ignore_nan=False):
+        def should_include(value):
+            return not ((ignore_zeros and value == 0) or (ignore_nan and np.isnan(value)))
+
+        classes = ['Bg', 'Fg'] if array.shape[-1] == 2 else ['Car', 'Pedestrian', 'Cyclist']
+        return {cls: array[cind] for cind, cls in enumerate(classes) if should_include(array[cind])}
+
+    def forward(self, batch_dict, test_only=False):
+        raise NotImplementedError

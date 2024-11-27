@@ -1,17 +1,15 @@
-import pickle
-
-import os
-import copy
 import numpy as np
 import SharedArray
+import pickle
 import torch.distributed as dist
-
 from ...ops.iou3d_nms import iou3d_nms_utils
 from ...utils import box_utils, common_utils
+import os
+import copy
 
 
-class DataBaseSampler(object):
-    def __init__(self, root_path, sampler_cfg, class_names, logger=None):
+class SSLDataBaseSampler(object):
+    def __init__(self, root_path, sampler_cfg, class_names, logger=None, client=None, oss_flag=False):
         self.root_path = root_path
         self.class_names = class_names
         self.sampler_cfg = sampler_cfg
@@ -24,21 +22,11 @@ class DataBaseSampler(object):
 
         for db_info_path in sampler_cfg.DB_INFO_PATH:
             db_info_path = self.root_path.resolve() / db_info_path
-            if not os.path.exists(str(db_info_path)):
-                db_info_path = sampler_cfg.DB_INFO_PATH
-            try:
-                with open(str(db_info_path), 'rb') as f:
-                    infos = pickle.load(f)
-                    [self.db_infos[cur_class].extend(infos[cur_class]) for cur_class in class_names]
-            except FileNotFoundError:
-                print(f"{str(db_info_path)} not found.")
-                return
-        # self.instance_ids = []
-        for class_name in self.class_names:
-            for i, val in enumerate(self.db_infos[class_name]):
-                # val['instance_idx'] = int(val['image_idx']) * 100 + int(val['gt_idx'])
-                # self.instance_ids.append(val['instance_idx'])
-                val['class_name'] = class_name
+            self.logger.info(f"*************Load db_info_path*************: {db_info_path}")
+            with open(str(db_info_path), 'rb') as f:
+                infos = pickle.load(f)
+                [self.db_infos[cur_class].extend(infos[cur_class]) for cur_class in class_names]
+
         for func_name, val in sampler_cfg.PREPARE.items():
             self.db_infos = getattr(self, func_name)(self.db_infos, val)
 
@@ -53,12 +41,10 @@ class DataBaseSampler(object):
             if class_name not in class_names:
                 continue
             self.sample_class_num[class_name] = sample_num
-            # instance_idx = [val['instance_idx'] for val in self.db_infos[class_name]]
             self.sample_groups[class_name] = {
                 'sample_num': sample_num,
                 'pointer': len(self.db_infos[class_name]),
-                'indices': np.arange(len(self.db_infos[class_name])),
-                # 'instance_idx': np.asarray(instance_idx)
+                'indices': np.arange(len(self.db_infos[class_name]))
             }
 
     def __getstate__(self):
@@ -170,8 +156,6 @@ class DataBaseSampler(object):
         gt_boxes_mask = data_dict['gt_boxes_mask']
         gt_boxes = data_dict['gt_boxes'][gt_boxes_mask]
         gt_names = data_dict['gt_names'][gt_boxes_mask]
-        # gt_instance_idx = data_dict['instance_idx'][gt_boxes_mask]
-        # assert gt_boxes.shape[0] == gt_names.shape[0] == gt_instance_idx.shape[0], "gt_boxes, gt_names, gt_instance_idx should have same length"
         points = data_dict['points']
         if self.sampler_cfg.get('USE_ROAD_PLANE', False):
             sampled_gt_boxes, mv_height = self.put_boxes_on_road_planes(
@@ -206,7 +190,6 @@ class DataBaseSampler(object):
 
         obj_points = np.concatenate(obj_points_list, axis=0)
         sampled_gt_names = np.array([x['name'] for x in total_valid_sampled_dict])
-        # sampled_instance_idx = np.array([x['instance_idx'] for x in total_valid_sampled_dict])
 
         large_sampled_gt_boxes = box_utils.enlarge_box3d(
             sampled_gt_boxes[:, 0:7], extra_width=self.sampler_cfg.REMOVE_EXTRA_WIDTH
@@ -215,15 +198,45 @@ class DataBaseSampler(object):
         points = np.concatenate([obj_points, points], axis=0)
         gt_names = np.concatenate([gt_names, sampled_gt_names], axis=0)
         gt_boxes = np.concatenate([gt_boxes, sampled_gt_boxes], axis=0)
-        # gt_instance_idx = np.concatenate([gt_instance_idx, sampled_instance_idx], axis=0)
-        # assert gt_names.shape[0] == gt_boxes.shape[0] == gt_instance_idx.shape[0], "gt_boxes, gt_names, gt_instance_idx should have same length"
         data_dict['gt_boxes'] = gt_boxes
         data_dict['gt_names'] = gt_names
         data_dict['points'] = points
-        # data_dict['instance_idx'] = gt_instance_idx
         return data_dict
 
-    def __call__(self, data_dict, no_db_sample=False):
+    def add_sampled_boxes_to_scene_wo_gt(self, data_dict, sampled_gt_boxes, total_valid_sampled_dict):
+        points = data_dict['points']
+        if self.sampler_cfg.get('USE_ROAD_PLANE', False):
+            sampled_gt_boxes, mv_height = self.put_boxes_on_road_planes(
+                sampled_gt_boxes, data_dict['road_plane'], data_dict['calib']
+            )
+            data_dict.pop('calib')
+            data_dict.pop('road_plane')
+
+        obj_points_list = []
+        for idx, info in enumerate(total_valid_sampled_dict):
+            file_path = os.path.join(self.root_path, info['path'])
+            obj_points = np.fromfile(str(file_path), dtype=np.float32).reshape(
+                [-1, self.sampler_cfg.NUM_POINT_FEATURES])
+
+            obj_points[:, :3] += info['box3d_lidar'][:3]
+
+            if self.sampler_cfg.get('USE_ROAD_PLANE', False):
+                # mv height
+                obj_points[:, 2] -= mv_height[idx]
+
+            obj_points_list.append(obj_points)
+
+        obj_points = np.concatenate(obj_points_list, axis=0)
+
+        large_sampled_gt_boxes = box_utils.enlarge_box3d(
+            sampled_gt_boxes[:, 0:7], extra_width=self.sampler_cfg.REMOVE_EXTRA_WIDTH
+        )
+        points = box_utils.remove_points_in_boxes3d(points, large_sampled_gt_boxes)
+        points = np.concatenate([obj_points, points], axis=0)
+        data_dict['points'] = points
+        return data_dict
+
+    def __call__(self, data_dict):
         """
         Args:
             data_dict:
@@ -232,45 +245,54 @@ class DataBaseSampler(object):
         Returns:
 
         """
-        # data_dict['gt_boxes_pre_gt_sample'] = data_dict['gt_boxes'].copy()
-        # data_dict['gt_names_pre_gt_sample'] = data_dict['gt_names'].copy()
-        # data_dict['points_pre_gt_sample'] = data_dict['points'].copy()
-        # data_dict['instance_idx_pre_gt_sample'] = data_dict['instance_idx'].copy()
-        gt_boxes = data_dict['gt_boxes']
-        gt_names = data_dict['gt_names'].astype(str)
-        # assert gt_boxes.shape[0] == data_dict['instance_idx'].shape[0], "gt_boxes, instance_idx in call"
-        existed_boxes = gt_boxes
-        total_valid_sampled_dict = []
-        for class_name, sample_group in self.sample_groups.items():
-            if self.limit_whole_scene: 
-                num_gt = np.sum(class_name == gt_names)
-                sample_group['sample_num'] = str(int(self.sample_class_num[class_name]) - num_gt)
-            if int(sample_group['sample_num']) > 0:
-                sampled_dict = self.sample_with_fixed_number(class_name, sample_group)
+        if 'gt_boxes' in data_dict:
+            gt_boxes = data_dict['gt_boxes']
+            gt_names = data_dict['gt_names'].astype(str)
+            existed_boxes = gt_boxes
+            total_valid_sampled_dict = []
+            for class_name, sample_group in self.sample_groups.items():
+                if self.limit_whole_scene:
+                    num_gt = np.sum(class_name == gt_names)
+                    sample_group['sample_num'] = str(int(self.sample_class_num[class_name]) - num_gt)
+                if int(sample_group['sample_num']) > 0:
+                    sampled_dict = self.sample_with_fixed_number(class_name, sample_group)
+                    sampled_boxes = np.stack([x['box3d_lidar'] for x in sampled_dict], axis=0).astype(np.float32)
+                    if self.sampler_cfg.get('DATABASE_WITH_FAKELIDAR', False):
+                        sampled_boxes = box_utils.boxes3d_kitti_fakelidar_to_lidar(sampled_boxes)
 
-                sampled_boxes = np.stack([x['box3d_lidar'] for x in sampled_dict], axis=0).astype(np.float32)
+                    iou1 = iou3d_nms_utils.boxes_bev_iou_cpu(sampled_boxes[:, 0:7], existed_boxes[:, 0:7])
+                    iou2 = iou3d_nms_utils.boxes_bev_iou_cpu(sampled_boxes[:, 0:7], sampled_boxes[:, 0:7])
+                    iou2[range(sampled_boxes.shape[0]), range(sampled_boxes.shape[0])] = 0
+                    iou1 = iou1 if iou1.shape[1] > 0 else iou2
+                    valid_mask = ((iou1.max(axis=1) + iou2.max(axis=1)) == 0).nonzero()[0]
+                    valid_sampled_dict = [sampled_dict[x] for x in valid_mask]
+                    valid_sampled_boxes = sampled_boxes[valid_mask]
 
-                if self.sampler_cfg.get('DATABASE_WITH_FAKELIDAR', False):
-                    sampled_boxes = box_utils.boxes3d_kitti_fakelidar_to_lidar(sampled_boxes)
+                    existed_boxes = np.concatenate((existed_boxes, valid_sampled_boxes), axis=0)
+                    total_valid_sampled_dict.extend(valid_sampled_dict)
 
-                iou1 = iou3d_nms_utils.boxes_bev_iou_cpu(sampled_boxes[:, 0:7], existed_boxes[:, 0:7])
-                iou2 = iou3d_nms_utils.boxes_bev_iou_cpu(sampled_boxes[:, 0:7], sampled_boxes[:, 0:7])
-                iou2[range(sampled_boxes.shape[0]), range(sampled_boxes.shape[0])] = 0
-                iou1 = iou1 if iou1.shape[1] > 0 else iou2
-                valid_mask = ((iou1.max(axis=1) + iou2.max(axis=1)) == 0).nonzero()[0]
-                valid_sampled_dict = [sampled_dict[x] for x in valid_mask]
-                valid_sampled_boxes = sampled_boxes[valid_mask]
+            sampled_gt_boxes = existed_boxes[gt_boxes.shape[0]:, :]
+            if total_valid_sampled_dict.__len__() > 0:
+                data_dict = self.add_sampled_boxes_to_scene(data_dict, sampled_gt_boxes, total_valid_sampled_dict)
+            data_dict.pop('gt_boxes_mask')
 
-                existed_boxes = np.concatenate((existed_boxes, valid_sampled_boxes), axis=0)
-                total_valid_sampled_dict.extend(valid_sampled_dict)
+        else:
+            sampled_gt_boxes = []
+            total_valid_sampled_dict = []
+            for class_name, sample_group in self.sample_groups.items():
+                if self.limit_whole_scene:
+                    num_gt = 0
+                    sample_group['sample_num'] = str(int(self.sample_class_num[class_name]) - num_gt)
+                if int(sample_group['sample_num']) > 0:
+                    sampled_dict = self.sample_with_fixed_number(class_name, sample_group)
+                    sampled_boxes = np.stack([x['box3d_lidar'] for x in sampled_dict], axis=0).astype(np.float32)
+                    if self.sampler_cfg.get('DATABASE_WITH_FAKELIDAR', False):
+                        sampled_boxes = box_utils.boxes3d_kitti_fakelidar_to_lidar(sampled_boxes)
+                    sampled_gt_boxes.append(sampled_boxes)
+                    total_valid_sampled_dict.extend(sampled_dict)
 
-        sampled_gt_boxes = existed_boxes[gt_boxes.shape[0]:, :]
+            sampled_gt_boxes = np.concatenate(sampled_gt_boxes, axis=0)
+            if total_valid_sampled_dict.__len__() > 0:
+                data_dict = self.add_sampled_boxes_to_scene_wo_gt(data_dict, sampled_gt_boxes, total_valid_sampled_dict)
 
-        # do not use db sampler if we do not know gt boxes
-        # TODO(farzad) what if we only do db_sampling on the limited labeled data? e.g., 1% of samples.
-        if total_valid_sampled_dict.__len__() > 0 and not no_db_sample:
-            data_dict = self.add_sampled_boxes_to_scene(data_dict, sampled_gt_boxes, total_valid_sampled_dict)
-
-        data_dict.pop('gt_boxes_mask')
-        # assert data_dict['gt_boxes'].shape[0] == data_dict['gt_names'].shape[0] == data_dict['instance_idx'].shape[0], "gt_boxes, gt_names, gt_instance_idx should have same length"
         return data_dict

@@ -32,6 +32,8 @@ def load_data_to_gpu(batch_dict):
             batch_dict[key] = torch.from_numpy(val).int().cuda()
         elif key in ['index']:
             batch_dict[key] =  torch.from_numpy(val.astype(int)).float().cuda()
+        elif key in ['db_flag', 'data_flag']:
+            continue
         else:
             batch_dict[key] = torch.from_numpy(val).float().cuda()     
 

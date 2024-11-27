@@ -20,17 +20,26 @@ DATA_CONFIG:
               REMOVE_EXTRA_WIDTH: [0.0, 0.0, 0.0]
               LIMIT_WHOLE_SCENE: False
 
+    TEACHER_AUGMENTOR:
+        DISABLE_AUG_LIST: [ 'random_world_scaling' ]
+        AUG_CONFIG_LIST:
+            - NAME: random_world_scaling
+              WORLD_SCALE_RANGE: [ 0.95, 1.05 ]
+
+    STUDENT_AUGMENTOR:
+        DISABLE_AUG_LIST: [ 'placeholder' ]
+        AUG_CONFIG_LIST:
             - NAME: random_world_flip
-              ALONG_AXIS_LIST: ['x']
+              ALONG_AXIS_LIST: [ 'x', 'y' ]  # previousely it was ['x']
 
             - NAME: random_world_rotation
-              WORLD_ROT_ANGLE: [-0.78539816, 0.78539816]
+              WORLD_ROT_ANGLE: [ -0.78539816, 0.78539816 ]
 
             - NAME: random_world_scaling
-              WORLD_SCALE_RANGE: [0.95, 1.05]
+              WORLD_SCALE_RANGE: [ 0.95, 1.05 ]
 
 MODEL:
-    NAME: PVRCNN_SSL
+    NAME: PVRCNN
 
     VFE:
         NAME: MeanVFE
@@ -246,13 +255,13 @@ MODEL:
                 'ulb_fg_mse_loss_weight': 0.0,
                 'unbiased_ce_tau': 2.0,
             }
-        
+
         ROI_AUG:
             ENABLE: False
             AUG_TYPE: roi_aug_ros
             ROS:
                 SCALE_RANGE: [0.9, 1.1]
-                ROTATE_RANGE: [0, 0] 
+                ROTATE_RANGE: [0, 0]
                 SAME_SCALE_XYZ: True
             TRANSLATE:
                 SCALE: [0.25, 0.25, 0.25]
@@ -284,7 +293,7 @@ MODEL:
     SUPERVISE_MODE: 0
     NO_NMS: False
     EMA_ALPHA: 0.999
-    EMA_UPDATE_INTERVAL: 1 
+    EMA_UPDATE_INTERVAL: 1
     STORE_SCORES_IN_PKL: False
 
     FEATURE_BANK:
@@ -320,25 +329,47 @@ MODEL:
         ENABLE_PLOTS: False
 
 OPTIMIZATION:
-    BATCH_SIZE_PER_GPU: 1 #2
-    EVAL_BATCH_SIZE_PER_GPU: 8
-    NUM_EPOCHS: 80
+    PRETRAIN:
+        BATCH_SIZE_PER_GPU: 2
+        NUM_EPOCHS: 80
+        OPTIMIZER: adam_onecycle
+        LR: 0.003
+        WEIGHT_DECAY: 0.01
+        MOMENTUM: 0.9
+        MOMS: [0.95, 0.85]
+        PCT_START: 0.4
+        DIV_FACTOR: 10
+        DECAY_STEP_LIST: [35, 45]
+        LR_DECAY: 0.1
+        LR_CLIP: 0.0000001
+        LR_WARMUP: False
+        WARMUP_EPOCH: 1
+        GRAD_NORM_CLIP: 10
 
-    OPTIMIZER: adam_onecycle
-    # Compared to baseline LR=0.01, LR=0.001 makes the p_max_model to increase monotonically throughout the training.
-    # Note: 0.1 is for fast debugging purpose.
-    LR: 0.01
-    WEIGHT_DECAY: 0.01
-    MOMENTUM: 0.9
+    SEMI_SUP_LEARNING:
+        NAME: OURS
+        LD_BATCH_SIZE_PER_GPU: 1
+        UD_BATCH_SIZE_PER_GPU: 1
+        CAT_LBL_ULB: True
+        NUM_EPOCHS: 25
 
-    MOMS: [0.95, 0.85]
-    PCT_START: 0.4
-    DIV_FACTOR: 10
-    DECAY_STEP_LIST: [16, 24]
-    LR_DECAY: 0.1
-    LR_CLIP: 0.0000001
+        TEACHER:
+            NUM_ITERS_PER_UPDATE: -1
 
-    LR_WARMUP: False
-    WARMUP_EPOCH: 1
+        STUDENT:
+            OPTIMIZER: adam_onecycle
+            LR: 0.001  # previously 0.01
+            WEIGHT_DECAY: 0.01
+            MOMENTUM: 0.9
+            MOMS: [ 0.95, 0.85 ]
+            PCT_START: 0.4
+            DIV_FACTOR: 10
+            DECAY_STEP_LIST: [ 35, 45 ]  # previously [16, 24]
+            LR_DECAY: 0.1
+            LR_CLIP: 0.0000001
+            LR_WARMUP: False
+            WARMUP_EPOCH: -1
+            GRAD_NORM_CLIP: 10
 
-    GRAD_NORM_CLIP: 10
+    TEST:
+        BATCH_SIZE_PER_GPU: 4
