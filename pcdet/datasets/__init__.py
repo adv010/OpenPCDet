@@ -107,13 +107,14 @@ def build_semi_dataloader(dataset_cfg, class_names, batch_size, dist, workers=4,
         logger=logger,
     )
 
-    def create_dataloader(dataset_cls, infos, batch_size_key, shuffle=True):
+    def create_dataloader(dataset_cls, infos, batch_size_key, training=True, shuffle=True):
         dataset = dataset_cls(
             dataset_cfg=dataset_cfg,
             class_names=class_names,
             infos=infos,
             root_path=root_path,
             logger=logger,
+            training=training
         )
         sampler = torch.utils.data.distributed.DistributedSampler(dataset) if dist else None
         return DataLoader(
@@ -125,7 +126,7 @@ def build_semi_dataloader(dataset_cfg, class_names, batch_size, dist, workers=4,
     pretrain_dataloader, pretrain_dataset, pretrain_sampler = create_dataloader(pretrain_cls, train_infos, 'pretrain')
     labeled_dataloader, labeled_dataset, labeled_sampler = create_dataloader(labeled_cls, labeled_infos, 'labeled')
     unlabeled_dataloader, unlabeled_dataset, unlabeled_sampler = create_dataloader(unlabeled_cls, unlabeled_infos, 'unlabeled')
-    test_dataloader, test_dataset, test_sampler = create_dataloader(test_cls, test_infos, 'test', shuffle=False)
+    test_dataloader, test_dataset, test_sampler = create_dataloader(test_cls, test_infos, 'test', training=False, shuffle=False)
 
     datasets = {'pretrain': pretrain_dataset, 'labeled': labeled_dataset, 'unlabeled': unlabeled_dataset, 'test': test_dataset}
     dataloaders = {'pretrain': pretrain_dataloader, 'labeled': labeled_dataloader, 'unlabeled': unlabeled_dataloader, 'test': test_dataloader}

@@ -347,9 +347,11 @@ OPTIMIZATION:
         GRAD_NORM_CLIP: 10
 
     SEMI_SUP_LEARNING:
-        NAME: OURS
+        NAME: Contrastive
         LD_BATCH_SIZE_PER_GPU: 1
         UD_BATCH_SIZE_PER_GPU: 1
+        CONF_THRESH: [0.5, 0.25, 0.25]
+        SEM_THRESH: [0.4, 0.4, 0.4]
         CAT_LBL_ULB: True
         NUM_EPOCHS: 25
 

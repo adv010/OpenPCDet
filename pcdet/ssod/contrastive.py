@@ -10,17 +10,17 @@ class Contrastive:
         self.model_cfg = cfgs
         self.teacher = teacher_model
         self.student = student_model
-        self.conf_thresh = torch.tensor(cfgs.MODEL.ADAPTIVE_THRESHOLDING.CONF_THRESH, dtype=torch.float32)
-        self.sem_thresh = torch.tensor(cfgs.MODEL.ADAPTIVE_THRESHOLDING.SEM_THRESH, dtype=torch.float32)
+        self.conf_thresh = torch.tensor(cfgs.OPTIMIZATION.SEMI_SUP_LEARNING.CONF_THRESH, dtype=torch.float32)
+        self.sem_thresh = torch.tensor(cfgs.OPTIMIZATION.SEMI_SUP_LEARNING.SEM_THRESH, dtype=torch.float32)
         self.cat_lbl_ulb = cfgs.OPTIMIZATION.SEMI_SUP_LEARNING.CAT_LBL_ULB
-        self.rpn_cls_ulb = cfgs.RPN_CLS_LOSS_ULB
-        self.rpn_reg_ulb = cfgs.RPN_REG_LOSS_ULB
-        self.rcnn_cls_ulb = self.model_cfg.RCNN_CLS_LOSS_ULB
-        self.rcnn_reg_ulb = cfgs.RCNN_REG_LOSS_ULB
-        self.unlabeled_weight = cfgs.UNLABELED_WEIGHT
+        self.rpn_cls_ulb = cfgs.MODEL.RPN_CLS_LOSS_ULB
+        self.rpn_reg_ulb = cfgs.MODEL.RPN_REG_LOSS_ULB
+        self.rcnn_cls_ulb = cfgs.MODEL.RCNN_CLS_LOSS_ULB
+        self.rcnn_reg_ulb = cfgs.MODEL.RCNN_REG_LOSS_ULB
+        self.unlabeled_weight = cfgs.MODEL.UNLABELED_WEIGHT
 
-        if cfgs['ROI_HEAD']['DINO_LOSS'].get('ENABLE', False):
-            self.dino_loss = DINOLoss(**cfgs.ROI_HEAD.DINO_LOSS)
+        if cfgs.MODEL.ROI_HEAD.DINO_LOSS.get('ENABLE', False):
+            self.dino_loss = DINOLoss(**cfgs.MODEL.ROI_HEAD.DINO_LOSS)
 
     @torch.no_grad()
     def _forward_test_teacher(self, batch_dict):
@@ -185,6 +185,6 @@ class Contrastive:
     def iou_math_3d_filtering(self, conf_scores, sem_logits):
         labels = torch.argmax(sem_logits, dim=1)
         sem_scores = sem_logits.sigmoid().max(dim=1)[0]
-        conf_thresh = self.conf_thresh.to(conf_scores.device).gather(dim=1, index=labels.unsqueeze(-1)).squeeze()
-        sem_thresh = self.sem_thresh.to(sem_logits.device).gather(dim=1, index=labels.unsqueeze(-1)).squeeze()
+        conf_thresh = self.conf_thresh.to(conf_scores.device).expand_as(sem_logits).gather(dim=1, index=labels.unsqueeze(-1)).squeeze()
+        sem_thresh = self.sem_thresh.to(sem_logits.device).expand_as(sem_logits).gather(dim=1, index=labels.unsqueeze(-1)).squeeze()
         return (conf_scores > conf_thresh) & (sem_scores > sem_thresh)

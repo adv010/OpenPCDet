@@ -186,24 +186,26 @@ def main():
     )
     # --------------------------------stage I pretraining---------------------------------------
     logger.info('************************Stage I Pretraining************************')
-    MODEL_PRETRAINED = copy.deepcopy(cfg.MODEL)
-    pretrain_model = build_network(model_cfg=MODEL_PRETRAINED, num_class=len(cfg.CLASS_NAMES),
+    model_cfgs = copy.deepcopy(cfg.MODEL)
+    pretrain_model = build_network(model_cfg=model_cfgs, num_class=len(cfg.CLASS_NAMES),
                                    dataset=datasets['pretrain'])
 
     if args.pretrained_model is not None:
-        pretrain_ckpt = args.pretrained_model
-
-        pretrain_model.load_params_from_file(filename=pretrain_ckpt, logger=logger, to_cpu=dist_train)
-        pretrain_model.cuda()
-        pretrain_model.eval()  # before wrap to DistributedDataParallel to support fixed some parameters
-        if dist_train:
-            pretrain_model = nn.parallel.DistributedDataParallel(pretrain_model, device_ids=[
-                cfg.LOCAL_RANK % torch.cuda.device_count()])
-        logger.info(pretrain_model)
         eval_pretrain_dir = output_dir / 'eval' / 'eval_with_pretraining'
-        eval_pretrain_dir.mkdir(parents=True, exist_ok=True)
-        eval_one_epoch(cfg, pretrain_model, dataloaders['test'], -1, logger, dist_test=dist_train, save_to_file=False,
-                       result_dir=eval_pretrain_dir)
+        # skip eval if there is a result.pkl is found in the eval_pretrain_dir
+        if not (eval_pretrain_dir / 'result.pkl').exists():
+            pretrain_ckpt = args.pretrained_model
+
+            pretrain_model.load_params_from_file(filename=pretrain_ckpt, logger=logger, to_cpu=dist_train)
+            pretrain_model.cuda()
+            pretrain_model.eval()  # before wrap to DistributedDataParallel to support fixed some parameters
+            if dist_train:
+                pretrain_model = nn.parallel.DistributedDataParallel(pretrain_model, device_ids=[
+                    cfg.LOCAL_RANK % torch.cuda.device_count()])
+            logger.info(pretrain_model)
+            eval_pretrain_dir.mkdir(parents=True, exist_ok=True)
+            eval_one_epoch(cfg, pretrain_model, dataloaders['test'], -1, logger, dist_test=dist_train, save_to_file=False,
+                           result_dir=eval_pretrain_dir)
     else:
         pretrain_model.cuda()
         pretrain_optimizer = build_optimizer(pretrain_model, cfg.OPTIMIZATION.PRETRAIN)
