@@ -22,6 +22,7 @@ class DINOLoss(nn.Module):
 
     @torch.no_grad()
     def softmax_center_teacher(self, teacher_output):
+        self.center = self.center.to(teacher_output.device)
         self.apply_center_update()
         # teacher centering and sharpening
         return F.softmax((teacher_output - self.center) / self.teacher_temp, dim=-1)
@@ -88,7 +89,6 @@ class DINOLoss(nn.Module):
             if self.reduce_handle is not None:
                 self.reduce_handle.wait()
             _t = self.async_batch_center / (self.len_teacher_output * world_size)
-
             self.center = self.center * self.center_momentum + _t * (1 - self.center_momentum)
 
             self.updated = True

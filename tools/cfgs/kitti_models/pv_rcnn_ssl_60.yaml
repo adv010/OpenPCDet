@@ -30,7 +30,7 @@ DATA_CONFIG:
         DISABLE_AUG_LIST: [ 'placeholder' ]
         AUG_CONFIG_LIST:
             - NAME: random_world_flip
-              ALONG_AXIS_LIST: [ 'x', 'y' ]  # previousely it was ['x']
+              ALONG_AXIS_LIST: ['x']  # Previously it was ['x']. Later Add `y` to the list.
 
             - NAME: random_world_rotation
               WORLD_ROT_ANGLE: [ -0.78539816, 0.78539816 ]

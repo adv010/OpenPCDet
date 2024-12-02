@@ -62,8 +62,15 @@ class Contrastive:
         ulb_valid_rois_mask = torch.vstack(ulb_valid_rois_mask)
         return ulb_valid_rois_mask
 
-    def clone_dict(self, batch_dict, keys, by_ref=False):
-        return {k: batch_dict[k] if by_ref else batch_dict[k].clone() for k in keys}
+    @staticmethod
+    def clone_dict(batch_dict, keys, by_ref=False):
+        new_dict = {}
+        for k in keys:
+            if by_ref or not isinstance(batch_dict[k], torch.Tensor):
+                new_dict[k] = batch_dict[k]
+            else:
+                new_dict[k] = batch_dict[k].clone()
+        return new_dict
 
     def _get_dino_feats(self, batch_dict, rois, model='teacher', source_trans_dict=None):
         rois = rois.clone().detach()
@@ -71,7 +78,10 @@ class Contrastive:
         # TODO(farzad): Check if by_ref=True is applicable
         batch_dict_tmp = self.clone_dict(batch_dict, input_keys, by_ref=False)
         if source_trans_dict is not None:
+            # TODO(farzad): Check if rois should have the size of (bs, N, 8) or (bs, N, 7)
             rois = transform_aug(rois, source_trans_dict, batch_dict)
+            rois = torch.vstack(rois)
+            rois = rois.view(batch_dict['batch_size'], -1, rois.shape[-1])
 
         if model == 'teacher':
             self._forward_test_teacher(batch_dict_tmp)
@@ -79,6 +89,8 @@ class Contrastive:
             with torch.no_grad():
                 batch_feats = self.teacher.roi_head.pool_features(batch_dict_tmp, use_projector=True)
         else:
+            # TODO(farzad): IS THIS WORKAROUND SAFE? Fix the issue with a better solution!
+            batch_dict_tmp['gt_boxes'] = torch.zeros((rois.shape[0], 1, 8), device=rois.device)  # dummy
             self._forward_student(batch_dict_tmp)
             batch_dict_tmp['rois'] = rois  # replace with the transformed rois
             batch_feats = self.student.roi_head.pool_features(batch_dict_tmp, use_projector=True)
@@ -102,14 +114,14 @@ class Contrastive:
 
         loss = 0
         tb_dict, disp_dict = {}, {}
-        loss_lbl, tb_dict_lbl = self.student.get_training_loss()
+        loss_lbl, tb_dict_lbl, disp_dict_lbl = self.student.get_training_loss()
         loss += loss_lbl
 
         for cur_module in self.student.module_list:
             batch_dict_sa_ulb = cur_module(batch_dict_sa_ulb)
 
-        loss_rpn_cls, loss_rpn_reg, tb_dict_rpn_ulb = self.student.dense_head.get_loss()
-        loss_rcnn_cls, loss_rcnn_reg, tb_dict_rcnn_ulb = self.student.roi_head.get_loss()
+        loss_rpn_cls, loss_rpn_reg, tb_dict_rpn_ulb = self.student.dense_head.get_loss(separate_losses=True)
+        loss_rcnn_cls, loss_rcnn_reg, tb_dict_rcnn_ulb = self.student.roi_head.get_loss(separate_losses=True)
 
         if self.rpn_cls_ulb:
             loss += loss_rpn_cls * self.unlabeled_weight
@@ -124,7 +136,7 @@ class Contrastive:
         #  are directly used in roi_grid_pool and thus affect the roi proj features
         # loss_point, tb_dict = self.point_head.get_loss(tb_dict)
 
-        if self.model_cfg['ROI_HEAD']['DINO_LOSS'].get('ENABLE', False):
+        if self.model_cfg.MODEL.ROI_HEAD.DINO_LOSS.get('ENABLE', False):
             with torch.no_grad():
                 # TODO: Design decision: use only student rois for both teacher and student? Check the quality of RoIs.
                 rois = batch_dict_sa_ulb['rois']
@@ -140,16 +152,12 @@ class Contrastive:
             self.dino_loss.update_center(teacher_output)
             dino_loss = self.dino_loss.forward(s1, s2, t1_centered, t2_centered)
             tb_dict.update({'dino_loss_unlabeled': dino_loss.item()})
-            loss += dino_loss * self.model_cfg['ROI_HEAD']['DINO_LOSS'].get('WEIGHT', 1.0)
+            loss += dino_loss * self.model_cfg.MODEL.ROI_HEAD.DINO_LOSS.get('WEIGHT', 1.0)
 
         # TODO(farzad): Merge all tb_dicts with postfixes in the end
         # tb_dict = self._split_lbl_ulb_logs(tb_dict, lbl_inds, ulb_inds)
 
-        ret_dict = {
-            'loss': loss
-        }
-
-        return ret_dict, tb_dict, disp_dict
+        return loss, tb_dict, disp_dict
 
     def filter_pls(self, pls_dict):
         pl_boxes, pl_scores, pl_sem_scores, pl_sem_logits = [], [], [], []

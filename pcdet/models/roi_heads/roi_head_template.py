@@ -266,12 +266,15 @@ class RoIHeadTemplate(nn.Module):
         tb_dict = {'rcnn_loss_cls': rcnn_loss_cls.item()}
         return rcnn_loss_cls, tb_dict
 
-    def get_loss(self, tb_dict=None):
+    def get_loss(self, tb_dict=None, separate_losses=False):
         tb_dict = {} if tb_dict is None else tb_dict
         rcnn_loss_cls, cls_tb_dict = self.get_box_cls_layer_loss(self.forward_ret_dict)
         rcnn_loss_reg, reg_tb_dict = self.get_box_reg_layer_loss(self.forward_ret_dict)
         tb_dict.update(cls_tb_dict)
         tb_dict.update(reg_tb_dict)
+        if separate_losses:
+            return rcnn_loss_cls, rcnn_loss_reg, tb_dict
+
         rcnn_loss = rcnn_loss_cls + rcnn_loss_reg
         tb_dict['rcnn_loss'] = rcnn_loss.item()
         return rcnn_loss, tb_dict

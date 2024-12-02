@@ -318,20 +318,21 @@ def main():
         teacher_model = DistTeacher(teacher_model)
         teacher_model = nn.parallel.DistributedDataParallel(teacher_model,
                                                             device_ids=[cfg.LOCAL_RANK % torch.cuda.device_count()])
-
-    student_model.train()
+    model_name = cfg.OPTIMIZATION.SEMI_SUP_LEARNING.NAME
+    model = semi_learning_models[model_name](student_model, teacher_model, cfg, logger)
+    model.student.train()
     """
     Notes: we found for pseudo labels, teacher_model.eval() is better;
     for EMA update and consistency, teacher_model.train() is better
     """
     if cfg.OPTIMIZATION.SEMI_SUP_LEARNING.TEACHER.NUM_ITERS_PER_UPDATE == -1:  # for pseudo label
-        teacher_model.eval()  # Set to eval mode to avoid BN update and dropout
+        model.teacher.eval()  # Set to eval mode to avoid BN update and dropout
     else:  # for EMA teacher with consistency
-        teacher_model.train()  # Set to train mode
-    for t_param in teacher_model.parameters():
+        model.teacher.train()  # Set to train mode
+    for t_param in model.teacher.parameters():
         t_param.requires_grad = False
 
-    logger.info(student_model)
+    logger.info(model.student)
     # use labeled data as epoch counter
     student_lr_scheduler, student_lr_warmup_scheduler = build_scheduler(
         student_optimizer, total_iters_each_epoch=len(dataloaders['labeled']),
@@ -340,8 +341,6 @@ def main():
     )
     logger.info('**********************Start ssl-training %s/%s(%s)**********************'
                 % (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
-    model_name = cfg.OPTIMIZATION.SEMI_SUP_LEARNING.NAME
-    model = semi_learning_models[model_name](student_model, teacher_model, cfg, logger)
 
     train_ssl_model(
         model=model,
