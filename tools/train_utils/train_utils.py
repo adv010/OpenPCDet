@@ -12,7 +12,7 @@ from pcdet.models import load_data_to_gpu
 def log_tb_dict(tb_log, tb_dict, accumulated_iter):
     for key, val in tb_dict.items():
         subkeys = key.split("/")
-        cat, key = (subkeys[0] + "/", subkeys[1]) if len(subkeys) > 1 else ('train/', key)
+        cat, key = (subkeys[0] + "/", subkeys[1]) if len(subkeys) > 1 else ('pretrain/', key)
         if key in ['bs']:
             cat = 'meta_data/'
         if "pr_curve" in key and isinstance(val, dict):
@@ -85,6 +85,7 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
         optimizer.zero_grad()
 
         loss, tb_dict, disp_dict = model_func(model, batch)
+        # tb_dict = {f"pretrain_{key}": value for key, value in tb_dict.items()}
 
         forward_timer = time.time()
         cur_forward_time = forward_timer - data_timer
@@ -123,7 +124,7 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
             tbar.refresh()
 
             if tb_log is not None:
-                tb_log.add_scalar('train/loss', loss, accumulated_iter)
+                tb_log.add_scalar('pretrain/loss', loss, accumulated_iter)
                 tb_log.add_scalar('meta_data/learning_rate', cur_lr, accumulated_iter)
                 log_tb_dict(tb_log, tb_dict, accumulated_iter)
                 if dataloader_test_iter:
