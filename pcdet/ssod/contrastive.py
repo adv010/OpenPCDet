@@ -116,12 +116,18 @@ class Contrastive:
         tb_dict, disp_dict = {}, {}
         loss_lbl, tb_dict_lbl, disp_dict_lbl = self.student.get_training_loss()
         loss += loss_lbl
-
+        tb_dict_lbl = {f"{key}_labeled": value for key, value in tb_dict_lbl.items()}
+        tb_dict_ulb = {}
         for cur_module in self.student.module_list:
             batch_dict_sa_ulb = cur_module(batch_dict_sa_ulb)
 
         loss_rpn_cls, loss_rpn_reg, tb_dict_rpn_ulb = self.student.dense_head.get_loss(separate_losses=True)
+        
+        for key in tb_dict_rpn_ulb.keys():
+            tb_dict_ulb[f"{key}_unlabeled"] = tb_dict_rpn_ulb[key]
         loss_rcnn_cls, loss_rcnn_reg, tb_dict_rcnn_ulb = self.student.roi_head.get_loss(separate_losses=True)
+        for key in tb_dict_rcnn_ulb.keys():
+            tb_dict_ulb[f"{key}_unlabeled"] = tb_dict_rcnn_ulb[key]
 
         if self.rpn_cls_ulb:
             loss += loss_rpn_cls * self.unlabeled_weight
@@ -135,6 +141,7 @@ class Contrastive:
         # TODO(farzad): Think about the point loss: Note that the point fg/bg predictions
         #  are directly used in roi_grid_pool and thus affect the roi proj features
         # loss_point, tb_dict = self.point_head.get_loss(tb_dict)
+        # loss += loss_point
 
         if self.model_cfg.MODEL.ROI_HEAD.DINO_LOSS.get('ENABLE', False):
             with torch.no_grad():
@@ -155,7 +162,7 @@ class Contrastive:
             loss += dino_loss * self.model_cfg.MODEL.ROI_HEAD.DINO_LOSS.get('WEIGHT', 1.0)
 
         # TODO(farzad): Merge all tb_dicts with postfixes in the end
-        # tb_dict = self._split_lbl_ulb_logs(tb_dict, lbl_inds, ulb_inds)
+        tb_dict = self._split_lbl_ulb_logs(tb_dict, tb_dict_lbl, tb_dict_ulb)
 
         return loss, tb_dict, disp_dict
 
@@ -177,7 +184,7 @@ class Contrastive:
 
             assert torch.all(labels == torch.argmax(sem_logits, dim=1) + 1), \
                 f"labels: {labels}, sem_scores: {sem_scores}"  # sanity check
-            mask = self.iou_math_3d_filtering(scores, sem_logits)
+            mask = self.iou_match_3d_filtering(scores, sem_logits)
 
             if mask.sum() == 0:
                 _fill_with_zeros()
@@ -190,9 +197,22 @@ class Contrastive:
 
         return {'boxes': pl_boxes, 'scores': pl_scores, 'sem_scores': pl_sem_scores, 'sem_logits': pl_sem_logits}
 
-    def iou_math_3d_filtering(self, conf_scores, sem_logits):
+    def iou_match_3d_filtering(self, conf_scores, sem_logits):
         labels = torch.argmax(sem_logits, dim=1)
         sem_scores = sem_logits.sigmoid().max(dim=1)[0]
         conf_thresh = self.conf_thresh.to(conf_scores.device).expand_as(sem_logits).gather(dim=1, index=labels.unsqueeze(-1)).squeeze()
         sem_thresh = self.sem_thresh.to(sem_logits.device).expand_as(sem_logits).gather(dim=1, index=labels.unsqueeze(-1)).squeeze()
         return (conf_scores > conf_thresh) & (sem_scores > sem_thresh)
+    
+    @staticmethod
+    def _split_lbl_ulb_logs(tb_dict, tb_dict_lb,tb_dict_ulb):
+        for key in tb_dict_lb.keys():
+            tb_dict[f"{key}"] = tb_dict_lb[key]
+        for key in tb_dict_ulb.keys():
+            tb_dict[f"{key}"] = tb_dict_ulb[key]       
+            #     tb_dict_[f"{key}_labeled"] = torch.mean(tb_dict[key][lbl_inds, ...])
+            #     tb_dict_[f"{key}_unlabeled"] = torch.mean(tb_dict[key][ulb_inds, ...])
+            # else:
+            #     tb_dict_[key] = tb_dict[key]
+
+        return tb_dict

@@ -20,11 +20,18 @@ from train_utils.train_utils import train_model
 from eval_utils.eval_utils import eval_one_epoch
 import subprocess
 
-from ssod.sess import sess
-from ssod.pseudo_label import pseudo_label
-from ssod.iou_match_3d import iou_match_3d
-from ssod.se_ssd import se_ssd
-from ssod.contrastive import Contrastive
+try:
+    from ssod.sess import sess
+    from ssod.pseudo_label import pseudo_label
+    from ssod.iou_match_3d import iou_match_3d
+    from ssod.se_ssd import se_ssd
+    from ssod.contrastive import Contrastive
+except ModuleNotFoundError:
+    from pcdet.ssod.sess import sess
+    from pcdet.ssod.pseudo_label import pseudo_label
+    from pcdet.ssod.iou_match_3d import iou_match_3d
+    from pcdet.ssod.se_ssd import se_ssd
+    from pcdet.ssod.contrastive import Contrastive
 
 # TODO(farzad): Make classes for each semi learning methods similar to Contrastive
 semi_learning_models = {
@@ -58,9 +65,9 @@ def parse_config():
     parser.add_argument('--tcp_port', type=int, default=18888, help='tcp port for distrbuted training')
     parser.add_argument('--sync_bn', action='store_true', default=False, help='whether to use sync bn')
     parser.add_argument('--fix_random_seed', action='store_true', default=False, help='')
-    parser.add_argument('--ckpt_save_interval', type=int, default=1, help='number of training epochs')
+    parser.add_argument('--ckpt_save_interval', type=int, default=5, help='number of training epochs')
     parser.add_argument('--local_rank', type=int, default=0, help='local rank for distributed training')
-    parser.add_argument('--max_ckpt_save_num', type=int, default=15, help='max number of saved checkpoint')
+    parser.add_argument('--max_ckpt_save_num', type=int, default=5, help='max number of saved checkpoint')
     parser.add_argument('--merge_all_iters_to_one_epoch', action='store_true', default=False, help='')
     parser.add_argument('--set', dest='set_cfgs', default=None, nargs=argparse.REMAINDER,
                         help='set extra config keys if needed')
@@ -204,8 +211,8 @@ def main():
                     cfg.LOCAL_RANK % torch.cuda.device_count()])
             logger.info(pretrain_model)
             eval_pretrain_dir.mkdir(parents=True, exist_ok=True)
-            eval_one_epoch(cfg, pretrain_model, dataloaders['test'], -1, logger, dist_test=dist_train, save_to_file=False,
-                           result_dir=eval_pretrain_dir)
+            # eval_one_epoch(cfg, pretrain_model, dataloaders['test'], -1, logger, dist_test=dist_train, save_to_file=False,
+            #                result_dir=eval_pretrain_dir)
     else:
         pretrain_model.cuda()
         pretrain_optimizer = build_optimizer(pretrain_model, cfg.OPTIMIZATION.PRETRAIN)
@@ -222,7 +229,7 @@ def main():
             total_epochs=cfg.OPTIMIZATION.PRETRAIN.NUM_EPOCHS,
             last_epoch=last_epoch, optim_cfg=cfg.OPTIMIZATION.PRETRAIN
         )
-        logger.info('**********************Start pre-training %s/%s(%s)**********************'
+        logger.info('**********************Start pre-training %s/%s/%s)**********************'
                     % (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
         train_model(
             pretrain_model,
@@ -243,10 +250,10 @@ def main():
             max_ckpt_save_num=args.max_ckpt_save_num,
             merge_all_iters_to_one_epoch=args.merge_all_iters_to_one_epoch
         )
-        logger.info('**********************End pre-training %s/%s(%s)**********************\n\n\n'
+        logger.info('**********************End pre-training %s/%s/%s)**********************\n\n\n'
                     % (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
 
-        logger.info('**********************Start evaluation for pre-training %s/%s(%s)**********************' %
+        logger.info('**********************Start evaluation for pre-training %s/%s/%s)**********************' %
                     (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
         eval_pretrain_dir = output_dir / 'eval' / 'eval_with_pretraining'
         eval_pretrain_dir.mkdir(parents=True, exist_ok=True)
@@ -260,7 +267,7 @@ def main():
             ckpt_dir=pretrain_ckpt_dir,
             dist_test=dist_train
         )
-        logger.info('**********************End evaluation for pre-training %s/%s(%s)**********************' %
+        logger.info('**********************End evaluation for pre-training %s/%s/%s)**********************' %
                     (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
 
     # --------------------------------stage II SSL training---------------------------------------
@@ -339,7 +346,7 @@ def main():
         total_epochs=cfg.OPTIMIZATION.SEMI_SUP_LEARNING.NUM_EPOCHS,
         last_epoch=last_epoch, optim_cfg=cfg.OPTIMIZATION.SEMI_SUP_LEARNING.STUDENT
     )
-    logger.info('**********************Start ssl-training %s/%s(%s)**********************'
+    logger.info('**********************Start ssl-training %s/%s/%s)**********************'
                 % (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
 
     train_ssl_model(
@@ -364,10 +371,10 @@ def main():
         dist=dist_train
     )
 
-    logger.info('**********************End ssl-training %s/%s(%s)**********************\n\n\n'
+    logger.info('**********************End ssl-training %s/%s/%s)**********************\n\n\n'
                 % (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
 
-    logger.info('**********************Start evaluation for student model %s/%s(%s)**********************' %
+    logger.info('**********************Start evaluation for student model %s/%s/%s)**********************' %
                 (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
     eval_ssl_dir = output_dir / 'eval' / 'eval_with_student_model'
     eval_ssl_dir.mkdir(parents=True, exist_ok=True)
@@ -381,10 +388,10 @@ def main():
         ckpt_dir=ssl_ckpt_dir / 'student',
         dist_test=dist_train
     )
-    logger.info('**********************End evaluation for student model %s/%s(%s)**********************' %
+    logger.info('**********************End evaluation for student model %s/%s/%s)**********************' %
                 (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
 
-    logger.info('**********************Start evaluation for teacher model %s/%s(%s)**********************' %
+    logger.info('**********************Start evaluation for teacher model %s/%s/%s)**********************' %
                 (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
     eval_ssl_dir = output_dir / 'eval' / 'eval_with_teacher_model'
     eval_ssl_dir.mkdir(parents=True, exist_ok=True)
@@ -405,7 +412,7 @@ def main():
         ckpt_dir=ssl_ckpt_dir / 'teacher',
         dist_test=dist_train
     )
-    logger.info('**********************End evaluation for teacher model %s/%s(%s)**********************' %
+    logger.info('**********************End evaluation for teacher model %s/%s/%s)**********************' %
                 (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
 
 
