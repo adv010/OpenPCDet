@@ -210,8 +210,8 @@ def main():
                     cfg.LOCAL_RANK % torch.cuda.device_count()])
             logger.info(pretrain_model)
             eval_pretrain_dir.mkdir(parents=True, exist_ok=True)
-            eval_one_epoch(cfg, pretrain_model, dataloaders['test'], -1, logger, dist_test=dist_train,
-                           save_to_file=False, result_dir=eval_pretrain_dir)
+            # eval_one_epoch(cfg, pretrain_model, dataloaders['test'], -1, logger, dist_test=dist_train,
+            #                save_to_file=False, result_dir=eval_pretrain_dir)
     else:
         pretrain_model.cuda()
         pretrain_optimizer = build_optimizer(pretrain_model, cfg.OPTIMIZATION.PRETRAIN)

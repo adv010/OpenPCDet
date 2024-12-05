@@ -175,7 +175,7 @@ MODEL:
             }
 
     ROI_HEAD:
-        NAME: PVRCNNHead
+        NAME: PVRCNNHeadWithProjector
         CLASS_AGNOSTIC: True
         ENABLE_VIS: False
         ENABLE_SOFT_TEACHER: False
@@ -184,7 +184,7 @@ MODEL:
         TEMPERATURE: 0.1
         CLS_WEIGHT: [1.0, 4.0, 4.0]
         DINO_LOSS:
-            ENABLE: False
+            ENABLE: True
             OUT_DIM: 128
             TEACHER_TEMP: 0.04
             STUDENT_TEMP: 0.1

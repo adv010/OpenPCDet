@@ -46,7 +46,6 @@ class PVRCNNHead(RoIHeadTemplate):
             fc_list=self.model_cfg.REG_FC
         )
         self.print_loss_when_eval = False
-        self.projector = Projector(model_cfg) if model_cfg.DINO_LOSS.ENABLE else None
         self.init_weights(weight_init='xavier')
 
     def init_weights(self, weight_init='xavier'):
@@ -189,25 +188,25 @@ class PVRCNNHead(RoIHeadTemplate):
         return batch_dict
 
 
-class Projector(nn.Module):
-    def __init__(self, cfgs, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.cfgs = cfgs
-        self.proj_size = cfgs.PROJECTION_SIZE
-        input_size = cfgs.SHARED_FC[-1]
+class PVRCNNHeadWithProjector(PVRCNNHead):
+    def __init__(self, input_channels, model_cfg, num_class=1, **kwargs):
+        super().__init__(input_channels, model_cfg, num_class=num_class, **kwargs)
+        self.cfgs = model_cfg
+        self.proj_size = model_cfg.PROJECTION_SIZE
+        input_size = model_cfg.SHARED_FC[-1]
         self.projector = weight_norm(nn.Linear(input_size, self.proj_size, bias=False))
         self.projector.weight_g.data.fill_(1)
-        if cfgs.DINO_LOSS.NORM_LAST_LAYER:
+        if model_cfg.DINO_LOSS.NORM_LAST_LAYER:
             self.projector.weight_g.requires_grad = False
 
-    def forward(self, batch_dict):
+    def get_proj_feats(self, batch_dict):
         pooled_features = self.roi_grid_pool(batch_dict)  # (BxN, 6x6x6, C)
         grid_size = self.cfgs.ROI_GRID_POOL.GRID_SIZE
         batch_size_rcnn = pooled_features.shape[0]
         pooled_features = pooled_features.permute(0, 2, 1). \
             contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
         # TODO(farzad): ablation: remove the shared_fc_layer
-        shared_features = self.shared_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1))
+        shared_features = self.shared_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1)).squeeze(-1)
         if self.cfgs.DINO_LOSS.NORM_LAST_LAYER:
             shared_features = F.normalize(shared_features, p=2, dim=-1)
         proj_feats = self.projector(shared_features)
