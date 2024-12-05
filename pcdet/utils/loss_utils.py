@@ -63,6 +63,8 @@ class DINOLoss(nn.Module):
         total_loss = 0
         lsm1 = F.log_softmax(s1 / self.student_temp, dim=-1)
         lsm2 = F.log_softmax(s2 / self.student_temp, dim=-1)
+        lsm2 = lsm2.view_as(t1_centered)
+        lsm1 = lsm1.view_as(t2_centered)
         loss1 = torch.sum(t1_centered * lsm2, dim=-1)
         loss2 = torch.sum(t2_centered * lsm1, dim=-1)
         total_loss -= loss1.mean() + loss2.mean()

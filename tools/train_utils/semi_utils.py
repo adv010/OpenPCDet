@@ -105,6 +105,8 @@ def transform_aug(boxes, source_dict, target_dict):
             aug_func = augmentation_functions[key]
             box = aug_func(box, aug_params, reverse=False)
         new_boxes.append(box)
+    if isinstance(boxes, torch.Tensor):
+        new_boxes = torch.concat(new_boxes).view_as(boxes)
     return new_boxes
 
 

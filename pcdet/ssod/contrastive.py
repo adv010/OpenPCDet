@@ -79,8 +79,6 @@ class Contrastive:
         batch_dict_tmp = self.clone_dict(batch_dict, input_keys, by_ref=False)
         if source_trans_dict is not None:
             rois = transform_aug(rois, source_trans_dict, batch_dict)
-            rois = torch.vstack(rois)
-            rois = rois.view(batch_dict['batch_size'], -1, rois.shape[-1])[..., 0:7]
 
         if model == 'teacher':
             self._forward_test_teacher(batch_dict_tmp)
@@ -146,7 +144,6 @@ class Contrastive:
                 t1 = self._get_dino_feats(batch_dict_wa_ulb, rois, source_trans_dict=batch_dict_sa_ulb)
             s2 = self._get_dino_feats(batch_dict_sa_ulb, rois, model='student')
             s1 = self._get_dino_feats(batch_dict_wa_ulb, rois, model='student', source_trans_dict=batch_dict_sa_ulb)
-            s1 = s1.view(-1, s1.shape[-1])
             teacher_output = torch.cat([t1, t2], dim=0).view(-1, t1.shape[-1])  # (BxN, C) N=128
             t1_centered, t2_centered = self.dino_loss.softmax_center_teacher(teacher_output).chunk(2)
             self.dino_loss.update_center(teacher_output)
