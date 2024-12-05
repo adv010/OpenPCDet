@@ -51,7 +51,10 @@ class RoIPointPool3dFunction(Function):
         pooled_features = point_features.new_zeros((batch_size, boxes_num, num_sampled_points, 3 + feature_len))
         pooled_empty_flag = point_features.new_zeros((batch_size, boxes_num)).int()
 
-        roipoint_pool3d_cuda.forward(points.contiguous())
+        roipoint_pool3d_cuda.forward(
+            points.contiguous(), pooled_boxes3d.contiguous(),
+            point_features.contiguous(), pooled_features, pooled_empty_flag
+        )
 
         return pooled_features, pooled_empty_flag
 

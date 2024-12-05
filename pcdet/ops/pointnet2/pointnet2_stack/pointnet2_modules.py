@@ -372,7 +372,10 @@ class VectorPoolAggregationModule(nn.Module):
         voxel_centers = self.get_dense_voxels_by_center(
             point_centers=new_xyz, max_neighbour_distance=self.max_neighbour_distance, num_voxels=self.num_local_voxel
         )  # (M1 + M2 + ..., total_voxels, 3)
-        voxel_features = self.local_interpolate_module.forward()  # ((M1 + M2 ...) * total_voxels, C)
+        voxel_features = self.local_interpolate_module.forward(
+            support_xyz=xyz, support_features=features, xyz_batch_cnt=xyz_batch_cnt,
+            new_xyz=new_xyz, new_xyz_grid_centers=voxel_centers, new_xyz_batch_cnt=new_xyz_batch_cnt
+        )  # ((M1 + M2 ...) * total_voxels, C)
 
         voxel_features = voxel_features.contiguous().view(-1, self.total_voxels * voxel_features.shape[-1])
         return voxel_features
