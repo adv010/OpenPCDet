@@ -35,8 +35,7 @@ def train_ssl_one_epoch(model, optimizer, labeled_loader, unlabeled_loader, epoc
 
         optimizer.zero_grad()
 
-        loss, tb_dict, disp_dict = model.forward(
-            ld_teacher_batch_dict, ud_teacher_batch_dict, ld_student_batch_dict, ud_student_batch_dict, epoch_id)
+        loss, tb_dict, disp_dict = model.forward(ld_teacher_batch_dict)
         loss.backward()
 
         clip_grad_norm_(model.student.parameters(), ssl_cfg.STUDENT.GRAD_NORM_CLIP)

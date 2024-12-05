@@ -571,7 +571,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             batch_dict_std['rois_before_aug'] = batch_dict_std['rois'].clone().detach()
             batch_dict_std['rois'][ulb_inds] = augment_rois(batch_dict_std['rois'][ulb_inds], self.model_cfg.ROI_HEAD)
 
-        self.pv_rcnn_ema.roi_head.forward(batch_dict_std, test_only=True)
+        self.pv_rcnn_ema.roi_head.forward(batch_dict_std)
         batch_dict_std = self.apply_augmentation(batch_dict_std, batch_dict, ulb_inds, key='batch_box_preds')
         pred_dicts_std, recall_dicts_std = self.pv_rcnn_ema.post_processing(batch_dict_std,
                                                                             no_recall_dict=True,

@@ -174,15 +174,8 @@ MODEL:
         ENABLE_PROTOTYPING: False
         TEMPERATURE: 0.1
         CLS_WEIGHT: [1.0, 4.0, 4.0]
-        INST_CONT_LOSS:
-            ENABLE: False
-            IOU_POS_THRESH: [0.7, 0.7, 0.7]
-            WEIGHT: 1.0
-            VISUALIZE: False
-        ROI_CONT_LOSS:
-            ENABLE: False
         DINO_LOSS:
-            ENABLE: True
+            ENABLE: False
             OUT_DIM: 128
             TEACHER_TEMP: 0.04
             STUDENT_TEMP: 0.1
@@ -331,7 +324,8 @@ MODEL:
 OPTIMIZATION:
     PRETRAIN:
         BATCH_SIZE_PER_GPU: 16
-        NUM_EPOCHS: 30
+        NUM_EPOCHS: 80
+        REPEAT: 10
         OPTIMIZER: adam_onecycle
         LR: 0.01
         WEIGHT_DECAY: 0.01
@@ -346,51 +340,27 @@ OPTIMIZATION:
         WARMUP_EPOCH: 1
         GRAD_NORM_CLIP: 10
 
-# OPTIMIZATION:
-#     BATCH_SIZE_PER_GPU: 2
-#     EVAL_BATCH_SIZE_PER_GPU: 8
-#     NUM_EPOCHS: 80
-
-#     OPTIMIZER: adam_onecycle
-#     LR: 0.01
-#     WEIGHT_DECAY: 0.01
-#     MOMENTUM: 0.9
-
-#     MOMS: [0.95, 0.85]
-#     PCT_START: 0.4
-#     DIV_FACTOR: 10
-#     DECAY_STEP_LIST: [35, 45]
-#     LR_DECAY: 0.1
-#     LR_CLIP: 0.0000001
-
-#     LR_WARMUP: False
-#     WARMUP_EPOCH: 1
-
-#     GRAD_NORM_CLIP: 10
-
-
-
     SEMI_SUP_LEARNING:
-        NAME: Contrastive #'SESS','Pseudo-Label','3DIoUMatch','SE_SSD','Contrastive'
+        NAME: Contrastive  # 'SESS','Pseudo-Label','3DIoUMatch','SE_SSD','Contrastive'
         LD_BATCH_SIZE_PER_GPU: 8
         UD_BATCH_SIZE_PER_GPU: 8
         CONF_THRESH: [0.5, 0.25, 0.25]
         SEM_THRESH: [0.4, 0.4, 0.4]
         CAT_LBL_ULB: True
-        NUM_EPOCHS: 5
-
+        NUM_EPOCHS: 60
+        REPEAT: 5
         TEACHER:
             NUM_ITERS_PER_UPDATE: -1
 
         STUDENT:
             OPTIMIZER: adam_onecycle
-            LR: 0.001  # previously 0.01
+            LR: 0.01  # previously 0.01
             WEIGHT_DECAY: 0.01
             MOMENTUM: 0.9
-            MOMS: [ 0.95, 0.85 ]
+            MOMS: [0.95, 0.85]
             PCT_START: 0.4
             DIV_FACTOR: 10
-            DECAY_STEP_LIST: [ 35, 45 ]  # previously [16, 24]
+            DECAY_STEP_LIST: [16, 24]  # previously [16, 24]
             LR_DECAY: 0.1
             LR_CLIP: 0.0000001
             LR_WARMUP: False
@@ -398,4 +368,4 @@ OPTIMIZATION:
             GRAD_NORM_CLIP: 10
 
     TEST:
-        BATCH_SIZE_PER_GPU: 4
+        BATCH_SIZE_PER_GPU: 8

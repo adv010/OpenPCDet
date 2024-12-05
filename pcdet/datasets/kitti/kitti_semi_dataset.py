@@ -9,9 +9,6 @@ from ..semi_dataset import SemiDatasetTemplate
 
 
 def split_kitti_semi_data(dataset_cfg, data_splits, logger, root_path=None):
-    def check_annos(info):
-        return 'annos' in info
-
     root_path = dataset_cfg.DATA_PATH if root_path is None else root_path
     root_path = Path(root_path)
     logger.info('Loading kitti dataset')
@@ -28,16 +25,15 @@ def split_kitti_semi_data(dataset_cfg, data_splits, logger, root_path=None):
     kitti_test_infos = []
     with open(test_info_path, 'rb') as f:
         infos = pickle.load(f)
-        infos = list(filter(check_annos, infos))
-        kitti_test_infos.extend(copy.deepcopy(infos))
+        kitti_test_infos.extend(infos)
 
     train_split_lbl_path = root_path / "ImageSets" / (data_splits['train'] + ".txt")
     with open(train_split_lbl_path, "r") as f:
-        sample_id_list_lbl = [int(x.split(" ")[1]) for x in f.readlines()]
+        sample_index_list_lbl = [int(x.split(" ")[1]) for x in f.readlines()]
 
-    kitti_pretrain_infos = [kitti_train_infos[i] for i in sample_id_list_lbl]
+    kitti_pretrain_infos = [kitti_train_infos[i] for i in sample_index_list_lbl]
     kitti_labeled_infos = copy.deepcopy(kitti_pretrain_infos)
-    kitti_unlabeled_infos = [kitti_train_infos[i] for i in range(len(kitti_train_infos)) if i not in sample_id_list_lbl]
+    kitti_unlabeled_infos = [kitti_train_infos[i] for i in range(len(kitti_train_infos)) if i not in sample_index_list_lbl]
 
     logger.info('Total samples for kitti pre-training dataset: %d' % (len(kitti_pretrain_infos)))
     logger.info('Total samples for kitti labeled dataset: %d' % (len(kitti_labeled_infos)))
@@ -47,12 +43,11 @@ def split_kitti_semi_data(dataset_cfg, data_splits, logger, root_path=None):
 
 
 class KittiSemiDataset(SemiDatasetTemplate):
-    def __init__(self, dataset_cfg, class_names, infos=None, training=True, root_path=None, logger=None):
-        super().__init__(
-            dataset_cfg=dataset_cfg, class_names=class_names, training=training, root_path=root_path, logger=logger
-        )
+    def __init__(self, dataset_cfg, class_names, infos=None, training=True, root_path=None, logger=None, repeat=1):
+        super().__init__(dataset_cfg=dataset_cfg, class_names=class_names, training=training, root_path=root_path, logger=logger)
         self.split = self.dataset_cfg.DATA_SPLIT[self.mode]
         self.root_split_path = self.root_path / ('training' if self.split != 'test' else 'testing')
+        self.repeat = repeat
 
         split_dir = self.root_path / 'ImageSets' / (self.split + '.txt')
         self.sample_id_list = [x.strip() for x in open(split_dir).readlines()] if split_dir.exists() else None
@@ -60,9 +55,8 @@ class KittiSemiDataset(SemiDatasetTemplate):
         self.kitti_infos = infos
 
     def set_split(self, split):
-        super().__init__(
-            dataset_cfg=self.dataset_cfg, class_names=self.class_names, training=self.training, root_path=self.root_path, logger=self.logger
-        )
+        super().__init__(dataset_cfg=self.dataset_cfg, class_names=self.class_names, training=self.training,
+                         root_path=self.root_path, logger=self.logger)
         self.split = split
         self.root_split_path = self.root_path / ('training' if self.split != 'test' else 'testing')
 
@@ -162,7 +156,6 @@ class KittiSemiDataset(SemiDatasetTemplate):
 
         return pts_valid_flag
 
-    #@staticmethod
     def generate_prediction_dicts(self, batch_dict, pred_dicts, class_names, output_path=None):
         """
         Args:
@@ -270,11 +263,16 @@ class KittiSemiDataset(SemiDatasetTemplate):
         if self._merge_all_iters_to_one_epoch:
             return len(self.kitti_infos) * self.total_epochs
 
-        return len(self.kitti_infos)
+        if self.training:
+            return len(self.kitti_infos) * self.repeat
+        else:
+            return len(self.kitti_infos)
 
     def pre_getitem(self, index):
         if self._merge_all_iters_to_one_epoch:
             index = index % len(self.kitti_infos)
+
+        index = index % len(self.kitti_infos)
 
         info = copy.deepcopy(self.kitti_infos[index])
 
@@ -347,11 +345,10 @@ class KittiSemiDataset(SemiDatasetTemplate):
 
 
 class KittiLabeledDataset(KittiSemiDataset):
-    def __init__(self, dataset_cfg, class_names, infos=None, training=True, root_path=None, logger=None):
+    def __init__(self, dataset_cfg, class_names, infos=None, training=True, root_path=None, logger=None, repeat=1):
         assert training is True
-        super().__init__(
-            dataset_cfg=dataset_cfg, class_names=class_names, infos=infos, training=training, root_path=root_path, logger=logger
-        )
+        super().__init__(dataset_cfg=dataset_cfg, class_names=class_names, infos=infos, training=training,
+                         root_path=root_path, logger=logger, repeat=repeat)
         self.labeled_data_for = dataset_cfg.LABELED_DATA_FOR
 
     def __getitem__(self, index):
@@ -366,19 +363,10 @@ class KittiLabeledDataset(KittiSemiDataset):
 
 
 class KittiUnlabeledDataset(KittiSemiDataset):
-    def __init__(self, dataset_cfg, class_names, infos=None, training=True, root_path=None, logger=None):
-        """
-        Args:
-            root_path:
-            dataset_cfg:
-            class_names:
-            training:
-            logger:
-        """
+    def __init__(self, dataset_cfg, class_names, infos=None, training=True, root_path=None, logger=None, repeat=1):
         assert training is True
-        super().__init__(
-            dataset_cfg=dataset_cfg, class_names=class_names, infos=infos, training=training, root_path=root_path, logger=logger
-        )
+        super().__init__(dataset_cfg=dataset_cfg, class_names=class_names, infos=infos, training=training,
+                         root_path=root_path, logger=logger, repeat=repeat)
         self.unlabeled_data_for = dataset_cfg.UNLABELED_DATA_FOR
 
     def __getitem__(self, index):

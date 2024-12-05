@@ -87,7 +87,7 @@ class RoIAwarePool3dFunction(Function):
 
         pool_method_map = {'max': 0, 'avg': 1}
         pool_method = pool_method_map[pool_method]
-        roiaware_pool3d_cuda.forward(rois, pts, pts_feature, argmax, pts_idx_of_voxels, pooled_features, pool_method)
+        roiaware_pool3d_cuda.forward(rois)
 
         ctx.roiaware_pool3d_for_backward = (pts_idx_of_voxels, argmax, pool_method, num_pts, num_channels)
         return pooled_features

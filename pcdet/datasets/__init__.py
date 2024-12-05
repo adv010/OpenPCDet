@@ -90,7 +90,7 @@ def build_dataloader(dataset_cfg, class_names, batch_size, dist, root_path=None,
     return dataset, dataloader, sampler
 
 
-def build_semi_dataloader(dataset_cfg, class_names, batch_size, dist, workers=4, root_path=None,
+def build_semi_dataloader(dataset_cfg, class_names, batch_size, repeat, dist, workers=4, root_path=None,
                           logger=None, merge_all_iters_to_one_epoch=False, seed=None):
     assert not merge_all_iters_to_one_epoch
 
@@ -107,18 +107,19 @@ def build_semi_dataloader(dataset_cfg, class_names, batch_size, dist, workers=4,
         logger=logger,
     )
 
-    def create_dataloader(dataset_cls, infos, batch_size_key, training=True, shuffle=True):
+    def create_dataloader(dataset_cls, infos, stage, training=True, shuffle=True):
         dataset = dataset_cls(
             dataset_cfg=dataset_cfg,
             class_names=class_names,
             infos=infos,
             root_path=root_path,
             logger=logger,
-            training=training
+            training=training,
+            repeat=repeat[stage]
         )
         sampler = torch.utils.data.distributed.DistributedSampler(dataset) if dist else None
         return DataLoader(
-            dataset, batch_size=batch_size[batch_size_key], pin_memory=True, num_workers=workers,
+            dataset, batch_size=batch_size[stage], pin_memory=True, num_workers=workers,
             shuffle=(sampler is None) and shuffle, collate_fn=dataset.collate_batch,
             drop_last=False, sampler=sampler, timeout=0, worker_init_fn=partial(common_utils.worker_init_fn, seed=seed)
         ), dataset, sampler

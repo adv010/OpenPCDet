@@ -20,18 +20,11 @@ from train_utils.train_utils import train_model
 from eval_utils.eval_utils import eval_one_epoch
 import subprocess
 
-try:
-    from ssod.sess import sess
-    from ssod.pseudo_label import pseudo_label
-    from ssod.iou_match_3d import iou_match_3d
-    from ssod.se_ssd import se_ssd
-    from ssod.contrastive import Contrastive
-except ModuleNotFoundError:
-    from pcdet.ssod.sess import sess
-    from pcdet.ssod.pseudo_label import pseudo_label
-    from pcdet.ssod.iou_match_3d import iou_match_3d
-    from pcdet.ssod.se_ssd import se_ssd
-    from pcdet.ssod.contrastive import Contrastive
+from pcdet.ssod.sess import sess
+from pcdet.ssod.pseudo_label import pseudo_label
+from pcdet.ssod.iou_match_3d import iou_match_3d
+from pcdet.ssod.se_ssd import se_ssd
+from pcdet.ssod.contrastive import Contrastive
 
 # TODO(farzad): Make classes for each semi learning methods similar to Contrastive
 semi_learning_models = {
@@ -50,10 +43,10 @@ def get_git_commit_number():
     git_commit_number = cmd_out.stdout.decode('utf-8')[:7]
     return git_commit_number
 
+
 def parse_config():
     parser = argparse.ArgumentParser(description='arg parser')
     parser.add_argument('--cfg_file', type=str, default=None, help='specify the config for training')
-
     parser.add_argument('--batch_size', type=int, default=None, required=False, help='batch size for training')
     parser.add_argument('--eval_batch_size', type=int, default=None, required=False, help='batch size for testing')
     parser.add_argument('--epochs', type=int, default=None, required=False, help='number of epochs to train for')
@@ -94,7 +87,6 @@ def parse_config():
     assert cfg.DATA_CONFIG.DATA_AUGMENTOR.AUG_CONFIG_LIST[0].NAME == 'gt_sampling'  # hardcode
     cfg.DATA_CONFIG.DATA_AUGMENTOR.AUG_CONFIG_LIST[0].DB_INFO_PATH = [f'kitti_dbinfos_{args.split}.pkl']
     cfg.DATA_CONFIG.DATA_SPLIT['train'] = args.split
-
     cfg.MODEL.THRESH = [float(x) for x in args.thresh.split(',')]
     cfg.MODEL.SEM_THRESH = [float(x) for x in args.sem_thresh.split(',')]
     cfg.MODEL.UNLABELED_WEIGHT = args.unlabeled_weight
@@ -180,11 +172,18 @@ def main():
         'unlabeled': cfg.OPTIMIZATION.SEMI_SUP_LEARNING.UD_BATCH_SIZE_PER_GPU,
         'test': cfg.OPTIMIZATION.TEST.BATCH_SIZE_PER_GPU,
     }
+    repeat = {
+        'pretrain': cfg.OPTIMIZATION.PRETRAIN.REPEAT,
+        'labeled': cfg.OPTIMIZATION.SEMI_SUP_LEARNING.REPEAT,
+        'unlabeled': 1,
+        'test': 1
+    }
     # -----------------------create dataloader & network & optimizer---------------------------
     datasets, dataloaders, samplers = build_semi_dataloader(
         dataset_cfg=cfg.DATA_CONFIG,
         class_names=cfg.CLASS_NAMES,
         batch_size=batch_size,
+        repeat=repeat,
         dist=dist_train,
         workers=args.workers,
         logger=logger,
@@ -211,8 +210,8 @@ def main():
                     cfg.LOCAL_RANK % torch.cuda.device_count()])
             logger.info(pretrain_model)
             eval_pretrain_dir.mkdir(parents=True, exist_ok=True)
-            # eval_one_epoch(cfg, pretrain_model, dataloaders['test'], -1, logger, dist_test=dist_train, save_to_file=False,
-            #                result_dir=eval_pretrain_dir)
+            eval_one_epoch(cfg, pretrain_model, dataloaders['test'], -1, logger, dist_test=dist_train,
+                           save_to_file=False, result_dir=eval_pretrain_dir)
     else:
         pretrain_model.cuda()
         pretrain_optimizer = build_optimizer(pretrain_model, cfg.OPTIMIZATION.PRETRAIN)

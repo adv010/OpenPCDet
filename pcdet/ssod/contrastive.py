@@ -78,22 +78,21 @@ class Contrastive:
         # TODO(farzad): Check if by_ref=True is applicable
         batch_dict_tmp = self.clone_dict(batch_dict, input_keys, by_ref=False)
         if source_trans_dict is not None:
-            # TODO(farzad): Check if rois should have the size of (bs, N, 8) or (bs, N, 7)
             rois = transform_aug(rois, source_trans_dict, batch_dict)
             rois = torch.vstack(rois)
-            rois = rois.view(batch_dict['batch_size'], -1, rois.shape[-1])
+            rois = rois.view(batch_dict['batch_size'], -1, rois.shape[-1])[..., 0:7]
 
         if model == 'teacher':
             self._forward_test_teacher(batch_dict_tmp)
             batch_dict_tmp['rois'] = rois  # replace with the transformed rois
             with torch.no_grad():
-                batch_feats = self.teacher.roi_head.pool_features(batch_dict_tmp, use_projector=True)
+                batch_feats = self.teacher.roi_head.projector(batch_dict_tmp)
         else:
             # TODO(farzad): IS THIS WORKAROUND SAFE? Fix the issue with a better solution!
             batch_dict_tmp['gt_boxes'] = torch.zeros((rois.shape[0], 1, 8), device=rois.device)  # dummy
             self._forward_student(batch_dict_tmp)
             batch_dict_tmp['rois'] = rois  # replace with the transformed rois
-            batch_feats = self.student.roi_head.pool_features(batch_dict_tmp, use_projector=True)
+            batch_feats = self.student.roi_head.projector(batch_dict_tmp)
 
         batch_feats = batch_feats.view(*rois.shape[:2], -1)
         assert torch.logical_not(torch.eq(rois, 0).all(dim=-1)).all().item(), 'rois should not be zero!'
@@ -116,18 +115,12 @@ class Contrastive:
         tb_dict, disp_dict = {}, {}
         loss_lbl, tb_dict_lbl, disp_dict_lbl = self.student.get_training_loss()
         loss += loss_lbl
-        tb_dict_lbl = {f"{key}_labeled": value for key, value in tb_dict_lbl.items()}
-        tb_dict_ulb = {}
+
         for cur_module in self.student.module_list:
             batch_dict_sa_ulb = cur_module(batch_dict_sa_ulb)
 
         loss_rpn_cls, loss_rpn_reg, tb_dict_rpn_ulb = self.student.dense_head.get_loss(separate_losses=True)
-        
-        for key in tb_dict_rpn_ulb.keys():
-            tb_dict_ulb[f"{key}_unlabeled"] = tb_dict_rpn_ulb[key]
         loss_rcnn_cls, loss_rcnn_reg, tb_dict_rcnn_ulb = self.student.roi_head.get_loss(separate_losses=True)
-        for key in tb_dict_rcnn_ulb.keys():
-            tb_dict_ulb[f"{key}_unlabeled"] = tb_dict_rcnn_ulb[key]
 
         if self.rpn_cls_ulb:
             loss += loss_rpn_cls * self.unlabeled_weight
@@ -151,7 +144,7 @@ class Contrastive:
                 rois = torch.cat([rois, dummy_labels.unsqueeze(2)], dim=-1)  # Warning: no clone
                 t2 = self._get_dino_feats(batch_dict_sa_ulb, rois)
                 t1 = self._get_dino_feats(batch_dict_wa_ulb, rois, source_trans_dict=batch_dict_sa_ulb)
-            s2 = self.student.roi_head.forward_ret_dict['proj_feats']
+            s2 = self._get_dino_feats(batch_dict_sa_ulb, rois, model='student')
             s1 = self._get_dino_feats(batch_dict_wa_ulb, rois, model='student', source_trans_dict=batch_dict_sa_ulb)
             s1 = s1.view(-1, s1.shape[-1])
             teacher_output = torch.cat([t1, t2], dim=0).view(-1, t1.shape[-1])  # (BxN, C) N=128
@@ -161,8 +154,9 @@ class Contrastive:
             tb_dict.update({'dino_loss_unlabeled': dino_loss.item()})
             loss += dino_loss * self.model_cfg.MODEL.ROI_HEAD.DINO_LOSS.get('WEIGHT', 1.0)
 
-        # TODO(farzad): Merge all tb_dicts with postfixes in the end
-        tb_dict = self._split_lbl_ulb_logs(tb_dict, tb_dict_lbl, tb_dict_ulb)
+        self.merge_tb_dicts(tb_dict_lbl, tb_dict, 'labeled')
+        self.merge_tb_dicts(tb_dict_rpn_ulb, tb_dict, 'unlabeled')
+        self.merge_tb_dicts(tb_dict_rcnn_ulb, tb_dict, 'unlabeled')
 
         return loss, tb_dict, disp_dict
 
@@ -205,14 +199,6 @@ class Contrastive:
         return (conf_scores > conf_thresh) & (sem_scores > sem_thresh)
     
     @staticmethod
-    def _split_lbl_ulb_logs(tb_dict, tb_dict_lb,tb_dict_ulb):
-        for key in tb_dict_lb.keys():
-            tb_dict[f"{key}"] = tb_dict_lb[key]
-        for key in tb_dict_ulb.keys():
-            tb_dict[f"{key}"] = tb_dict_ulb[key]       
-            #     tb_dict_[f"{key}_labeled"] = torch.mean(tb_dict[key][lbl_inds, ...])
-            #     tb_dict_[f"{key}_unlabeled"] = torch.mean(tb_dict[key][ulb_inds, ...])
-            # else:
-            #     tb_dict_[key] = tb_dict[key]
-
-        return tb_dict
+    def merge_tb_dicts(source_tb_dict, target_tb_dict, postfix=None):
+        for key, val in source_tb_dict.items():
+            target_tb_dict[f"{key}_{postfix}"] = val

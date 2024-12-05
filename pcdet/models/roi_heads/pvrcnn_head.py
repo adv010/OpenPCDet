@@ -46,17 +46,7 @@ class PVRCNNHead(RoIHeadTemplate):
             fc_list=self.model_cfg.REG_FC
         )
         self.print_loss_when_eval = False
-
-        self.enable_proj = (self.model_cfg.INST_CONT_LOSS.ENABLE or
-                          self.model_cfg.DINO_LOSS.ENABLE or self.model_cfg.ROI_CONT_LOSS.ENABLE)
-        if self.enable_proj:
-            self.proj_size = self.model_cfg.PROJECTION_SIZE
-            input_size = self.model_cfg.SHARED_FC[-1]
-            self.projector = weight_norm(nn.Linear(input_size, self.proj_size, bias=False))
-            self.projector.weight_g.data.fill_(1)
-            if self.model_cfg.DINO_LOSS.NORM_LAST_LAYER:
-                self.projector.weight_g.requires_grad = False
-
+        self.projector = Projector(model_cfg) if model_cfg.DINO_LOSS.ENABLE else None
         self.init_weights(weight_init='xavier')
 
     def init_weights(self, weight_init='xavier'):
@@ -79,7 +69,7 @@ class PVRCNNHead(RoIHeadTemplate):
                     nn.init.constant_(m.bias, 0)
         nn.init.normal_(self.reg_layers[-1].weight, mean=0, std=0.001)
 
-    def roi_grid_pool(self, batch_dict, use_gtboxes=False, use_ori_gtboxes=False):
+    def roi_grid_pool(self, batch_dict):
         """
         Args:
             batch_dict:
@@ -93,12 +83,7 @@ class PVRCNNHead(RoIHeadTemplate):
 
         """
         batch_size = batch_dict['batch_size']
-        if use_gtboxes:
-            rois = batch_dict['gt_boxes'][..., 0:7]
-        elif use_ori_gtboxes:
-            rois = batch_dict['ori_gt_boxes'][..., 0:7]
-        else:
-            rois = batch_dict['rois']
+        rois = batch_dict['rois']
         point_coords = batch_dict["point_coords"]
         point_features = batch_dict["point_features"]
         point_cls_scores = batch_dict["point_cls_scores"]
@@ -155,20 +140,6 @@ class PVRCNNHead(RoIHeadTemplate):
                           - (local_roi_size.unsqueeze(dim=1) / 2)  # (B, 6x6x6, 3)
         return roi_grid_points
 
-    def pool_features(self, batch_dict, use_gtboxes=False, use_ori_gtboxes=False, use_projector=False):
-        pooled_features = self.roi_grid_pool(batch_dict, use_gtboxes=use_gtboxes, use_ori_gtboxes=use_ori_gtboxes)  # (BxN, 6x6x6, C)
-        grid_size = self.model_cfg.ROI_GRID_POOL.GRID_SIZE
-        batch_size_rcnn = pooled_features.shape[0]
-        pooled_features = pooled_features.permute(0, 2, 1). \
-            contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
-        if use_projector:
-            shared_features = self.shared_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1)).squeeze()
-            if self.model_cfg.DINO_LOSS.NORM_LAST_LAYER:
-                shared_features = F.normalize(shared_features, p=2, dim=-1)
-            pooled_features = self.projector(shared_features)
-        return pooled_features
-    
-
     def forward(self, batch_dict, test_only=False):
         """
         :param input_data: input dict
@@ -183,19 +154,21 @@ class PVRCNNHead(RoIHeadTemplate):
         if (self.training or self.print_loss_when_eval) and not test_only:
             targets_dict = self.assign_targets(batch_dict)
             batch_dict['rois'] = targets_dict['rois']
-            batch_dict['roi_scores'] = targets_dict['roi_scores']
             batch_dict['roi_labels'] = targets_dict['roi_labels']
-            batch_dict['roi_scores_logits'] = targets_dict['roi_scores_logits']
-            batch_dict['rcnn_cls_labels'] = targets_dict['rcnn_cls_labels']
-            (batch_dict['rcnn_cls_labels'] == -1).any().item() and print('rcnn_cls_labels has -1')
-            batch_dict['gt_iou_of_rois'] = targets_dict['gt_iou_of_rois']
+            # batch_dict['roi_scores'] = targets_dict['roi_scores']
+            # batch_dict['roi_scores_logits'] = targets_dict['roi_scores_logits']
+            # batch_dict['rcnn_cls_labels'] = targets_dict['rcnn_cls_labels']
+            # (batch_dict['rcnn_cls_labels'] == -1).any().item() and print('rcnn_cls_labels has -1')
+            # batch_dict['gt_iou_of_rois'] = targets_dict['gt_iou_of_rois']
 
-        pooled_features = self.pool_features(batch_dict)
+        pooled_features = self.roi_grid_pool(batch_dict)  # (BxN, 6x6x6, C)
+        grid_size = self.model_cfg.ROI_GRID_POOL.GRID_SIZE
+        batch_size_rcnn = pooled_features.shape[0]
+        pooled_features = pooled_features.permute(0, 2, 1). \
+            contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
+
         batch_size_rcnn = pooled_features.shape[0]
         shared_features = self.shared_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1))
-        if self.enable_proj:
-            shared_norm_features = F.normalize(shared_features.squeeze(), p=2, dim=-1)
-            proj_feats = self.projector(shared_norm_features)
         rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
         rcnn_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
 
@@ -207,17 +180,38 @@ class PVRCNNHead(RoIHeadTemplate):
             batch_dict['batch_cls_preds'] = batch_cls_preds
             batch_dict['batch_box_preds'] = batch_box_preds
             batch_dict['cls_preds_normalized'] = False
-            # Temporarily add infos to targets_dict for metrics
-            targets_dict['batch_box_preds'] = batch_box_preds
 
         if self.training or self.print_loss_when_eval:
             targets_dict['rcnn_cls'] = rcnn_cls
             targets_dict['rcnn_reg'] = rcnn_reg
-            if self.enable_proj:
-                targets_dict['proj_feats'] = proj_feats
             self.forward_ret_dict = targets_dict
 
         return batch_dict
+
+
+class Projector(nn.Module):
+    def __init__(self, cfgs, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.cfgs = cfgs
+        self.proj_size = cfgs.PROJECTION_SIZE
+        input_size = cfgs.SHARED_FC[-1]
+        self.projector = weight_norm(nn.Linear(input_size, self.proj_size, bias=False))
+        self.projector.weight_g.data.fill_(1)
+        if cfgs.DINO_LOSS.NORM_LAST_LAYER:
+            self.projector.weight_g.requires_grad = False
+
+    def forward(self, batch_dict):
+        pooled_features = self.roi_grid_pool(batch_dict)  # (BxN, 6x6x6, C)
+        grid_size = self.cfgs.ROI_GRID_POOL.GRID_SIZE
+        batch_size_rcnn = pooled_features.shape[0]
+        pooled_features = pooled_features.permute(0, 2, 1). \
+            contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
+        # TODO(farzad): ablation: remove the shared_fc_layer
+        shared_features = self.shared_fc_layer(pooled_features.view(batch_size_rcnn, -1, 1))
+        if self.cfgs.DINO_LOSS.NORM_LAST_LAYER:
+            shared_features = F.normalize(shared_features, p=2, dim=-1)
+        proj_feats = self.projector(shared_features)
+        return proj_feats
 
 
 class PVRCNNHeadWithSemCls(PVRCNNHead):
