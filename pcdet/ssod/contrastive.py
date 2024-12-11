@@ -2,6 +2,7 @@ import torch
 from pcdet.ops.roiaware_pool3d.roiaware_pool3d_utils import points_in_boxes_gpu
 from pcdet.utils.loss_utils import DINOLoss
 from train_utils.semi_utils import transform_aug, load_data_to_gpu
+from tools.visual_utils import open3d_vis_utils as V
 
 
 class Contrastive:
@@ -156,6 +157,17 @@ class Contrastive:
         self.merge_tb_dicts(tb_dict_rcnn_ulb, tb_dict, 'unlabeled')
 
         return loss, tb_dict, disp_dict
+
+    @staticmethod
+    def vis(points, gt_boxes, gt_labels, ref_boxes=None, ref_labels=None, ref_scores=None, attributes=None):
+        gt_boxes = gt_boxes.cpu().numpy()
+        points = points.cpu().numpy()
+        gt_labels = gt_labels.cpu().numpy()
+        ref_boxes = ref_boxes.cpu().numpy() if ref_boxes is not None else None
+        ref_labels = ref_labels.cpu().numpy() if ref_labels is not None else None
+        ref_scores = ref_scores.cpu().numpy() if ref_scores is not None else None
+        V.draw_scenes(points=points, gt_boxes=gt_boxes, gt_labels=gt_labels, ref_boxes=ref_boxes,
+                      ref_labels=ref_labels, ref_scores=ref_scores, attributes=attributes)
 
     def filter_pls(self, pls_dict):
         pl_boxes, pl_scores, pl_sem_scores, pl_sem_logits = [], [], [], []

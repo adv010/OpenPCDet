@@ -101,6 +101,8 @@ def transform_aug(boxes, source_dict, target_dict):
             box = aug_func(box, aug_params, reverse=True)
         # Apply target augmentations
         for key in target_aug_list:
+            if key == 'gt_sampling':
+                continue
             aug_params = target_aug_param[key]
             aug_func = augmentation_functions[key]
             box = aug_func(box, aug_params, reverse=False)

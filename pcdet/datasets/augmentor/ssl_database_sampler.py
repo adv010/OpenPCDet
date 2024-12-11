@@ -205,13 +205,6 @@ class SSLDataBaseSampler(object):
 
     def add_sampled_boxes_to_scene_wo_gt(self, data_dict, sampled_gt_boxes, total_valid_sampled_dict):
         points = data_dict['points']
-        if self.sampler_cfg.get('USE_ROAD_PLANE', False):
-            sampled_gt_boxes, mv_height = self.put_boxes_on_road_planes(
-                sampled_gt_boxes, data_dict['road_plane'], data_dict['calib']
-            )
-            data_dict.pop('calib')
-            data_dict.pop('road_plane')
-
         obj_points_list = []
         for idx, info in enumerate(total_valid_sampled_dict):
             file_path = os.path.join(self.root_path, info['path'])
@@ -219,10 +212,6 @@ class SSLDataBaseSampler(object):
                 [-1, self.sampler_cfg.NUM_POINT_FEATURES])
 
             obj_points[:, :3] += info['box3d_lidar'][:3]
-
-            if self.sampler_cfg.get('USE_ROAD_PLANE', False):
-                # mv height
-                obj_points[:, 2] -= mv_height[idx]
 
             obj_points_list.append(obj_points)
 
@@ -245,7 +234,7 @@ class SSLDataBaseSampler(object):
         Returns:
 
         """
-        if 'gt_boxes' in data_dict:
+        if 'gt_boxes' in data_dict and 'ulb' not in data_dict.keys():
             gt_boxes = data_dict['gt_boxes']
             gt_names = data_dict['gt_names'].astype(str)
             existed_boxes = gt_boxes
@@ -277,22 +266,22 @@ class SSLDataBaseSampler(object):
             data_dict.pop('gt_boxes_mask')
 
         else:
-            sampled_gt_boxes = []
-            total_valid_sampled_dict = []
-            for class_name, sample_group in self.sample_groups.items():
-                if self.limit_whole_scene:
-                    num_gt = 0
-                    sample_group['sample_num'] = str(int(self.sample_class_num[class_name]) - num_gt)
-                if int(sample_group['sample_num']) > 0:
-                    sampled_dict = self.sample_with_fixed_number(class_name, sample_group)
-                    sampled_boxes = np.stack([x['box3d_lidar'] for x in sampled_dict], axis=0).astype(np.float32)
-                    if self.sampler_cfg.get('DATABASE_WITH_FAKELIDAR', False):
-                        sampled_boxes = box_utils.boxes3d_kitti_fakelidar_to_lidar(sampled_boxes)
-                    sampled_gt_boxes.append(sampled_boxes)
-                    total_valid_sampled_dict.extend(sampled_dict)
-
-            sampled_gt_boxes = np.concatenate(sampled_gt_boxes, axis=0)
-            if total_valid_sampled_dict.__len__() > 0:
-                data_dict = self.add_sampled_boxes_to_scene_wo_gt(data_dict, sampled_gt_boxes, total_valid_sampled_dict)
-
+            # sampled_gt_boxes = []
+            # total_valid_sampled_dict = []
+            # for class_name, sample_group in self.sample_groups.items():
+            #     if self.limit_whole_scene:
+            #         num_gt = 0
+            #         sample_group['sample_num'] = str(int(self.sample_class_num[class_name]) - num_gt)
+            #     if int(sample_group['sample_num']) > 0:
+            #         sampled_dict = self.sample_with_fixed_number(class_name, sample_group)
+            #         sampled_boxes = np.stack([x['box3d_lidar'] for x in sampled_dict], axis=0).astype(np.float32)
+            #         if self.sampler_cfg.get('DATABASE_WITH_FAKELIDAR', False):
+            #             sampled_boxes = box_utils.boxes3d_kitti_fakelidar_to_lidar(sampled_boxes)
+            #         sampled_gt_boxes.append(sampled_boxes)
+            #         total_valid_sampled_dict.extend(sampled_dict)
+            #
+            # sampled_gt_boxes = np.concatenate(sampled_gt_boxes, axis=0)
+            # if total_valid_sampled_dict.__len__() > 0:
+            #     data_dict = self.add_sampled_boxes_to_scene_wo_gt(data_dict, sampled_gt_boxes, total_valid_sampled_dict)
+            pass
         return data_dict

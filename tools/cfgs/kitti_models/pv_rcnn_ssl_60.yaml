@@ -38,6 +38,21 @@ DATA_CONFIG:
     STUDENT_AUGMENTOR:
         DISABLE_AUG_LIST: [ 'placeholder' ]
         AUG_CONFIG_LIST:
+            - NAME: gt_sampling
+              USE_ROAD_PLANE: True
+              DB_INFO_PATH:
+                  - kitti_dbinfos_train.pkl
+              PREPARE: {
+                  filter_by_min_points: [ 'Car:5', 'Pedestrian:5', 'Cyclist:5' ],
+                  filter_by_difficulty: [ -1 ],
+              }
+
+              SAMPLE_GROUPS: [ 'Car:15','Pedestrian:10', 'Cyclist:10' ]
+              NUM_POINT_FEATURES: 4
+              DATABASE_WITH_FAKELIDAR: False
+              REMOVE_EXTRA_WIDTH: [ 0.0, 0.0, 0.0 ]
+              LIMIT_WHOLE_SCENE: False
+
             - NAME: random_world_flip
               ALONG_AXIS_LIST: ['x']  # Previously it was ['x']. Later Add `y` to the list.
 
@@ -175,7 +190,7 @@ MODEL:
             }
 
     ROI_HEAD:
-        NAME: PVRCNNHeadWithProjector
+        NAME: PVRCNNHead
         CLASS_AGNOSTIC: True
         ENABLE_VIS: False
         ENABLE_SOFT_TEACHER: False
@@ -359,7 +374,10 @@ OPTIMIZATION:
         NUM_EPOCHS: 60
         REPEAT: 5
         TEACHER:
-            NUM_ITERS_PER_UPDATE: -1
+            NUM_ITERS_PER_UPDATE: 1
+            EMA_EPOCH: [15, 20]
+            RAMPUP_EMA_MOMENTUM: 0.99
+            EMA_MOMENTUM: 0.999
 
         STUDENT:
             OPTIMIZER: adam_onecycle
@@ -373,7 +391,7 @@ OPTIMIZATION:
             LR_DECAY: 0.1
             LR_CLIP: 0.0000001
             LR_WARMUP: False
-            WARMUP_EPOCH: -1
+            WARMUP_EPOCH: 1  # previously 1
             GRAD_NORM_CLIP: 10
 
     TEST:
