@@ -29,8 +29,37 @@ class ProposalTargetLayer(nn.Module):
                 reg_valid_mask: (B, M)
                 rcnn_cls_labels: (B, M)
         """
+        batch_rois, batch_gt_of_rois, batch_roi_ious, batch_roi_scores, batch_roi_labels = self.sample_rois_for_rcnn(
+            batch_dict=batch_dict
+        )
+        # regression valid mask
+        reg_valid_mask = (batch_roi_ious > self.roi_sampler_cfg.REG_FG_THRESH).long()
 
-        return self.sample_rois_for_rcnn(batch_dict=batch_dict)
+        # classification label
+        if self.roi_sampler_cfg.CLS_SCORE_TYPE == 'cls':
+            batch_cls_labels = (batch_roi_ious > self.roi_sampler_cfg.CLS_FG_THRESH).long()
+            ignore_mask = (batch_roi_ious > self.roi_sampler_cfg.CLS_BG_THRESH) & \
+                          (batch_roi_ious < self.roi_sampler_cfg.CLS_FG_THRESH)
+            batch_cls_labels[ignore_mask > 0] = -1
+        elif self.roi_sampler_cfg.CLS_SCORE_TYPE == 'roi_iou':
+            iou_bg_thresh = self.roi_sampler_cfg.CLS_BG_THRESH
+            iou_fg_thresh = self.roi_sampler_cfg.CLS_FG_THRESH
+            fg_mask = batch_roi_ious > iou_fg_thresh
+            bg_mask = batch_roi_ious < iou_bg_thresh
+            interval_mask = (fg_mask == 0) & (bg_mask == 0)
+
+            batch_cls_labels = (fg_mask > 0).float()
+            batch_cls_labels[interval_mask] = \
+                (batch_roi_ious[interval_mask] - iou_bg_thresh) / (iou_fg_thresh - iou_bg_thresh)
+        else:
+            raise NotImplementedError
+
+        targets_dict = {'rois': batch_rois, 'gt_of_rois': batch_gt_of_rois, 'gt_iou_of_rois': batch_roi_ious,
+                        'roi_scores': batch_roi_scores, 'roi_labels': batch_roi_labels,
+                        'reg_valid_mask': reg_valid_mask,
+                        'rcnn_cls_labels': batch_cls_labels}
+
+        return targets_dict
 
     def sample_rois_for_rcnn(self, batch_dict):
         """
@@ -46,208 +75,53 @@ class ProposalTargetLayer(nn.Module):
         """
         batch_size = batch_dict['batch_size']
         rois = batch_dict['rois']
+        roi_scores = batch_dict['roi_scores']
+        roi_labels = batch_dict['roi_labels']
+        gt_boxes = batch_dict['gt_boxes']
+
         code_size = rois.shape[-1]
         batch_rois = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE, code_size)
-        batch_roi_scores = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE)
-        batch_roi_scores_logits = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE, 3)
-        batch_roi_labels = rois.new_zeros((batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE), dtype=torch.long)
-        # # TODO(farzad): make sure to revert `code_size + 2` to `code_size + 1` if weights are not appended to gts.
-        # batch_gt_of_rois = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE, code_size + 2)
         batch_gt_of_rois = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE, code_size + 1)
         batch_roi_ious = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE)
-        batch_reg_valid_mask = rois.new_zeros((batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE), dtype=torch.long)
-        batch_cls_labels = -rois.new_ones(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE)
-        interval_mask = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE, dtype=torch.bool)
+        batch_roi_scores = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE)
+        batch_roi_labels = rois.new_zeros((batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE), dtype=torch.long)
 
         for index in range(batch_size):
-            cur_gt_boxes = batch_dict['gt_boxes'][index]
-            cur_rois = batch_dict['rois'][index]
-            cur_roi_labels = batch_dict['roi_labels'][index]
-            k = cur_gt_boxes.__len__() - 1
-            while k >= 0 and cur_gt_boxes[k].sum() == 0:
+            cur_roi, cur_gt, cur_roi_labels, cur_roi_scores = \
+                rois[index], gt_boxes[index], roi_labels[index], roi_scores[index]
+            k = cur_gt.__len__() - 1
+            while k >= 0 and cur_gt[k].sum() == 0:
                 k -= 1
-            cur_gt_boxes = cur_gt_boxes[:k + 1]
-            cur_gt_boxes = cur_gt_boxes.new_zeros((1, cur_gt_boxes.shape[1])) if len(cur_gt_boxes) == 0 else cur_gt_boxes
-            (sampled_inds, cur_reg_valid_mask, cur_cls_labels, roi_ious, gt_assignment,
-             cur_interval_mask) = self.subsample_labeled_rois(cur_rois, cur_roi_labels, cur_gt_boxes)
-            batch_rois[index] = batch_dict['rois'][index][sampled_inds]
-            batch_gt_of_rois[index] = cur_gt_boxes[gt_assignment[sampled_inds]]
-            batch_roi_ious[index] = roi_ious
-            batch_roi_scores[index] = batch_dict['roi_scores'][index][sampled_inds]
-            batch_roi_scores_logits[index] = batch_dict['roi_scores_logits'][index][sampled_inds]
-            batch_roi_labels[index] = batch_dict['roi_labels'][index][sampled_inds]
-            batch_reg_valid_mask[index] = cur_reg_valid_mask
-            batch_cls_labels[index] = cur_cls_labels
-            interval_mask[index] = cur_interval_mask
+            cur_gt = cur_gt[:k + 1]
+            cur_gt = cur_gt.new_zeros((1, cur_gt.shape[1])) if len(cur_gt) == 0 else cur_gt
 
-        return {'rois': batch_rois, 'gt_of_rois': batch_gt_of_rois, 'gt_iou_of_rois': batch_roi_ious,
-                'roi_scores': batch_roi_scores, 'roi_scores_logits': batch_roi_scores_logits,
-                'roi_labels': batch_roi_labels, 'reg_valid_mask': batch_reg_valid_mask,
-                'rcnn_cls_labels': batch_cls_labels, 'interval_mask': interval_mask}
+            if self.roi_sampler_cfg.get('SAMPLE_ROI_BY_EACH_CLASS', False):
+                max_overlaps, gt_assignment = self.get_max_iou_with_same_class(
+                    rois=cur_roi, roi_labels=cur_roi_labels,
+                    gt_boxes=cur_gt[:, 0:7], gt_labels=cur_gt[:, -1].long()
+                )
+            else:
+                iou3d = iou3d_nms_utils.boxes_iou3d_gpu(cur_roi, cur_gt[:, 0:7])  # (M, N)
+                max_overlaps, gt_assignment = torch.max(iou3d, dim=1)
 
-    def subsample_unlabeled_rois_default(self, batch_dict, index):
-        cur_roi = batch_dict['rois'][index]
-        cur_gt_boxes = batch_dict['gt_boxes'][index]
-        cur_roi_labels = batch_dict['roi_labels'][index]
+            sampled_inds = self.subsample_rois(max_overlaps=max_overlaps)
 
-        if self.roi_sampler_cfg.get('SAMPLE_ROI_BY_EACH_CLASS', False):
-            max_overlaps, gt_assignment = self.get_max_iou_with_same_class(
-                rois=cur_roi, roi_labels=cur_roi_labels,
-                gt_boxes=cur_gt_boxes[:, 0:7], gt_labels=cur_gt_boxes[:, -1].long()
-            )
-        else:
-            iou3d = iou3d_nms_utils.boxes_iou3d_gpu(cur_roi, cur_gt_boxes[:, 0:7])  # (M, N)
-            max_overlaps, gt_assignment = torch.max(iou3d, dim=1)
+            batch_rois[index] = cur_roi[sampled_inds]
+            batch_roi_labels[index] = cur_roi_labels[sampled_inds]
+            batch_roi_ious[index] = max_overlaps[sampled_inds]
+            batch_roi_scores[index] = cur_roi_scores[sampled_inds]
+            batch_gt_of_rois[index] = cur_gt[gt_assignment[sampled_inds]]
 
-        fg_rois_per_image = int(np.round(self.roi_sampler_cfg.FG_RATIO * self.roi_sampler_cfg.ROI_PER_IMAGE))
-        bg_rois_per_image = self.roi_sampler_cfg.ROI_PER_IMAGE - fg_rois_per_image
-        if self.roi_sampler_cfg.get('UNLABELED_SAMPLE_EASY_BG', False):
-            hard_bg_rois_per_image = (int(bg_rois_per_image * self.roi_sampler_cfg.HARD_BG_RATIO))
-        else:
-            hard_bg_rois_per_image = bg_rois_per_image
+        return batch_rois, batch_gt_of_rois, batch_roi_ious, batch_roi_scores, batch_roi_labels
 
-        _, sampled_inds = torch.topk(max_overlaps, k=fg_rois_per_image + hard_bg_rois_per_image)
-
-        if self.roi_sampler_cfg.get('UNLABELED_SAMPLE_EASY_BG', False):
-            easy_bg_rois_per_image = bg_rois_per_image - hard_bg_rois_per_image
-            _, easy_bg_inds = torch.topk(max_overlaps, k=easy_bg_rois_per_image, largest=False)
-            sampled_inds = torch.cat([sampled_inds, easy_bg_inds])
-
-        roi_ious = max_overlaps[sampled_inds]
-        sampled_gt_assignment = gt_assignment[sampled_inds]
-        sampled_gt_assigned_boxes = cur_gt_boxes[sampled_gt_assignment]
-        sampled_cur_roi_labels = cur_roi_labels[sampled_inds].detach().clone() - 1
-
-        # ----------- REG_VALID_MASK -----------
-        reg_fg_thresh = self.roi_sampler_cfg.UNLABELED_REG_FG_THRESH
-        reg_fg_thresh = roi_ious.new_tensor(reg_fg_thresh).reshape(1, -1).repeat(len(roi_ious), 1)
-        reg_fg_thresh = torch.gather(reg_fg_thresh, dim=-1, index=sampled_cur_roi_labels.unsqueeze(-1)).squeeze(-1)
-        cur_reg_valid_mask = (roi_ious > reg_fg_thresh).long()
-
-        # ----------- RCNN_CLS_LABELS -----------
-        cls_fg_thresh = self.roi_sampler_cfg.UNLABELED_CLS_FG_THRESH
-        fg_thresh = roi_ious.new_tensor(cls_fg_thresh).reshape(1, -1).repeat(len(roi_ious), 1)
-        cls_fg_thresh = torch.gather(fg_thresh, dim=-1, index=sampled_cur_roi_labels.unsqueeze(-1)).squeeze(-1)
-        cls_bg_thresh = self.roi_sampler_cfg.UNLABELED_CLS_BG_THRESH
-
-        fg_mask = roi_ious > cls_fg_thresh
-        bg_mask = roi_ious < cls_bg_thresh
-        interval_mask = ~(fg_mask | bg_mask)
-        # ignore_mask = torch.eq(roi_ious, 0).all(dim=-1)
-        ignore_mask = torch.eq(sampled_gt_assigned_boxes, 0).all(dim=-1)
-
-        cur_cls_labels = roi_ious.clone().detach()
-        # Hard labeling for FGs/BGs, soft labeling for UCs
-        cur_cls_labels[ignore_mask] = -1
-        if self.roi_sampler_cfg.get("UNLABELED_SHARP_RCNN_CLS_LABELS", False):
-            cur_cls_labels[fg_mask] = 1.
-            cur_cls_labels[bg_mask] = 0.
-        # Normalize raw IoUs as per FG and BG thresholds
-        if self.roi_sampler_cfg.get("UNLABELED_USE_CALIBRATED_IOUS", False):
-            cur_cls_labels[interval_mask] = (cur_cls_labels[interval_mask] - cls_bg_thresh) \
-                                            / (cls_fg_thresh[interval_mask] - cls_bg_thresh)
-
-        return sampled_inds, cur_reg_valid_mask, cur_cls_labels, roi_ious, gt_assignment, interval_mask
-
-    def subsample_unlabeled_rois_classwise(self, batch_dict, index):
-        cur_roi = batch_dict['rois'][index]
-        cur_gt_boxes = batch_dict['gt_boxes'][index]
-        cur_roi_labels = batch_dict['roi_labels'][index]
-
-        reg_fg_thresh = cur_roi.new_tensor(self.roi_sampler_cfg.UNLABELED_REG_FG_THRESH).view(1, -1).repeat(len(cur_roi), 1)
-        reg_fg_thresh = reg_fg_thresh.gather(dim=-1, index=(cur_roi_labels - 1).unsqueeze(-1)).squeeze(-1)
-
-        cls_fg_thresh = cur_roi.new_tensor(self.roi_sampler_cfg.UNLABELED_CLS_FG_THRESH).view(1, -1).repeat(len(cur_roi), 1)
-        cls_fg_thresh = cls_fg_thresh.gather(dim=-1, index=(cur_roi_labels - 1).unsqueeze(-1)).squeeze(-1)
-
-        if self.roi_sampler_cfg.get('SAMPLE_ROI_BY_EACH_CLASS', False):
-            max_overlaps, gt_assignment = self.get_max_iou_with_same_class(
-                rois=cur_roi, roi_labels=cur_roi_labels,
-                gt_boxes=cur_gt_boxes[:, 0:7], gt_labels=cur_gt_boxes[:, -1].long()
-            )
-        else:
-            iou3d = iou3d_nms_utils.boxes_iou3d_gpu(cur_roi, cur_gt_boxes[:, 0:7])  # (M, N)
-            max_overlaps, gt_assignment = torch.max(iou3d, dim=1)
-
-        sampled_inds = self.subsample_rois(max_overlaps=max_overlaps,
-                                           reg_fg_thresh=reg_fg_thresh,
-                                           cls_fg_thresh=cls_fg_thresh)
-        roi_ious = max_overlaps[sampled_inds]
-
-        if isinstance(reg_fg_thresh, torch.Tensor):
-            reg_fg_thresh = reg_fg_thresh[sampled_inds]
-        if isinstance(cls_fg_thresh, torch.Tensor):
-            cls_fg_thresh = cls_fg_thresh[sampled_inds]
-
-        # regression valid mask
-        reg_valid_mask = (roi_ious > reg_fg_thresh).long()
-
-        # classification label
-        iou_bg_thresh = self.roi_sampler_cfg.CLS_BG_THRESH
-
-        iou_fg_thresh = cls_fg_thresh
-
-        fg_mask = roi_ious > iou_fg_thresh
-        bg_mask = roi_ious < iou_bg_thresh
-        interval_mask = (fg_mask == 0) & (bg_mask == 0)
-        cls_labels = (fg_mask > 0).float()
-        cls_labels[interval_mask] = (roi_ious[interval_mask] - iou_bg_thresh) / (iou_fg_thresh[interval_mask] - iou_bg_thresh)
-
-        ignore_mask = torch.eq(cur_gt_boxes[gt_assignment[sampled_inds]], 0).all(dim=-1)
-        cls_labels[ignore_mask] = -1
-
-        return sampled_inds, reg_valid_mask, cls_labels, roi_ious, gt_assignment, interval_mask
-
-    def subsample_labeled_rois(self, cur_roi, cur_roi_labels, cur_gt_boxes):
-        if self.roi_sampler_cfg.get('SAMPLE_ROI_BY_EACH_CLASS', False):
-            max_overlaps, gt_assignment = self.get_max_iou_with_same_class(
-                rois=cur_roi, roi_labels=cur_roi_labels,
-                gt_boxes=cur_gt_boxes[:, 0:7], gt_labels=cur_gt_boxes[:, -1].long()
-            )
-        else:
-            iou3d = iou3d_nms_utils.boxes_iou3d_gpu(cur_roi, cur_gt_boxes[:, 0:7])  # (M, N)
-            max_overlaps, gt_assignment = torch.max(iou3d, dim=1)
-
-        sampled_inds = self.subsample_rois(max_overlaps=max_overlaps)
-        roi_ious = max_overlaps[sampled_inds]
-        # regression valid mask
-        reg_valid_mask = (roi_ious > self.roi_sampler_cfg.REG_FG_THRESH).long()
-
-        # classification label
-        iou_bg_thresh = self.roi_sampler_cfg.CLS_BG_THRESH
-        # NOTE (shashank): Use classwise local thresholds used in unlabeled ROIs for labeled ROIs  
-        if self.roi_sampler_cfg.USE_ULB_CLS_FG_THRESH_FOR_LB :
-            iou_fg_thresh = self.roi_sampler_cfg.UNLABELED_CLS_FG_THRESH
-            iou_fg_thresh = roi_ious.new_tensor(iou_fg_thresh).unsqueeze(0).repeat(len(roi_ious), 1)
-            iou_fg_thresh = torch.gather(iou_fg_thresh, dim=-1, index=(cur_roi_labels[sampled_inds]-1).unsqueeze(-1)).squeeze(-1)
-        else:
-            iou_fg_thresh = self.roi_sampler_cfg.CLS_FG_THRESH
-
-        fg_mask = roi_ious > iou_fg_thresh
-        bg_mask = roi_ious < iou_bg_thresh
-        interval_mask = (fg_mask == 0) & (bg_mask == 0)
-        cls_labels = (fg_mask > 0).float()
-        iou_fg_thresh = iou_fg_thresh[interval_mask] if self.roi_sampler_cfg.USE_ULB_CLS_FG_THRESH_FOR_LB else iou_fg_thresh
-        cls_labels[interval_mask] = \
-            (roi_ious[interval_mask] - iou_bg_thresh) / (iou_fg_thresh - iou_bg_thresh)
-
-        return sampled_inds, reg_valid_mask, cls_labels, roi_ious, gt_assignment, interval_mask
-
-    def subsample_rois(self, max_overlaps, reg_fg_thresh=None, cls_fg_thresh=None):
-        if reg_fg_thresh is None:
-            reg_fg_thresh = self.roi_sampler_cfg.REG_FG_THRESH
-        if cls_fg_thresh is None:
-            cls_fg_thresh = self.roi_sampler_cfg.CLS_FG_THRESH
+    def subsample_rois(self, max_overlaps):
         # sample fg, easy_bg, hard_bg
         fg_rois_per_image = int(np.round(self.roi_sampler_cfg.FG_RATIO * self.roi_sampler_cfg.ROI_PER_IMAGE))
-        if isinstance(reg_fg_thresh, torch.Tensor):
-            fg_thresh = torch.min(reg_fg_thresh, cls_fg_thresh)
-        else:
-            fg_thresh = min(reg_fg_thresh, cls_fg_thresh)
+        fg_thresh = min(self.roi_sampler_cfg.REG_FG_THRESH, self.roi_sampler_cfg.CLS_FG_THRESH)
 
         fg_inds = ((max_overlaps >= fg_thresh)).nonzero().view(-1)  # > 0.55
         easy_bg_inds = ((max_overlaps < self.roi_sampler_cfg.CLS_BG_THRESH_LO)).nonzero().view(-1)  # < 0.1
-        hard_bg_inds = ((max_overlaps < fg_thresh) &
+        hard_bg_inds = ((max_overlaps < self.roi_sampler_cfg.REG_FG_THRESH) &
                 (max_overlaps >= self.roi_sampler_cfg.CLS_BG_THRESH_LO)).nonzero().view(-1)
 
         fg_num_rois = fg_inds.numel()
@@ -271,7 +145,7 @@ class ProposalTargetLayer(nn.Module):
             rand_num = np.floor(np.random.rand(self.roi_sampler_cfg.ROI_PER_IMAGE) * fg_num_rois)
             rand_num = torch.from_numpy(rand_num).type_as(max_overlaps).long()
             fg_inds = fg_inds[rand_num]
-            bg_inds = fg_inds[fg_inds < 0] # yield empty tensor
+            bg_inds = []
 
         elif bg_num_rois > 0 and fg_num_rois == 0:
             # sampling bg
@@ -346,7 +220,7 @@ class ProposalTargetLayer(nn.Module):
                 cur_gt = gt_boxes[gt_mask]
                 original_gt_assignment = gt_mask.nonzero().view(-1)
 
-                iou3d = iou3d_nms_utils.boxes_iou3d_gpu(cur_roi, cur_gt)  # (M, N)
+                iou3d = iou3d_nms_utils.boxes_iou3d_gpu(cur_roi[:, :7], cur_gt[:, :7])  # (M, N)
                 cur_max_overlaps, cur_gt_assignment = torch.max(iou3d, dim=1)
                 max_overlaps[roi_mask] = cur_max_overlaps
                 gt_assignment[roi_mask] = original_gt_assignment[cur_gt_assignment]
