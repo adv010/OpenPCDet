@@ -123,11 +123,11 @@ class PVRCNNHead(RoIHeadTemplate):
         point_coords = batch_dict["point_coords"]
 
         if use_ori_gtboxes:
-            point_features = batch_dict['point_features_2']
-            point_cls_scores = batch_dict['point_cls_scores_2']
+            point_features = batch_dict['point_features']
+            point_cls_scores = batch_dict['point_cls_scores']
         else:
-            point_features = batch_dict["point_features"]
-            point_cls_scores = batch_dict["point_cls_scores"]
+            point_features = batch_dict['point_features']
+            point_cls_scores = batch_dict['point_cls_scores']
 
         point_features = point_features * point_cls_scores.view(-1, 1)
 
@@ -242,13 +242,6 @@ class PVRCNNHead(RoIHeadTemplate):
             targets_dict['ori_unlabeled_boxes'] = batch_dict['ori_unlabeled_boxes']
             targets_dict['points'] = batch_dict['points']
 
-        '''Pooling block using GTs'''
-        if self.training:
-            shared_pooled_gts, proj_pooled_gts = self.pool_features(batch_dict, use_gtboxes=True, shared=True, projector=True)
-            batch_dict['shared_features_gt'] = shared_pooled_gts
-            batch_dict['projected_features_gt'] = proj_pooled_gts
-            rcnn_sem_cls = self.sem_cls_layers(proj_pooled_gts).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C) #pass projections to obtain rcnn_sem_cls
-            batch_dict['batch_sem_cls_preds'] = rcnn_sem_cls.view(-1, 3)        
         '''Pooling block using RoIs'''
         pooled_features = self.pool_features(batch_dict,use_gtboxes=False)
         batch_size_rcnn = pooled_features.shape[0]
@@ -256,28 +249,6 @@ class PVRCNNHead(RoIHeadTemplate):
         batch_dict['shared_features'] = shared_features
         rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
         rcnn_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
-
-        # if (self.training or self.print_loss_when_eval) and not test_only:
-        #     # # RoI-level similarity.
-        #     # # calculate cosine similarity between unlabeled augmented RoI features and labeled augmented prototypes.
-        #     # roi_features = pooled_features.clone().detach().view(batch_size_rcnn, -1)
-        #     # roi_scores_shape = batch_dict['roi_scores'].shape  # (B, N)
-        if self.training:
-            with torch.no_grad(): # Generate RCNN conf_score for teacher GTs ; append labeled bank
-                a = self.cls_layers(shared_pooled_gts).transpose(1, 2).contiguous().squeeze(dim=1)
-                b = self.reg_layers(shared_pooled_gts).transpose(1, 2).contiguous().squeeze(dim=1)
-                batch_gt_cls_preds, batch_gt_reg_preds = self.generate_predicted_boxes(
-                            batch_size=batch_dict['batch_size'], rois=batch_dict['gt_boxes'], cls_preds=a, box_preds=b)
-                B,N = batch_gt_cls_preds.size()[:2]
-                batch_size = batch_dict['batch_size']
-                gt_rcnn_conf_preds = []
-                for index in range(batch_size):
-                    batch_mask = index
-                    cls_preds = batch_gt_cls_preds[batch_mask]
-                    gt_rcnn_conf_preds.append(torch.sigmoid(cls_preds))
-                gt_rcnn_conf_preds = torch.cat(gt_rcnn_conf_preds, dim=0)   
-                batch_dict['gt_conf_scores'] = gt_rcnn_conf_preds.view(B,N,-1)
-
 
         if not self.training or self.predict_boxes_when_training:
             batch_cls_preds, batch_box_preds = self.generate_predicted_boxes(

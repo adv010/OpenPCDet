@@ -268,7 +268,7 @@ MODEL:
             NMS_POST_MAXSIZE: 500
 
     THRESH: [0.5, 0.25, 0.25]  # reliable-student: [0.95, 0.85, 0.85]
-    UNLABELED_SUPERVISE_CLS: True
+    UNLABELED_SUPERVISE_CLS: False
     UNLABELED_SUPERVISE_OBJ: False
     UNLABELED_SUPERVISE_REFINE: True
     UNLABELED_WEIGHT: 1.0
@@ -305,6 +305,7 @@ MODEL:
         - NAME: pl_metrics
           ENABLE: True
           RESET_STATE_INTERVAL: 32
+          STATE_SIZE: 500
           BG_THRESH: 0.25
     ADAPTIVE_THRESHOLDING:
         ENABLE: False

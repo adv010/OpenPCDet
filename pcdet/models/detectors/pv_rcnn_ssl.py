@@ -14,7 +14,7 @@ from pcdet.utils import common_utils
 from pcdet.utils.stats_utils import metrics_registry
 from pcdet.utils.prototype_utils import feature_bank_registry
 from collections import defaultdict
-# from ssod import AdaptiveThresholding
+from pcdet.ssod import AdaptiveThresholding
 #from visual_utils import open3d_vis_utils as V
 from sklearn.metrics import precision_score
 
@@ -349,7 +349,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             self._update_pl_metrics(pl_boxes, pl_rect_scores, pl_weights, masks, batch_dict_ema['gt_boxes'][ulb_inds])
 
         # TODO(farzad): Check if commenting the following line and apply_augmentation is equal to a fully supervised setting
-        self._fill_with_pls(batch_dict, pl_boxes, masks, ulb_inds, lbl_inds)
+        # self._fill_with_pls(batch_dict, pl_boxes, masks, ulb_inds, lbl_inds)
 
         pl_cls_count_post_filter = torch.bincount(batch_dict['gt_boxes'][ulb_inds][...,7].view(-1).int().detach(), minlength=4)[1:]
         gt_cls_count = torch.bincount(batch_dict['ori_unlabeled_boxes'][...,-1].view(-1).int().detach(), minlength=4)[1:]
@@ -360,7 +360,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                          'avg_num_pls_post_filter_per_sample': self._arr2dict(pl_cls_count_post_filter / len(ulb_inds))}
 
         # apply student's augs on teacher's pseudo-labels (filtered) only (not points)
-        batch_dict = self.apply_augmentation(batch_dict, batch_dict, ulb_inds, key='gt_boxes')
+        # batch_dict = self.apply_augmentation(batch_dict, batch_dict, ulb_inds, key='gt_boxes')
 
         for cur_module in self.pv_rcnn.module_list:
             batch_dict = cur_module(batch_dict)
@@ -447,7 +447,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                 tb_dict['ori_gt_classes'] = tb_dicts['ori_gt_classes']
 
         tb_dict_ = self._prep_tb_dict(tb_dict, lbl_inds, ulb_inds, reduce_loss_fn)
-        tb_dict_.update(**pl_count_dict)
+        # tb_dict_.update(**pl_count_dict)
 
         if self.model_cfg['ROI_HEAD'].get('ENABLE_ULB_CLS_DIST_LOSS', False):
             roi_head_forward_dict = self.pv_rcnn.roi_head.forward_ret_dict
