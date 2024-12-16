@@ -56,7 +56,7 @@ def parse_config():
     parser.add_argument('--thresh', type=str, default='0.5, 0.25, 0.25')
     parser.add_argument('--sem_thresh', type=str, default='0.4, 0.4, 0.4')
     parser.add_argument('--unlabeled_weight', type=float, default=1.0)
-    parser.add_argument('--unlabeled_supervise_cls', action='store_true', default=True)
+    parser.add_argument('--unlabeled_supervise_cls', action='store_true', default=False)
     parser.add_argument('--unlabeled_supervise_refine', action='store_true', default=True)
     parser.add_argument('--lr', type=float, default=0.0)
 

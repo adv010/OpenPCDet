@@ -67,8 +67,10 @@ class KittiDatasetSSL(DatasetTemplate):
             for name in info['annos']['name']:
                 self.class_counter[name] += 1
         print("Labeled instances before gt_sampling: ", self.class_counter)
-        if self.logger is not None:
-            self.logger.info('Total samples for KITTI dataset: %d' % (len(self.kitti_infos)))
+        if self.logger is not None and self.mode=='test':
+            self.logger.info('Total samples for KITTI Test dataset: %d' % (len(self.kitti_infos)))
+        else:
+            self.logger.info('Total samples for KITTI Train dataset: %d' % (len(self.kitti_infos)))
 
     def include_kitti_data(self, mode):
         if self.logger is not None:
