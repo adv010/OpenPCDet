@@ -401,6 +401,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         loss += reduce_loss_fn(loss_rcnn_cls[lbl_inds, ...])
         loss += reduce_loss_fn(loss_rcnn_box[lbl_inds, ...])
 
+        self.unlabeled_supervise_cls = False
         if self.unlabeled_supervise_cls:
             loss += reduce_loss_fn(loss_rpn_cls[ulb_inds, ...]) * self.unlabeled_weight
         if self.model_cfg['ROI_HEAD'].get('ENABLE_SOFT_TEACHER', False) or self.model_cfg.get('UNLABELED_SUPERVISE_OBJ', False):
