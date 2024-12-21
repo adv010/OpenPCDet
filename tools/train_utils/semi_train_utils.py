@@ -56,7 +56,7 @@ def train_ssl_one_epoch(model, optimizer, labeled_loader, unlabeled_loader, epoc
                 if accumulated_iter % ssl_cfg.TEACHER.NUM_ITERS_PER_UPDATE == 0:
                     if dist:
                         # if rank == 0:
-                        update_ema_variables(model.student.module.onepass, model.teacher.module.onepass,
+                        update_ema_variables(model.module.student, model.module.teacher,
                                              ssl_cfg.TEACHER.RAMPUP_EMA_MOMENTUM, accumulated_iter)
                     else:
                         update_ema_variables(model.student, model.teacher, ssl_cfg.TEACHER.RAMPUP_EMA_MOMENTUM,
@@ -65,8 +65,7 @@ def train_ssl_one_epoch(model, optimizer, labeled_loader, unlabeled_loader, epoc
                 if accumulated_iter % ssl_cfg.TEACHER.NUM_ITERS_PER_UPDATE == 0:
                     if dist:
                         # if rank == 0:
-                        update_ema_variables_with_fixed_momentum(model.student.module.onepass,
-                                                                 model.teacher.module.onepass,
+                        update_ema_variables_with_fixed_momentum(model.module.student, model.module.teacher,
                                                                  ssl_cfg.TEACHER.EMA_MOMENTUM)
                     else:
                         update_ema_variables_with_fixed_momentum(model.student, model.teacher,
@@ -136,7 +135,7 @@ def train_ssl_model(model, optimizer, labeled_loader, unlabeled_loader, lr_sched
 
                 if dist:
                     save_checkpoint(
-                        checkpoint_state(model.student.module.onepass, optimizer, trained_epoch, accumulated_iter),
+                        checkpoint_state(model.module.student, optimizer, trained_epoch, accumulated_iter),
                         filename=student_ckpt_name,
                     )
                 else:
@@ -149,7 +148,7 @@ def train_ssl_model(model, optimizer, labeled_loader, unlabeled_loader, lr_sched
 
                 if dist:
                     save_checkpoint(
-                        checkpoint_state(model.teacher.module.onepass, optimizer, trained_epoch, accumulated_iter),
+                        checkpoint_state(model.module.teacher, optimizer, trained_epoch, accumulated_iter),
                         filename=teacher_ckpt_name,
                     )
                 else:

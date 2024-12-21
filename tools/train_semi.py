@@ -335,7 +335,7 @@ def main():
     eval_ssl_dir.mkdir(parents=True, exist_ok=True)
     args.start_epoch = cfg.OPTIMIZATION.SEMI_SUP_LEARNING.NUM_EPOCHS - 25
     repeat_eval_ckpt(
-        model=model.student.module.onepass if dist_train else model.student,
+        model=model.module.student if dist_train else model.student,
         test_loader=dataloaders['test'],
         args=args,
         eval_output_dir=eval_ssl_dir,
@@ -351,15 +351,8 @@ def main():
     eval_ssl_dir = output_dir / 'eval' / 'eval_with_teacher_model'
     eval_ssl_dir.mkdir(parents=True, exist_ok=True)
     args.start_epoch = cfg.OPTIMIZATION.SEMI_SUP_LEARNING.NUM_EPOCHS - 25
-    # if dist_train:
-    #     teacher_model.module.onepass.set_model_type('origin')  # ret filtered boxes
-    # else:
-    #     teacher_model.set_model_type('origin')
-    # Add this to avoid errors
-    # for t_param in teacher_model.parameters():
-    #     t_param.requires_grad = True
     repeat_eval_ckpt(
-        model=model.teacher.module.onepass if dist_train else model.teacher,
+        model=model.module.teacher if dist_train else model.teacher,
         test_loader=dataloaders['test'],
         args=args,
         eval_output_dir=eval_ssl_dir,
