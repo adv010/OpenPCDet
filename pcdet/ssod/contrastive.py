@@ -3,14 +3,30 @@ from pcdet.ops.roiaware_pool3d.roiaware_pool3d_utils import points_in_boxes_gpu
 from pcdet.utils.loss_utils import DINOLoss
 from train_utils.semi_utils import transform_aug, load_data_to_gpu
 from tools.visual_utils import open3d_vis_utils as V
+from pcdet.models import build_network
+import copy
+from torch import nn
 
 
-class Contrastive:
-    def __init__(self, teacher_model, student_model, cfgs, logger):
-        self.logger = logger
-        self.model_cfg = cfgs
-        self.teacher = teacher_model
-        self.student = student_model
+class Contrastive(nn.Module):
+    def __init__(self, cfgs, datasets, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        model_cfgs = copy.deepcopy(cfgs.MODEL)
+        self.teacher = build_network(model_cfg=model_cfgs, num_class=len(cfgs.CLASS_NAMES), dataset=datasets['labeled'])
+        model_cfgs = copy.deepcopy(cfgs.MODEL)
+        self.student = build_network(model_cfg=model_cfgs, num_class=len(cfgs.CLASS_NAMES), dataset=datasets['labeled'])
+
+        if cfgs.OPTIMIZATION.SEMI_SUP_LEARNING.TEACHER.NUM_ITERS_PER_UPDATE == -1:  # for pseudo label
+            self.teacher.eval()  # Set to eval mode to avoid BN update and dropout
+        else:  # for EMA teacher with consistency
+            self.teacher.train()  # Set to train mode
+        for t_param in self.teacher.parameters():
+            t_param.requires_grad = False
+
+        self.add_module('teacher', self.teacher)
+        self.add_module('student', self.student)
+
         self.conf_thresh = torch.tensor(cfgs.OPTIMIZATION.SEMI_SUP_LEARNING.CONF_THRESH, dtype=torch.float32)
         self.sem_thresh = torch.tensor(cfgs.OPTIMIZATION.SEMI_SUP_LEARNING.SEM_THRESH, dtype=torch.float32)
         self.cat_lbl_ulb = cfgs.OPTIMIZATION.SEMI_SUP_LEARNING.CAT_LBL_ULB
@@ -19,6 +35,7 @@ class Contrastive:
         self.rcnn_cls_ulb = cfgs.MODEL.RCNN_CLS_LOSS_ULB
         self.rcnn_reg_ulb = cfgs.MODEL.RCNN_REG_LOSS_ULB
         self.unlabeled_weight = cfgs.MODEL.UNLABELED_WEIGHT
+        self.cfgs = cfgs
 
         if cfgs.MODEL.ROI_HEAD.DINO_LOSS.get('ENABLE', False):
             self.dino_loss = DINOLoss(**cfgs.MODEL.ROI_HEAD.DINO_LOSS)
@@ -135,7 +152,7 @@ class Contrastive:
         # loss_point, tb_dict = self.point_head.get_loss(tb_dict)
         # loss += loss_point
 
-        if self.model_cfg.MODEL.ROI_HEAD.DINO_LOSS.get('ENABLE', False):
+        if self.cfgs.MODEL.ROI_HEAD.DINO_LOSS.get('ENABLE', False):
             with torch.no_grad():
                 # TODO: Design decision: use only student rois for both teacher and student? Check the quality of RoIs.
                 rois = batch_dict_sa_ulb['rois']
@@ -150,7 +167,7 @@ class Contrastive:
             self.dino_loss.update_center(teacher_output)
             dino_loss = self.dino_loss.forward(s1, s2, t1_centered, t2_centered)
             tb_dict.update({'dino_loss_unlabeled': dino_loss.item()})
-            loss += dino_loss * self.model_cfg.MODEL.ROI_HEAD.DINO_LOSS.get('WEIGHT', 1.0)
+            loss += dino_loss * self.cfgs.MODEL.ROI_HEAD.DINO_LOSS.get('WEIGHT', 1.0)
 
         self.merge_tb_dicts(tb_dict_lbl, tb_dict, 'labeled')
         self.merge_tb_dicts(tb_dict_rpn_ulb, tb_dict, 'unlabeled')

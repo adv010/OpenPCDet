@@ -199,7 +199,7 @@ MODEL:
         TEMPERATURE: 0.1
         CLS_WEIGHT: [1.0, 4.0, 4.0]
         DINO_LOSS:
-            ENABLE: True
+            ENABLE: False
             OUT_DIM: 128
             TEACHER_TEMP: 0.04
             STUDENT_TEMP: 0.1
@@ -370,7 +370,7 @@ OPTIMIZATION:
         UD_BATCH_SIZE_PER_GPU: 8
         CONF_THRESH: [0.5, 0.25, 0.25]
         SEM_THRESH: [0.4, 0.4, 0.4]
-        CAT_LBL_ULB: True
+        CAT_LBL_ULB: False
         NUM_EPOCHS: 60
         REPEAT: 5
         TEACHER:

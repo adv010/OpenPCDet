@@ -271,20 +271,11 @@ def main():
 
     # --------------------------------stage II SSL training---------------------------------------
     logger.info('************************Stage II SSL training************************')
-    model_cfgs = copy.deepcopy(cfg.MODEL)
-    teacher_model = build_network(model_cfg=model_cfgs, num_class=len(cfg.CLASS_NAMES), dataset=datasets['labeled'])
-    """
-    for param in teacher_model.parameters(): # ema teacher model
-        param.detach_()
-    """
-    model_cfgs = copy.deepcopy(cfg.MODEL)
-    student_model = build_network(model_cfg=model_cfgs, num_class=len(cfg.CLASS_NAMES), dataset=datasets['labeled'])
+    model_name = cfg.OPTIMIZATION.SEMI_SUP_LEARNING.NAME
+    model = semi_learning_models[model_name](cfg, datasets)
+    model.cuda()
 
-    teacher_model.cuda()
-    student_model.cuda()
-
-    # only update student model by gradient descent, teacher model are updated by EMA
-    student_optimizer = build_optimizer(student_model, cfg.OPTIMIZATION.SEMI_SUP_LEARNING.STUDENT)
+    optimizer = build_optimizer(model.student, cfg.OPTIMIZATION.SEMI_SUP_LEARNING.STUDENT)
 
     # load checkpoint if it is possible
     last_epoch = -1
@@ -296,11 +287,11 @@ def main():
         based_on_pretrained = False
         teacher_ckpt_list.sort(key=os.path.getmtime)
         student_ckpt_list.sort(key=os.path.getmtime)
-        it, start_epoch = teacher_model.load_params_with_optimizer(
-            teacher_ckpt_list[-1], to_cpu=dist_train, optimizer=student_optimizer, logger=logger
+        it, start_epoch = model.teacher.load_params_with_optimizer(
+            teacher_ckpt_list[-1], to_cpu=dist_train, optimizer=optimizer, logger=logger
         )
-        it, start_epoch = student_model.load_params_with_optimizer(
-            student_ckpt_list[-1], to_cpu=dist_train, optimizer=student_optimizer, logger=logger
+        it, start_epoch = model.student.load_params_with_optimizer(
+            student_ckpt_list[-1], to_cpu=dist_train, optimizer=optimizer, logger=logger
         )
         last_epoch = start_epoch + 1
 
@@ -313,35 +304,20 @@ def main():
             ckpt_list.sort(key=os.path.getmtime)
             pretrained_model = ckpt_list[-1]
 
-        teacher_model.load_params_from_file(filename=pretrained_model, to_cpu=dist_train, logger=logger)
-        student_model.load_params_from_file(filename=pretrained_model, to_cpu=dist_train, logger=logger)
+        model.teacher.load_params_from_file(filename=pretrained_model, to_cpu=dist_train, logger=logger)
+        model.student.load_params_from_file(filename=pretrained_model, to_cpu=dist_train, logger=logger)
 
-    if dist_train:
-        student_model = DistStudent(student_model)  # add wrapper for dist training
-        student_model = nn.parallel.DistributedDataParallel(student_model,
-                                                            device_ids=[cfg.LOCAL_RANK % torch.cuda.device_count()])
-        # teacher doesn't need dist train
-        teacher_model = DistTeacher(teacher_model)
-        teacher_model = nn.parallel.DistributedDataParallel(teacher_model,
-                                                            device_ids=[cfg.LOCAL_RANK % torch.cuda.device_count()])
-    model_name = cfg.OPTIMIZATION.SEMI_SUP_LEARNING.NAME
-    model = semi_learning_models[model_name](student_model, teacher_model, cfg, logger)
-    model.student.train()
-    """
-    Notes: we found for pseudo labels, teacher_model.eval() is better;
-    for EMA update and consistency, teacher_model.train() is better
-    """
-    if cfg.OPTIMIZATION.SEMI_SUP_LEARNING.TEACHER.NUM_ITERS_PER_UPDATE == -1:  # for pseudo label
-        model.teacher.eval()  # Set to eval mode to avoid BN update and dropout
-    else:  # for EMA teacher with consistency
-        model.teacher.train()  # Set to train mode
-    for t_param in model.teacher.parameters():
-        t_param.requires_grad = False
+    # if dist_train:
+    #     student_model = DistStudent(model.student)  # add wrapper for dist training
+    #     student_model = nn.parallel.DistributedDataParallel(student_model, device_ids=[cfg.LOCAL_RANK % torch.cuda.device_count()])
+    #     # teacher doesn't need dist train
+    #     teacher_model = DistTeacher(model.teacher)
+    #     teacher_model = nn.parallel.DistributedDataParallel(teacher_model, device_ids=[cfg.LOCAL_RANK % torch.cuda.device_count()])
 
     logger.info(model.student)
     # use labeled data as epoch counter
     student_lr_scheduler, student_lr_warmup_scheduler = build_scheduler(
-        student_optimizer, total_iters_each_epoch=len(dataloaders['labeled']),
+        optimizer, total_iters_each_epoch=len(dataloaders['labeled']),
         total_epochs=cfg.OPTIMIZATION.SEMI_SUP_LEARNING.NUM_EPOCHS,
         last_epoch=last_epoch, optim_cfg=cfg.OPTIMIZATION.SEMI_SUP_LEARNING.STUDENT
     )
@@ -350,7 +326,7 @@ def main():
 
     train_ssl_model(
         model=model,
-        optimizer=student_optimizer,
+        optimizer=optimizer,
         labeled_loader=dataloaders['labeled'],
         unlabeled_loader=dataloaders['unlabeled'],
         lr_scheduler=student_lr_scheduler,
@@ -379,7 +355,7 @@ def main():
     eval_ssl_dir.mkdir(parents=True, exist_ok=True)
     args.start_epoch = cfg.OPTIMIZATION.SEMI_SUP_LEARNING.NUM_EPOCHS - 25
     repeat_eval_ckpt(
-        model=student_model.module.onepass if dist_train else student_model,
+        model=model.student.module.onepass if dist_train else model.student,
         test_loader=dataloaders['test'],
         args=args,
         eval_output_dir=eval_ssl_dir,
@@ -403,7 +379,7 @@ def main():
     # for t_param in teacher_model.parameters():
     #     t_param.requires_grad = True
     repeat_eval_ckpt(
-        model=teacher_model.module.onepass if dist_train else teacher_model,
+        model=model.teacher.module.onepass if dist_train else model.teacher,
         test_loader=dataloaders['test'],
         args=args,
         eval_output_dir=eval_ssl_dir,
