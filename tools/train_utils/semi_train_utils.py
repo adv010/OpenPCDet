@@ -39,7 +39,7 @@ def train_ssl_one_epoch(model, optimizer, labeled_loader, unlabeled_loader, epoc
                                                  ud_student_batch_dict, epoch_id)
         loss.backward()
 
-        clip_grad_norm_(model.student.parameters(), ssl_cfg.STUDENT.GRAD_NORM_CLIP)
+        clip_grad_norm_(model.parameters(), ssl_cfg.STUDENT.GRAD_NORM_CLIP)
         optimizer.step()
         lr_scheduler.step(accumulated_iter)
 

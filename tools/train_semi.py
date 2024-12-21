@@ -47,7 +47,6 @@ def get_git_commit_number():
 def parse_config():
     parser = argparse.ArgumentParser(description='arg parser')
     parser.add_argument('--cfg_file', type=str, default=None, help='specify the config for training')
-    parser.add_argument('--batch_size', type=int, default=None, required=False, help='batch size for training')
     parser.add_argument('--eval_batch_size', type=int, default=None, required=False, help='batch size for testing')
     parser.add_argument('--epochs', type=int, default=None, required=False, help='number of epochs to train for')
     parser.add_argument('--workers', type=int, default=4, help='number of workers for dataloader')
@@ -91,8 +90,8 @@ def parse_config():
     cfg.MODEL.SEM_THRESH = [float(x) for x in args.sem_thresh.split(',')]
     cfg.MODEL.UNLABELED_WEIGHT = args.unlabeled_weight
 
-    # rev = get_git_commit_number()
-    # args.extra_tag = args.extra_tag + "_" + str(rev)
+    rev = get_git_commit_number()
+    args.extra_tag = args.extra_tag + "_" + str(rev)
 
     if args.lr > 0.0:
         cfg.OPTIMIZATION.LR = args.lr
@@ -101,24 +100,6 @@ def parse_config():
 
     return args, cfg
 
-class DistStudent(nn.Module):
-    def __init__(self, student):
-        super().__init__()
-        self.onepass = student
-
-    def forward(self, ld_batch, ud_batch):
-        return self.onepass(ld_batch), self.onepass(ud_batch)
-
-class DistTeacher(nn.Module):
-    def __init__(self, teacher):
-        super().__init__()
-        self.onepass = teacher
-
-    def forward(self, ld_batch, ud_batch):
-        if ld_batch is not None:
-            return self.onepass(ld_batch), self.onepass(ud_batch)
-        else:
-            return None, self.onepass(ud_batch)
 
 def main():
 
@@ -155,7 +136,10 @@ def main():
     logger.info('CUDA_VISIBLE_DEVICES=%s' % gpu_list)
 
     if dist_train:
-        logger.info('total_batch_size: %d' % (total_gpus * args.batch_size))
+        lbl_bs = int(cfg.OPTIMIZATION.SEMI_SUP_LEARNING.LD_BATCH_SIZE_PER_GPU)
+        ulb_bs = int(cfg.OPTIMIZATION.SEMI_SUP_LEARNING.UD_BATCH_SIZE_PER_GPU)
+        total_bs = lbl_bs + ulb_bs
+        logger.info('total_batch_size: %d' % (total_gpus * total_bs))
     for key, val in vars(args).items():
         logger.info('{:16} {}'.format(key, val))
     log_config_to_file(cfg, logger=logger)
@@ -307,14 +291,10 @@ def main():
         model.teacher.load_params_from_file(filename=pretrained_model, to_cpu=dist_train, logger=logger)
         model.student.load_params_from_file(filename=pretrained_model, to_cpu=dist_train, logger=logger)
 
-    # if dist_train:
-    #     student_model = DistStudent(model.student)  # add wrapper for dist training
-    #     student_model = nn.parallel.DistributedDataParallel(student_model, device_ids=[cfg.LOCAL_RANK % torch.cuda.device_count()])
-    #     # teacher doesn't need dist train
-    #     teacher_model = DistTeacher(model.teacher)
-    #     teacher_model = nn.parallel.DistributedDataParallel(teacher_model, device_ids=[cfg.LOCAL_RANK % torch.cuda.device_count()])
+    if dist_train:
+        model = nn.parallel.DistributedDataParallel(model, device_ids=[cfg.LOCAL_RANK % torch.cuda.device_count()])
 
-    logger.info(model.student)
+    logger.info(model)
     # use labeled data as epoch counter
     student_lr_scheduler, student_lr_warmup_scheduler = build_scheduler(
         optimizer, total_iters_each_epoch=len(dataloaders['labeled']),
