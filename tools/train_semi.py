@@ -259,8 +259,6 @@ def main():
     model = semi_learning_models[model_name](cfg, datasets)
     model.cuda()
 
-    optimizer = build_optimizer(model.student, cfg.OPTIMIZATION.SEMI_SUP_LEARNING.STUDENT)
-
     # load checkpoint if it is possible
     last_epoch = -1
     start_epoch = it = 0
@@ -294,6 +292,7 @@ def main():
     if dist_train:
         model = nn.parallel.DistributedDataParallel(model, device_ids=[cfg.LOCAL_RANK % torch.cuda.device_count()])
 
+    optimizer = build_optimizer(model, cfg.OPTIMIZATION.SEMI_SUP_LEARNING.STUDENT)
     logger.info(model)
     # use labeled data as epoch counter
     student_lr_scheduler, student_lr_warmup_scheduler = build_scheduler(
@@ -350,6 +349,9 @@ def main():
                 (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
     eval_ssl_dir = output_dir / 'eval' / 'eval_with_teacher_model'
     eval_ssl_dir.mkdir(parents=True, exist_ok=True)
+
+    for t_param in model.module.teacher.parameters(): # Add this to avoid errors
+        t_param.requires_grad = True
     args.start_epoch = cfg.OPTIMIZATION.SEMI_SUP_LEARNING.NUM_EPOCHS - 25
     repeat_eval_ckpt(
         model=model.module.teacher if dist_train else model.teacher,
