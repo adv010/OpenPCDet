@@ -259,6 +259,11 @@ def main():
     model = semi_learning_models[model_name](cfg, datasets)
     model.cuda()
 
+    if dist_train:
+        model = nn.parallel.DistributedDataParallel(model, device_ids=[cfg.LOCAL_RANK % torch.cuda.device_count()])
+
+    optimizer = build_optimizer(model, cfg.OPTIMIZATION.SEMI_SUP_LEARNING.STUDENT)
+
     # load checkpoint if it is possible
     last_epoch = -1
     start_epoch = it = 0
@@ -289,10 +294,6 @@ def main():
         model.teacher.load_params_from_file(filename=pretrained_model, to_cpu=dist_train, logger=logger)
         model.student.load_params_from_file(filename=pretrained_model, to_cpu=dist_train, logger=logger)
 
-    if dist_train:
-        model = nn.parallel.DistributedDataParallel(model, device_ids=[cfg.LOCAL_RANK % torch.cuda.device_count()])
-
-    optimizer = build_optimizer(model, cfg.OPTIMIZATION.SEMI_SUP_LEARNING.STUDENT)
     logger.info(model)
     # use labeled data as epoch counter
     student_lr_scheduler, student_lr_warmup_scheduler = build_scheduler(
