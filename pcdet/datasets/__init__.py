@@ -117,7 +117,13 @@ def build_semi_dataloader(dataset_cfg, class_names, batch_size, repeat, dist, wo
             training=training,
             repeat=repeat[stage]
         )
-        sampler = torch.utils.data.distributed.DistributedSampler(dataset) if dist else None
+        
+        if dist:
+            if training:
+                sampler = torch.utils.data.distributed.DistributedSampler(dataset)
+            else:
+                rank, world_size = common_utils.get_dist_info()
+                sampler = DistributedSampler(dataset, world_size, rank, shuffle=False)
         return DataLoader(
             dataset, batch_size=batch_size[stage], pin_memory=True, num_workers=workers,
             shuffle=(sampler is None) and shuffle, collate_fn=dataset.collate_batch,
