@@ -124,6 +124,8 @@ def build_semi_dataloader(dataset_cfg, class_names, batch_size, repeat, dist, wo
             else:
                 rank, world_size = common_utils.get_dist_info()
                 sampler = DistributedSampler(dataset, world_size, rank, shuffle=False)
+        else:
+            sampler = None
         return DataLoader(
             dataset, batch_size=batch_size[stage], pin_memory=True, num_workers=workers,
             shuffle=(sampler is None) and shuffle, collate_fn=dataset.collate_batch,
