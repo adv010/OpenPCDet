@@ -190,7 +190,7 @@ MODEL:
             }
 
     ROI_HEAD:
-        NAME: PVRCNNHead
+        NAME: PVRCNNHeadWithProjector
         CLASS_AGNOSTIC: True
         ENABLE_VIS: False
         ENABLE_SOFT_TEACHER: False
@@ -199,7 +199,7 @@ MODEL:
         TEMPERATURE: 0.1
         CLS_WEIGHT: [1.0, 4.0, 4.0]
         DINO_LOSS:
-            ENABLE: False
+            ENABLE: True
             OUT_DIM: 128
             TEACHER_TEMP: 0.04
             STUDENT_TEMP: 0.1
@@ -234,7 +234,11 @@ MODEL:
             POOL_RADIUS: [0.8, 1.6]
             NSAMPLE: [16, 16]
             POOL_METHOD: max_pool
-
+        GRID_TRANSFORMER_ENCODER:
+            FEATURE_DIM: 128
+            NUM_HEADS: 8
+            NUM_LAYERS: 3
+            HIDDEN_DIM: 1024
         TARGET_CONFIG:
             BOX_CODER: ResidualCoder
             ROI_PER_IMAGE: 128

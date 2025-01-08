@@ -1,6 +1,8 @@
 import torch.nn.functional as F
 import torch.nn as nn
 import torch
+from torch.nn import BatchNorm1d
+import random
 from ...ops.pointnet2.pointnet2_stack import pointnet2_modules as pointnet2_stack_modules
 from ...utils import common_utils
 from .roi_head_template import RoIHeadTemplate
@@ -188,6 +190,92 @@ class PVRCNNHead(RoIHeadTemplate):
         return batch_dict
 
 
+class PVRCNNHeadWithGridTransformer(PVRCNNHead):
+    def __init__(self, input_channels, model_cfg, num_class=1, **kwargs):
+        super().__init__(input_channels, model_cfg, num_class=num_class, **kwargs)
+        self.grid_transformer_encoder = GridTransformerEncoder(
+            feature_dim=self.model_cfg.GRID_TRANSFORMER_ENCODER.FEATURE_DIM,
+            num_heads=self.model_cfg.GRID_TRANSFORMER_ENCODER.NUM_HEADS,
+            num_layers=self.model_cfg.GRID_TRANSFORMER_ENCODER.NUM_LAYERS,
+            hidden_dim=self.model_cfg.GRID_TRANSFORMER_ENCODER.HIDDEN_DIM
+        )
+        self.cls_layers = nn.Sequential(nn.Linear(256, 256),
+                                        BatchNorm1d(256),
+                                        nn.ReLU(),
+                                        nn.Linear(256, num_class))
+        self.reg_layers = nn.Sequential(nn.Linear(256, 256),
+                                        BatchNorm1d(256),
+                                        nn.ReLU(),
+                                        nn.Linear(256, self.box_coder.code_size * num_class))
+        self.print_loss_when_eval = False
+        self.init_weights(weight_init='xavier')
+
+    def forward(self, batch_dict, test_only=False):
+        nms_config = self.model_cfg.NMS_CONFIG['TRAIN' if self.training and not test_only else 'TEST']
+        targets_dict = self.proposal_layer(batch_dict, nms_config=nms_config)
+        if (self.training or self.print_loss_when_eval) and not test_only:
+            targets_dict = self.assign_targets(batch_dict)
+            batch_dict['rois'] = targets_dict['rois']
+            batch_dict['roi_labels'] = targets_dict['roi_labels']
+
+        pooled_features = self.roi_grid_pool(batch_dict)  # (BxN, 6x6x6, C)
+        grid_size = self.model_cfg.ROI_GRID_POOL.GRID_SIZE
+        batch_size_rcnn = pooled_features.shape[0]
+        pooled_features = pooled_features.permute(0, 2, 1). \
+            contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
+
+        refined_grid_features = self.grid_transformer_encoder(pooled_features)
+        shared_features = self.shared_fc_layer(refined_grid_features.contiguous().view(batch_size_rcnn, -1, 1)).squeeze(-1)
+        rcnn_cls = self.cls_layers(shared_features)
+        rcnn_reg = self.reg_layers(shared_features)
+
+        if not self.training or self.predict_boxes_when_training:
+            batch_cls_preds, batch_box_preds = self.generate_predicted_boxes(
+                batch_size=batch_dict['batch_size'], rois=batch_dict['rois'], cls_preds=rcnn_cls, box_preds=rcnn_reg
+            )
+            # note that the rpn batch_cls_preds and batch_box_preds are being overridden here by rcnn preds
+            batch_dict['batch_cls_preds'] = batch_cls_preds
+            batch_dict['batch_box_preds'] = batch_box_preds
+            batch_dict['cls_preds_normalized'] = False
+
+        if self.training or self.print_loss_when_eval:
+            targets_dict['rcnn_cls'] = rcnn_cls
+            targets_dict['rcnn_reg'] = rcnn_reg
+            self.forward_ret_dict = targets_dict
+
+
+class GridTransformerEncoder(nn.Module):
+    def __init__(self, feature_dim, num_heads, num_layers, hidden_dim):
+        super().__init__()
+        self.flatten_dim = 6 * 6 * 6  # Flattened grid size (6x6x6 = 216)
+        self.positional_encoding = nn.Parameter(torch.randn(1, self.flatten_dim, feature_dim))
+        # self.cls_token = nn.Parameter(torch.randn(1, 1, feature_dim))  # (1, 1, C)
+
+        self.encoder_layer = nn.TransformerEncoderLayer(
+            d_model=feature_dim,
+            nhead=num_heads,
+            dim_feedforward=hidden_dim,
+            activation="relu"
+        )
+        self.transformer = nn.TransformerEncoder(self.encoder_layer, num_layers=num_layers)
+
+    def forward(self, pooled_features):
+        B_N, C, G1, G2, G3 = pooled_features.shape
+
+        pooled_features = pooled_features.view(B_N, C, -1)  # (B * N, C, 216)
+        pooled_features = pooled_features.permute(0, 2, 1)  # (B * N, 216, C)
+        # cls_token = self.cls_token.expand(B_N, -1, -1)  # (B * N, 1, C)
+        # features_with_cls = torch.cat([cls_token, pooled_features], dim=1)  # (B * N, 217, C)
+        features_with_pos = pooled_features + self.positional_encoding  # (B * N, 216, C)
+        refined_features = self.transformer(features_with_pos)  # (B * N, 217, C)
+        # cls_output = refined_features[:, 0, :]  # (B * N, C)
+        # refined_grid_features = refined_features[:, 1:, :]  # (B * N, 216, C)
+        refined_grid_features = refined_features.permute(0, 2, 1)  # (B * N, C, 216)
+        refined_grid_features = refined_grid_features.view(B_N, C, G1, G2, G3)  # (B * N, C, 6, 6, 6)
+
+        return refined_grid_features
+
+
 class PVRCNNHeadWithProjector(PVRCNNHead):
     def __init__(self, input_channels, model_cfg, num_class=1, **kwargs):
         super().__init__(input_channels, model_cfg, num_class=num_class, **kwargs)
@@ -198,6 +286,47 @@ class PVRCNNHeadWithProjector(PVRCNNHead):
         self.projector.weight_g.data.fill_(1)
         if model_cfg.DINO_LOSS.NORM_LAST_LAYER:
             self.projector.weight_g.requires_grad = False
+
+        self.mask_token = nn.Parameter(torch.randn(1, 128))  # (1, C)
+
+    def get_masked_feats(self, batch_dict, crop_size=4):
+        pooled_features = self.roi_grid_pool(batch_dict)  # (BxN, 6x6x6, C)
+        grid_size = self.cfgs.ROI_GRID_POOL.GRID_SIZE
+        batch_size_rcnn = pooled_features.shape[0]
+        pooled_features = pooled_features.permute(0, 2, 1). \
+            contiguous().view(batch_size_rcnn, -1, grid_size, grid_size, grid_size)  # (BxN, C, 6, 6, 6)
+
+        if crop_size and crop_size < grid_size:
+            # Random Sub-Grid Crop
+            start_x = random.randint(0, grid_size - crop_size)
+            start_y = random.randint(0, grid_size - crop_size)
+            start_z = random.randint(0, grid_size - crop_size)
+
+            cropped_features = pooled_features[
+                               :,  # Keep batch
+                               :,  # Keep feature dimension
+                               start_x:start_x + crop_size,
+                               start_y:start_y + crop_size,
+                               start_z:start_z + crop_size
+                               ]  # (BxN, C, crop_size, crop_size, crop_size)
+
+            # TODO(farzad): requires clone()?
+            padded_features = self.mask_token.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand_as(pooled_features).clone()  # (BxN, C, 6, 6, 6)
+
+            padded_features[:, :,
+            start_x:start_x + crop_size,
+            start_y:start_y + crop_size,
+            start_z:start_z + crop_size
+            ] = cropped_features
+
+            pooled_features = padded_features  # (BxN, C, 6, 6, 6)
+
+        pooled_features_flat = pooled_features.view(batch_size_rcnn, -1, 1)  # (BxN, Cx6x6x6, 1)
+        shared_features = self.shared_fc_layer(pooled_features_flat).squeeze(-1)  # (BxN, D)
+        if self.cfgs.DINO_LOSS.NORM_LAST_LAYER:
+            shared_features = F.normalize(shared_features, p=2, dim=-1)
+        proj_feats = self.projector(shared_features)
+        return proj_feats
 
     def get_proj_feats(self, batch_dict):
         pooled_features = self.roi_grid_pool(batch_dict)  # (BxN, 6x6x6, C)

@@ -96,6 +96,8 @@ def transform_aug(boxes, source_dict, target_dict):
         # Reverse source augmentations
         source_aug_list = source_aug_list[::-1]
         for key in source_aug_list:
+            if key == 'gt_sampling':
+                continue
             aug_params = source_aug_param[key]
             aug_func = augmentation_functions[key]
             box = aug_func(box, aug_params, reverse=True)

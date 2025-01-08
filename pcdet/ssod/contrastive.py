@@ -108,7 +108,7 @@ class Contrastive(nn.Module):
             batch_dict_tmp['gt_boxes'] = torch.zeros((rois.shape[0], 1, 8), device=rois.device)  # dummy
             self._forward_student(batch_dict_tmp)
             batch_dict_tmp['rois'] = rois  # replace with the transformed rois
-            batch_feats = self.student.roi_head.get_proj_feats(batch_dict_tmp)
+            batch_feats = self.student.roi_head.get_masked_feats(batch_dict_tmp)
 
         batch_feats = batch_feats.view(*rois.shape[:2], -1)
         assert torch.logical_not(torch.eq(rois, 0).all(dim=-1)).all().item(), 'rois should not be zero!'
