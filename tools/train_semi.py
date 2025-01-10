@@ -85,6 +85,7 @@ def parse_config():
 
     assert cfg.DATA_CONFIG.DATA_AUGMENTOR.AUG_CONFIG_LIST[0].NAME == 'gt_sampling'  # hardcode
     cfg.DATA_CONFIG.DATA_AUGMENTOR.AUG_CONFIG_LIST[0].DB_INFO_PATH = [f'kitti_dbinfos_{args.split}.pkl']
+    cfg.DATA_CONFIG.STUDENT_AUGMENTOR.AUG_CONFIG_LIST[0].DB_INFO_PATH = [f'kitti_dbinfos_{args.split}.pkl']
     cfg.DATA_CONFIG.DATA_SPLIT['train'] = args.split
     cfg.MODEL.THRESH = [float(x) for x in args.thresh.split(',')]
     cfg.MODEL.SEM_THRESH = [float(x) for x in args.sem_thresh.split(',')]
@@ -259,9 +260,6 @@ def main():
     model = semi_learning_models[model_name](cfg, datasets)
     model.cuda()
 
-    if dist_train:
-        model = nn.parallel.DistributedDataParallel(model, device_ids=[cfg.LOCAL_RANK % torch.cuda.device_count()])
-
     optimizer = build_optimizer(model, cfg.OPTIMIZATION.SEMI_SUP_LEARNING.STUDENT)
 
     # load checkpoint if it is possible
@@ -293,6 +291,9 @@ def main():
 
         model.teacher.load_params_from_file(filename=pretrained_model, to_cpu=dist_train, logger=logger)
         model.student.load_params_from_file(filename=pretrained_model, to_cpu=dist_train, logger=logger)
+
+    if dist_train:
+        model = nn.parallel.DistributedDataParallel(model, device_ids=[cfg.LOCAL_RANK % torch.cuda.device_count()])
 
     logger.info(model)
     # use labeled data as epoch counter
