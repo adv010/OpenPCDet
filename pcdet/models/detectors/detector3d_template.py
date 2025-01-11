@@ -22,7 +22,7 @@ class Detector3DTemplate(nn.Module):
 
         self.module_topology = [
             'vfe', 'backbone_3d', 'map_to_bev_module', 'pfe',
-            'backbone_2d', 'dense_head',  'point_head', 'roi_head'
+            'backbone_2d', 'dense_head',  'point_head', 'roi_head', 'dino_head'
         ]
 
     @property
@@ -171,6 +171,13 @@ class Detector3DTemplate(nn.Module):
 
         model_info_dict['module_list'].append(point_head_module)
         return point_head_module, model_info_dict
+
+    def build_dino_head(self, model_info_dict):
+        if self.model_cfg.get('DINO_HEAD', None) is None or not self.model_cfg.DINO_HEAD.ENABLE:
+            return None, model_info_dict
+        dino_head_module = roi_heads.__all__[self.model_cfg.DINO_HEAD.NAME](model_cfg=self.model_cfg.DINO_HEAD)
+        model_info_dict['module_list'].append(dino_head_module)
+        return dino_head_module, model_info_dict
 
     def forward(self, **kwargs):
         raise NotImplementedError
@@ -401,7 +408,7 @@ class Detector3DTemplate(nn.Module):
         epoch = checkpoint.get('epoch', -1)
         it = checkpoint.get('it', 0.0)
 
-        self._load_state_dict(checkpoint['model_state'], strict=True)
+        self._load_state_dict(checkpoint['model_state'], strict=False)
 
         if optimizer is not None:
             if 'optimizer_state' in checkpoint and checkpoint['optimizer_state'] is not None:

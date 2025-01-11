@@ -88,6 +88,7 @@ def transform_aug(boxes, source_dict, target_dict):
     }
     new_boxes = []
     for bs_idx, box in enumerate(boxes):
+        box = box.clone()
         source_aug_list = source_dict['augmentation_list'][bs_idx]
         target_aug_list = target_dict['augmentation_list'][bs_idx]
         source_aug_param = source_dict['augmentation_params'][bs_idx]

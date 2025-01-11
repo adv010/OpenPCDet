@@ -37,8 +37,8 @@ class Contrastive(nn.Module):
         self.unlabeled_weight = cfgs.MODEL.UNLABELED_WEIGHT
         self.cfgs = cfgs
 
-        if cfgs.MODEL.ROI_HEAD.DINO_LOSS.get('ENABLE', False):
-            self.dino_loss = DINOLoss(**cfgs.MODEL.ROI_HEAD.DINO_LOSS)
+        if cfgs.MODEL.DINO_HEAD.get('ENABLE', False):
+            self.dino_loss = DINOLoss(cfgs.MODEL.DINO_HEAD)
 
     @torch.no_grad()
     def _forward_test_teacher(self, batch_dict):
@@ -90,25 +90,30 @@ class Contrastive(nn.Module):
                 new_dict[k] = batch_dict[k].clone()
         return new_dict
 
-    def _get_dino_feats(self, batch_dict, rois, model='teacher', source_trans_dict=None):
+    def get_rois_cls_token(self, batch_dict, rois, model='teacher'):
         rois = rois.clone().detach()
         input_keys = ['points', 'voxels', 'voxel_coords', 'voxel_num_points', 'batch_size']
         # TODO(farzad): Check if by_ref=True is applicable
         batch_dict_tmp = self.clone_dict(batch_dict, input_keys, by_ref=False)
-        if source_trans_dict is not None:
-            rois = transform_aug(rois, source_trans_dict, batch_dict)
-
         if model == 'teacher':
             self._forward_test_teacher(batch_dict_tmp)
             batch_dict_tmp['rois'] = rois  # replace with the transformed rois
             with torch.no_grad():
-                batch_feats = self.teacher.roi_head.get_proj_feats(batch_dict_tmp)
+                gpoint_feats = self.teacher.roi_head.roi_grid_pool(batch_dict_tmp)  # (BxN, 6x6x6, C)
+                B_N = gpoint_feats.shape[0]
+                gpoint_feats = gpoint_feats.permute(0, 2, 1).contiguous().view(B_N, -1, 6, 6, 6)  # (BxN, C, 6, 6, 6)
+                shared_features = self.teacher.roi_head.shared_fc_layer(gpoint_feats.view(B_N, -1, 1)).squeeze(-1)
+                batch_feats = self.teacher.dino_head.get_cls_token(shared_features)
         else:
             # TODO(farzad): IS THIS WORKAROUND SAFE? Fix the issue with a better solution!
             batch_dict_tmp['gt_boxes'] = torch.zeros((rois.shape[0], 1, 8), device=rois.device)  # dummy
             self._forward_student(batch_dict_tmp)
             batch_dict_tmp['rois'] = rois  # replace with the transformed rois
-            batch_feats = self.student.roi_head.get_masked_feats(batch_dict_tmp)
+            gpoint_feats = self.student.roi_head.roi_grid_pool(batch_dict_tmp)  # (BxN, 6x6x6, C)
+            B_N = gpoint_feats.shape[0]
+            gpoint_feats = gpoint_feats.permute(0, 2, 1).contiguous().view(B_N, -1, 6, 6, 6)  # (BxN, C, 6, 6, 6)
+            shared_features = self.student.roi_head.shared_fc_layer(gpoint_feats.view(B_N, -1, 1)).squeeze(-1)
+            batch_feats = self.student.dino_head.get_cls_token(shared_features)
 
         batch_feats = batch_feats.view(*rois.shape[:2], -1)
         assert torch.logical_not(torch.eq(rois, 0).all(dim=-1)).all().item(), 'rois should not be zero!'
@@ -122,8 +127,9 @@ class Contrastive(nn.Module):
         self._forward_test_teacher(batch_dict_wa_ulb)
         preds_ema, _ = self.teacher.post_processing(batch_dict_wa_ulb, no_recall_dict=True)
         pls = self.filter_pls(preds_ema)
-        pl_boxes_sa = transform_aug(pls['boxes'], batch_dict_wa_ulb, batch_dict_sa_ulb)
-        batch_dict_sa_ulb['gt_boxes'] = self.pack_boxes(pl_boxes_sa)
+        pls = self.pack_boxes(pls['boxes'])
+        pl_boxes_sa = transform_aug(pls, batch_dict_wa_ulb, batch_dict_sa_ulb)
+        batch_dict_sa_ulb['gt_boxes'] = pl_boxes_sa
 
         self._forward_student(batch_dict_sa_lbl)
 
@@ -152,22 +158,24 @@ class Contrastive(nn.Module):
         # loss_point, tb_dict = self.point_head.get_loss(tb_dict)
         # loss += loss_point
 
-        if self.cfgs.MODEL.ROI_HEAD.DINO_LOSS.get('ENABLE', False):
+        if self.cfgs.MODEL.DINO_HEAD.get('ENABLE', False):
             with torch.no_grad():
-                # TODO: Design decision: use only student rois for both teacher and student? Check the quality of RoIs.
-                rois = batch_dict_sa_ulb['rois']
-                dummy_labels = torch.zeros(rois.shape[:2], device=rois.device)  # dummy
-                rois = torch.cat([rois, dummy_labels.unsqueeze(2)], dim=-1)  # Warning: no clone
-                t2 = self._get_dino_feats(batch_dict_sa_ulb, rois)
-                t1 = self._get_dino_feats(batch_dict_wa_ulb, rois, source_trans_dict=batch_dict_sa_ulb)
-            s2 = self._get_dino_feats(batch_dict_sa_ulb, rois, model='student')
-            s1 = self._get_dino_feats(batch_dict_wa_ulb, rois, model='student', source_trans_dict=batch_dict_sa_ulb)
+                # TODO: Design decision: use only teacher's pls for both teacher and student? Check the quality of RoIs.
+                wa_rois = pls
+                sa_rois = batch_dict_sa_ulb['gt_boxes']
+                dummy_labels = torch.zeros(sa_rois.shape[:2], device=sa_rois.device)  # dummy
+                sa_rois = torch.cat([sa_rois, dummy_labels.unsqueeze(2)], dim=-1)  # Warning: no clone
+                wa_rois = torch.cat([wa_rois, dummy_labels.unsqueeze(2)], dim=-1)  # Warning: no clone
+                t2 = self.get_rois_cls_token(batch_dict_sa_ulb, sa_rois)
+                t1 = self.get_rois_cls_token(batch_dict_wa_ulb, wa_rois)
+            s2 = self.get_rois_cls_token(batch_dict_sa_ulb, sa_rois, model='student')
+            s1 = self.get_rois_cls_token(batch_dict_wa_ulb, wa_rois, model='student')
             teacher_output = torch.cat([t1, t2], dim=0).view(-1, t1.shape[-1])  # (BxN, C) N=128
             t1_centered, t2_centered = self.dino_loss.softmax_center_teacher(teacher_output).chunk(2)
             self.dino_loss.update_center(teacher_output)
             dino_loss = self.dino_loss.forward(s1, s2, t1_centered, t2_centered)
             tb_dict.update({'dino_loss_unlabeled': dino_loss.item()})
-            loss += dino_loss * self.cfgs.MODEL.ROI_HEAD.DINO_LOSS.get('WEIGHT', 1.0)
+            loss += dino_loss * self.cfgs.MODEL.DINO_HEAD.LOSS_CONFIG.LOSS_WEIGHTS.get('dino_loss_weight', 1.0)
 
         self.merge_tb_dicts(tb_dict_lbl, tb_dict, 'labeled')
         self.merge_tb_dicts(tb_dict_rpn_ulb, tb_dict, 'unlabeled')

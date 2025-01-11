@@ -190,26 +190,18 @@ MODEL:
             }
 
     ROI_HEAD:
-        NAME: PVRCNNHeadWithProjector
+        NAME: PVRCNNHead
         CLASS_AGNOSTIC: True
         ENABLE_VIS: False
-        ENABLE_SOFT_TEACHER: False
         ENABLE_ULB_CLS_DIST_LOSS: False
         ENABLE_PROTOTYPING: False
         TEMPERATURE: 0.1
         CLS_WEIGHT: [1.0, 4.0, 4.0]
-        DINO_LOSS:
-            ENABLE: True
-            OUT_DIM: 128
-            TEACHER_TEMP: 0.04
-            STUDENT_TEMP: 0.1
-            NORM_LAST_LAYER: True
         ENABLE_PROTO_CONTRASTIVE_LOSS: False
         ENABLE_LPCONT_LOSS: False
         PROTO_CONTRASTIVE_LOSS_WEIGHT: 1.0
         LPCONT_LOSS_WEIGHT: 1.0
         SHARED_FC: [256, 256]
-        PROJECTION_SIZE: 128
         CLS_FC: [256, 256]
         REG_FC: [256, 256]
         DP_RATIO: 0.3
@@ -287,6 +279,25 @@ MODEL:
             TRANSLATE:
                 SCALE: [0.25, 0.25, 0.25]
 
+    DINO_HEAD:
+        NAME: DINOHead
+        ENABLE: True
+        OUT_DIM: 64
+        NORM_LAST_LAYER: True
+        MLP:
+            nlayers: 3
+            in_dim: 256
+            bottleneck_dim: 256
+            hidden_dim: 256
+            use_bn: False
+            bias: True
+        LOSS_CONFIG:
+            LOSS_WEIGHTS: {
+                'dino_loss_weight': 1.0,
+            }
+            TEACHER_TEMP: 0.04
+            STUDENT_TEMP: 0.1
+            CENTER_MOMENTUM: 0.9
 
     POST_PROCESSING:
         RECALL_THRESH_LIST: [0.3, 0.5, 0.7]
@@ -370,8 +381,8 @@ OPTIMIZATION:
 
     SEMI_SUP_LEARNING:
         NAME: Contrastive  # 'SESS','Pseudo-Label','3DIoUMatch','SE_SSD','Contrastive'
-        LD_BATCH_SIZE_PER_GPU: 8
-        UD_BATCH_SIZE_PER_GPU: 8
+        LD_BATCH_SIZE_PER_GPU: 1
+        UD_BATCH_SIZE_PER_GPU: 1
         CONF_THRESH: [0.5, 0.25, 0.25]
         SEM_THRESH: [0.4, 0.4, 0.4]
         CAT_LBL_ULB: False

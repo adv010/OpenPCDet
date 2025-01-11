@@ -8,13 +8,13 @@ from . import box_utils
 
 
 class DINOLoss(nn.Module):
-    def __init__(
-            self, **kwargs):
+    def __init__(self, loss_cfg):
         super().__init__()
-        self.student_temp = kwargs.get('STUDENT_TEMP', 0.1)
-        self.teacher_temp = kwargs.get('TEACHER_TEMP', 0.04)
-        self.center_momentum = kwargs.get('CENTER_MOMENTUM', 0.9)
-        self.register_buffer("center", torch.zeros(1, kwargs.get('OUT_DIM', 128)))
+        self.student_temp = loss_cfg.LOSS_CONFIG['STUDENT_TEMP']
+        self.teacher_temp = loss_cfg.LOSS_CONFIG['TEACHER_TEMP']
+        self.center_momentum = loss_cfg.LOSS_CONFIG['CENTER_MOMENTUM']
+        out_dim = loss_cfg['OUT_DIM']
+        self.register_buffer("center", torch.zeros(1, out_dim))
         self.updated = True
         self.reduce_handle = None
         self.len_teacher_output = None

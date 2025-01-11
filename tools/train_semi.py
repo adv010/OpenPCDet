@@ -351,8 +351,8 @@ def main():
                 (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
     eval_ssl_dir = output_dir / 'eval' / 'eval_with_teacher_model'
     eval_ssl_dir.mkdir(parents=True, exist_ok=True)
-
-    for t_param in model.module.teacher.parameters(): # Add this to avoid errors
+    model = model.module.teacher if dist_train else model.teacher
+    for t_param in model.parameters():  # Add this to avoid errors
         t_param.requires_grad = True
     args.start_epoch = cfg.OPTIMIZATION.SEMI_SUP_LEARNING.NUM_EPOCHS - 25
     repeat_eval_ckpt(
