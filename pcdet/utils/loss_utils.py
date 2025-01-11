@@ -56,7 +56,7 @@ class DINOLoss(nn.Module):
         Q *= B  # the columns must sum to 1 so that Q is an assignment
         return Q.t()
 
-    def forward(self, s1, s2, t1_centered, t2_centered):
+    def forward(self, s1, s2, t1_centered, t2_centered, keep_mask):
         """
         Cross-entropy between softmax outputs of the teacher and student networks.
         """
@@ -67,6 +67,8 @@ class DINOLoss(nn.Module):
         lsm1 = lsm1.view_as(t2_centered)
         loss1 = torch.sum(t1_centered * lsm2, dim=-1)
         loss2 = torch.sum(t2_centered * lsm1, dim=-1)
+        loss1 = loss1 * keep_mask.float().view(-1)
+        loss2 = loss2 * keep_mask.float().view(-1)
         total_loss -= loss1.mean() + loss2.mean()
 
         return total_loss

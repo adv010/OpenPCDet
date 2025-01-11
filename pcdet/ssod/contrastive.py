@@ -116,7 +116,6 @@ class Contrastive(nn.Module):
             batch_feats = self.student.dino_head.get_cls_token(shared_features)
 
         batch_feats = batch_feats.view(*rois.shape[:2], -1)
-        assert torch.logical_not(torch.eq(rois, 0).all(dim=-1)).all().item(), 'rois should not be zero!'
         return batch_feats
 
     def forward(self, batch_dict_wa_lbl, batch_dict_wa_ulb, batch_dict_sa_lbl, batch_dict_sa_ulb, epoch_id):
@@ -128,6 +127,7 @@ class Contrastive(nn.Module):
         preds_ema, _ = self.teacher.post_processing(batch_dict_wa_ulb, no_recall_dict=True)
         pls = self.filter_pls(preds_ema)
         pls = self.pack_boxes(pls['boxes'])
+        # TODO(farzad): transform_aug changes the rotation (7th column) padding rows, making the row non-zero.
         pl_boxes_sa = transform_aug(pls, batch_dict_wa_ulb, batch_dict_sa_ulb)
         batch_dict_sa_ulb['gt_boxes'] = pl_boxes_sa
 
@@ -163,6 +163,7 @@ class Contrastive(nn.Module):
                 # TODO: Design decision: use only teacher's pls for both teacher and student? Check the quality of RoIs.
                 wa_rois = pls
                 sa_rois = batch_dict_sa_ulb['gt_boxes']
+                keep_mask = torch.logical_not(torch.eq(wa_rois, 0).all(dim=-1))
                 dummy_labels = torch.zeros(sa_rois.shape[:2], device=sa_rois.device)  # dummy
                 sa_rois = torch.cat([sa_rois, dummy_labels.unsqueeze(2)], dim=-1)  # Warning: no clone
                 wa_rois = torch.cat([wa_rois, dummy_labels.unsqueeze(2)], dim=-1)  # Warning: no clone
@@ -173,7 +174,7 @@ class Contrastive(nn.Module):
             teacher_output = torch.cat([t1, t2], dim=0).view(-1, t1.shape[-1])  # (BxN, C) N=128
             t1_centered, t2_centered = self.dino_loss.softmax_center_teacher(teacher_output).chunk(2)
             self.dino_loss.update_center(teacher_output)
-            dino_loss = self.dino_loss.forward(s1, s2, t1_centered, t2_centered)
+            dino_loss = self.dino_loss.forward(s1, s2, t1_centered, t2_centered, keep_mask)
             tb_dict.update({'dino_loss_unlabeled': dino_loss.item()})
             loss += dino_loss * self.cfgs.MODEL.DINO_HEAD.LOSS_CONFIG.LOSS_WEIGHTS.get('dino_loss_weight', 1.0)
 
