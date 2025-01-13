@@ -6,6 +6,10 @@ from tools.visual_utils import open3d_vis_utils as V
 from pcdet.models import build_network
 import copy
 from torch import nn
+from matplotlib import pyplot as plt
+from matplotlib.figure import Figure
+import numpy as np
+from torch.nn import functional as F
 
 
 class Contrastive(nn.Module):
@@ -36,6 +40,8 @@ class Contrastive(nn.Module):
         self.rcnn_reg_ulb = cfgs.MODEL.RCNN_REG_LOSS_ULB
         self.unlabeled_weight = cfgs.MODEL.UNLABELED_WEIGHT
         self.cfgs = cfgs
+
+        self.cls_weights = torch.tensor(model_cfgs['ROI_HEAD']['CLS_WEIGHT'])
 
         if cfgs.MODEL.DINO_HEAD.get('ENABLE', False):
             self.dino_loss = DINOLoss(cfgs.MODEL.DINO_HEAD)
@@ -91,31 +97,30 @@ class Contrastive(nn.Module):
         return new_dict
 
     def get_rois_cls_token(self, batch_dict, rois, model='teacher'):
-        rois = rois.clone().detach()
-        input_keys = ['points', 'voxels', 'voxel_coords', 'voxel_num_points', 'batch_size']
-        # TODO(farzad): Check if by_ref=True is applicable
-        batch_dict_tmp = self.clone_dict(batch_dict, input_keys, by_ref=False)
+        rois = rois.clone().detach()[..., :7]  # remove the 8th column (cls) if exists
+        # input_keys = ['points', 'voxels', 'voxel_coords', 'voxel_num_points', 'batch_size']
+        input_keys = ["point_features", "point_coords", "batch_size"]
+        batch_dict_tmp = self.clone_dict(batch_dict, input_keys, by_ref=True)
+        batch_dict_tmp['rois'] = rois  # replace with the transformed rois
         if model == 'teacher':
-            self._forward_test_teacher(batch_dict_tmp)
-            batch_dict_tmp['rois'] = rois  # replace with the transformed rois
+            # self._forward_test_teacher(batch_dict_tmp)
             with torch.no_grad():
-                gpoint_feats = self.teacher.roi_head.roi_grid_pool(batch_dict_tmp)  # (BxN, 6x6x6, C)
+                gpoint_feats = self.teacher.roi_head.roi_grid_pool(batch_dict_tmp, use_point_cls_score=False)  # (BxN, 6x6x6, C)
                 B_N = gpoint_feats.shape[0]
                 gpoint_feats = gpoint_feats.permute(0, 2, 1).contiguous().view(B_N, -1, 6, 6, 6)  # (BxN, C, 6, 6, 6)
-                shared_features = self.teacher.roi_head.shared_fc_layer(gpoint_feats.view(B_N, -1, 1)).squeeze(-1)
+                shared_features = self.teacher.roi_head.shared_fc_layer(gpoint_feats.view(B_N, -1, 1))
                 batch_feats = self.teacher.dino_head.get_cls_token(shared_features)
         else:
-            # TODO(farzad): IS THIS WORKAROUND SAFE? Fix the issue with a better solution!
-            batch_dict_tmp['gt_boxes'] = torch.zeros((rois.shape[0], 1, 8), device=rois.device)  # dummy
-            self._forward_student(batch_dict_tmp)
-            batch_dict_tmp['rois'] = rois  # replace with the transformed rois
-            gpoint_feats = self.student.roi_head.roi_grid_pool(batch_dict_tmp)  # (BxN, 6x6x6, C)
+            # batch_dict_tmp['gt_boxes'] = torch.zeros((rois.shape[0], 1, 8), device=rois.device)  # dummy
+            # self._forward_student(batch_dict_tmp)
+            # batch_dict_tmp['rois'] = rois  # replace with the transformed rois
+            gpoint_feats = self.student.roi_head.roi_grid_pool(batch_dict_tmp, use_point_cls_score=False)  # (BxN, 6x6x6, C)
             B_N = gpoint_feats.shape[0]
             gpoint_feats = gpoint_feats.permute(0, 2, 1).contiguous().view(B_N, -1, 6, 6, 6)  # (BxN, C, 6, 6, 6)
-            shared_features = self.student.roi_head.shared_fc_layer(gpoint_feats.view(B_N, -1, 1)).squeeze(-1)
+            shared_features = self.student.roi_head.shared_fc_layer(gpoint_feats.view(B_N, -1, 1))
             batch_feats = self.student.dino_head.get_cls_token(shared_features)
 
-        batch_feats = batch_feats.view(*rois.shape[:2], -1)
+        batch_feats = batch_feats.view(B_N, -1)
         return batch_feats
 
     def forward(self, batch_dict_wa_lbl, batch_dict_wa_ulb, batch_dict_sa_lbl, batch_dict_sa_ulb, epoch_id):
@@ -158,25 +163,44 @@ class Contrastive(nn.Module):
         # loss_point, tb_dict = self.point_head.get_loss(tb_dict)
         # loss += loss_point
 
+        # TODO: Design decision: use only teacher's pls for both teacher and student? Check the quality of RoIs.
+        # TODO: Pool from BEV or point-only or any simpler backbone feature
         if self.cfgs.MODEL.DINO_HEAD.get('ENABLE', False):
             with torch.no_grad():
-                # TODO: Design decision: use only teacher's pls for both teacher and student? Check the quality of RoIs.
-                wa_rois = pls
-                sa_rois = batch_dict_sa_ulb['gt_boxes']
-                keep_mask = torch.logical_not(torch.eq(wa_rois, 0).all(dim=-1))
-                dummy_labels = torch.zeros(sa_rois.shape[:2], device=sa_rois.device)  # dummy
-                sa_rois = torch.cat([sa_rois, dummy_labels.unsqueeze(2)], dim=-1)  # Warning: no clone
-                wa_rois = torch.cat([wa_rois, dummy_labels.unsqueeze(2)], dim=-1)  # Warning: no clone
-                t2 = self.get_rois_cls_token(batch_dict_sa_ulb, sa_rois)
+                sa_rois = batch_dict_sa_ulb['rois']
+                sa_roi_labels = batch_dict_sa_ulb['roi_labels'] - 1  # 0-based
+                cls_weights = self.cls_weights.to(sa_roi_labels.device)[sa_roi_labels].view(-1)
+                wa_rois = transform_aug(sa_rois, batch_dict_sa_ulb, batch_dict_wa_ulb)
+                keep_mask = torch.logical_not(torch.eq(wa_rois, 0).all(dim=-1)).view(-1).float()
+                # kmask_sa = torch.logical_not(torch.eq(sa_rois, 0).all(dim=-1)).view(-1).float()
+                # assert keep_mask.all(), "All pseudo labels should be non-zero"
+                # assert kmask_sa.all(), "All pseudo labels should be non-zero"
+                # t2 = self.get_rois_cls_token(batch_dict_sa_ulb, sa_rois)
                 t1 = self.get_rois_cls_token(batch_dict_wa_ulb, wa_rois)
             s2 = self.get_rois_cls_token(batch_dict_sa_ulb, sa_rois, model='student')
-            s1 = self.get_rois_cls_token(batch_dict_wa_ulb, wa_rois, model='student')
-            teacher_output = torch.cat([t1, t2], dim=0).view(-1, t1.shape[-1])  # (BxN, C) N=128
-            t1_centered, t2_centered = self.dino_loss.softmax_center_teacher(teacher_output).chunk(2)
-            self.dino_loss.update_center(teacher_output)
-            dino_loss = self.dino_loss.forward(s1, s2, t1_centered, t2_centered, keep_mask)
+            # Temporary: use only one pair (t1-s2) to simplify the loss and debugging. We use t1-s2 pair initially
+            # because their features are already calculated in the forward passes
+            # s1 = self.get_rois_cls_token(batch_dict_wa_ulb, wa_rois, model='student')
+            # teacher_output = torch.cat([t1, t2], dim=0).view(-1, t1.shape[-1])  # (BxN, C) N=128
+            # t1_centered, t2_centered = self.dino_loss.softmax_center_teacher(teacher_output).chunk(2)
+            t1_centered = self.dino_loss.softmax_center_teacher(t1)
+            self.dino_loss.update_center(t1)
+            dino_loss = self.dino_loss.forward(s2, t1_centered, cls_weights)
             tb_dict.update({'dino_loss_unlabeled': dino_loss.item()})
             loss += dino_loss * self.cfgs.MODEL.DINO_HEAD.LOSS_CONFIG.LOSS_WEIGHTS.get('dino_loss_weight', 1.0)
+
+            t1_dist = torch.sum(t1_centered * keep_mask.unsqueeze(-1), dim=0) / keep_mask.sum()
+            s2_dist = torch.sum(s2 * keep_mask.unsqueeze(-1), dim=0) / keep_mask.sum()
+            t1_dist = self.plot_soft_class_distribution(t1_dist.cpu().numpy())
+            s2_dist = self.plot_soft_class_distribution(s2_dist.detach().cpu().numpy())
+            tb_dict.update({'t1_cls_dist_fig': t1_dist})
+            tb_dict.update({'s2_cls_dist_fig': s2_dist})
+            # t2_dist = torch.sum(t2_centered * keep_mask.unsqueeze(-1), dim=0) / keep_mask.sum()
+            # s1_dist = torch.sum(s1 * keep_mask.unsqueeze(-1), dim=0) / keep_mask.sum()
+            # t2_dist = self.plot_soft_class_distribution(t2_dist.cpu().numpy())
+            # s1_dist = self.plot_soft_class_distribution(s1_dist.detach().cpu().numpy())
+            # tb_dict.update({'t2_cls_dist_fig': t2_dist})
+            # tb_dict.update({'s1_cls_dist_fig': s1_dist})
 
         self.merge_tb_dicts(tb_dict_lbl, tb_dict, 'labeled')
         self.merge_tb_dicts(tb_dict_rpn_ulb, tb_dict, 'unlabeled')
@@ -184,6 +208,24 @@ class Contrastive(nn.Module):
 
         return loss, tb_dict, disp_dict
 
+    def plot_soft_class_distribution(self, distribution):
+        num_classes = len(distribution)
+        indices = np.arange(num_classes)
+
+        # Use Figure directly
+        fig = Figure(figsize=(12, 6))
+        ax = fig.subplots()
+        ax.bar(indices, distribution, color='skyblue', edgecolor='black', linewidth=0.5)
+
+        ax.set_xlabel("Class Index")
+        ax.set_ylabel("Probability")
+        ax.set_title("Soft Class Distribution")
+        ax.set_xticks(indices[::4])  # Show every 4th index
+        ax.set_xticklabels(indices[::4], rotation=45)
+        ax.set_ylim(0, 1)
+        fig.tight_layout()
+
+        return fig
     @staticmethod
     def vis(points, gt_boxes, gt_labels, ref_boxes=None, ref_labels=None, ref_scores=None, attributes=None):
         gt_boxes = gt_boxes.cpu().numpy()

@@ -356,7 +356,7 @@ def main():
         t_param.requires_grad = True
     args.start_epoch = cfg.OPTIMIZATION.SEMI_SUP_LEARNING.NUM_EPOCHS - 25
     repeat_eval_ckpt(
-        model=model.module.teacher if dist_train else model.teacher,
+        model=model,
         test_loader=dataloaders['test'],
         args=args,
         eval_output_dir=eval_ssl_dir,

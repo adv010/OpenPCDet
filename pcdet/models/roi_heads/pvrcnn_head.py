@@ -69,7 +69,7 @@ class PVRCNNHead(RoIHeadTemplate):
                     nn.init.constant_(m.bias, 0)
         nn.init.normal_(self.reg_layers[-1].weight, mean=0, std=0.001)
 
-    def roi_grid_pool(self, batch_dict):
+    def roi_grid_pool(self, batch_dict, use_point_cls_score=True):
         """
         Args:
             batch_dict:
@@ -86,9 +86,10 @@ class PVRCNNHead(RoIHeadTemplate):
         rois = batch_dict['rois']
         point_coords = batch_dict["point_coords"]
         point_features = batch_dict["point_features"]
-        point_cls_scores = batch_dict["point_cls_scores"]
 
-        point_features = point_features * point_cls_scores.view(-1, 1)
+        if use_point_cls_score:
+            point_cls_scores = batch_dict["point_cls_scores"]
+            point_features = point_features * point_cls_scores.view(-1, 1)
 
         global_roi_grid_points, local_roi_grid_points = self.get_global_grid_points_of_roi(
             rois, grid_size=self.model_cfg.ROI_GRID_POOL.GRID_SIZE

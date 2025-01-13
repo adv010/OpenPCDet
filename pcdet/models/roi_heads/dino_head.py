@@ -13,19 +13,42 @@ class DINOHead(nn.Module):
         self.cfgs = model_cfg
         mlp_params = model_cfg.get('MLP', {})
         bottleneck_dim = mlp_params.get('bottleneck_dim', 128)
+        in_dim = model_cfg.get('in_dim', 256)
         out_dim = model_cfg.get('out_dim', 64)
-        self.mlp = self._build_mlp(**mlp_params)
-        self.apply(self._init_weights)
+        # self.mlp = self._build_mlp(**mlp_params)
+        self.mlp = self.make_fc_layers(input_channels=in_dim, output_channels=256, fc_list=[256, 256])
+        # self.apply(self._init_weights)
         self.last_layer = weight_norm(nn.Linear(bottleneck_dim, out_dim, bias=False))
         self.last_layer.weight_g.data.fill_(1)
-
+        if model_cfg.get('NORM_LAST_LAYER', False):
+            self.last_layer.weight_g.requires_grad = False
         # self.mask_token = nn.Parameter(torch.randn(1, 128))  # (1, C)
+        self.init_weights(weight_init='xavier')
 
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=0.02)
-            if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
+    def init_weights(self, weight_init='xavier'):
+        if weight_init == 'kaiming':
+            init_func = nn.init.kaiming_normal_
+        elif weight_init == 'xavier':
+            init_func = nn.init.xavier_normal_
+        elif weight_init == 'normal':
+            init_func = nn.init.normal_
+        else:
+            raise NotImplementedError
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d) or isinstance(m, nn.Conv1d):
+                if weight_init == 'normal':
+                    init_func(m.weight, mean=0, std=0.001)
+                else:
+                    init_func(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    # def _init_weights(self, m):
+    #     if isinstance(m, nn.Linear):
+    #         trunc_normal_(m.weight, std=0.02)
+    #         if isinstance(m, nn.Linear) and m.bias is not None:
+    #             nn.init.constant_(m.bias, 0)
 
     def get_masked_feats(self, batch_dict, crop_size=4):
         pooled_features = self.roi_grid_pool(batch_dict)  # (BxN, 6x6x6, C)
@@ -65,15 +88,33 @@ class DINOHead(nn.Module):
         proj_feats = self.projector(shared_features)
         return proj_feats
 
-    def get_cls_token(self, shared_feats):
-        grid_feats = self.mlp(shared_feats)
+    def get_cls_token(self, grid_feats):
+        grid_feats = self.mlp(grid_feats)
+        grid_feats = grid_feats.squeeze(-1)
         if self.cfgs['NORM_LAST_LAYER']:
-            grid_feats = F.normalize(grid_feats, p=2, dim=-1)
+            eps = 1e-6 if grid_feats.dtype == torch.float16 else 1e-12
+            grid_feats = F.normalize(grid_feats, p=2, dim=-1, eps=eps)
         grid_feats = self.last_layer(grid_feats)
         return grid_feats
 
     def forward(self, batch_dict):
         return batch_dict
+
+    def make_fc_layers(self, input_channels, output_channels, fc_list):
+        fc_layers = []
+        pre_channel = input_channels
+        for k in range(0, fc_list.__len__()):
+            fc_layers.extend([
+                nn.Conv1d(pre_channel, fc_list[k], kernel_size=1, bias=False),
+                nn.BatchNorm1d(fc_list[k]),
+                nn.ReLU()
+            ])
+            pre_channel = fc_list[k]
+            if k == 0:
+                fc_layers.append(nn.Dropout(0.3))
+        fc_layers.append(nn.Conv1d(pre_channel, output_channels, kernel_size=1, bias=True))
+        fc_layers = nn.Sequential(*fc_layers)
+        return fc_layers
 
     def _build_mlp(self, nlayers, in_dim, bottleneck_dim, hidden_dim=None, use_bn=False, bias=True):
         if nlayers == 1:

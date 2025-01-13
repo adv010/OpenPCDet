@@ -1,7 +1,7 @@
 import torch
 import tqdm
 from torch.nn.utils import clip_grad_norm_
-
+from matplotlib import pyplot as plt
 
 def train_ssl_one_epoch(model, optimizer, labeled_loader, unlabeled_loader, epoch_id,
                         lr_scheduler, accumulated_iter, ssl_cfg,
@@ -84,7 +84,11 @@ def train_ssl_one_epoch(model, optimizer, labeled_loader, unlabeled_loader, epoc
                 tb_log.add_scalar('train/loss', loss, accumulated_iter)
                 tb_log.add_scalar('meta_data/learning_rate', cur_lr, accumulated_iter)
                 for key, val in tb_dict.items():
-                    tb_log.add_scalar('train/' + key, val, accumulated_iter)
+                    if 'fig' in key:
+                        tb_log.add_figure('train/' + key, val, accumulated_iter)
+                        plt.close(val)
+                    else:
+                        tb_log.add_scalar('train/' + key, val, accumulated_iter)
     if rank == 0:
         pbar.close()
     return accumulated_iter
