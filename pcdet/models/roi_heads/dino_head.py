@@ -91,9 +91,9 @@ class DINOHead(nn.Module):
     def get_cls_token(self, grid_feats):
         grid_feats = self.mlp(grid_feats)
         grid_feats = grid_feats.squeeze(-1)
-        if self.cfgs['NORM_LAST_LAYER']:
-            eps = 1e-6 if grid_feats.dtype == torch.float16 else 1e-12
-            grid_feats = F.normalize(grid_feats, p=2, dim=-1, eps=eps)
+        # if self.cfgs['NORM_LAST_LAYER']:
+        #     eps = 1e-6 if grid_feats.dtype == torch.float16 else 1e-12
+        #     grid_feats = F.normalize(grid_feats, p=2, dim=-1, eps=eps)
         grid_feats = self.last_layer(grid_feats)
         return grid_feats
 

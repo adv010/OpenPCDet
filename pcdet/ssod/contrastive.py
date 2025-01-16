@@ -120,8 +120,7 @@ class Contrastive(nn.Module):
             shared_features = self.student.roi_head.shared_fc_layer(gpoint_feats.view(B_N, -1, 1))
             batch_feats = self.student.dino_head.get_cls_token(shared_features)
 
-        batch_feats = batch_feats.view(B_N, -1)
-        return batch_feats
+        return batch_feats  # (BxN, out_dim)
 
     def forward(self, batch_dict_wa_lbl, batch_dict_wa_ulb, batch_dict_sa_lbl, batch_dict_sa_ulb, epoch_id):
         load_data_to_gpu(batch_dict_wa_ulb)
@@ -167,14 +166,11 @@ class Contrastive(nn.Module):
         # TODO: Pool from BEV or point-only or any simpler backbone feature
         if self.cfgs.MODEL.DINO_HEAD.get('ENABLE', False):
             with torch.no_grad():
-                sa_rois = batch_dict_sa_ulb['rois']
-                sa_roi_labels = batch_dict_sa_ulb['roi_labels'] - 1  # 0-based
+                wa_rois = pls[..., :7]
+                sa_rois = batch_dict_sa_ulb['gt_boxes'][..., :7]
+                sa_roi_labels = pls[..., -1].long().view(-1) - 1  # 0-based
                 cls_weights = self.cls_weights.to(sa_roi_labels.device)[sa_roi_labels].view(-1)
-                wa_rois = transform_aug(sa_rois, batch_dict_sa_ulb, batch_dict_wa_ulb)
                 keep_mask = torch.logical_not(torch.eq(wa_rois, 0).all(dim=-1)).view(-1).float()
-                # kmask_sa = torch.logical_not(torch.eq(sa_rois, 0).all(dim=-1)).view(-1).float()
-                # assert keep_mask.all(), "All pseudo labels should be non-zero"
-                # assert kmask_sa.all(), "All pseudo labels should be non-zero"
                 # t2 = self.get_rois_cls_token(batch_dict_sa_ulb, sa_rois)
                 t1 = self.get_rois_cls_token(batch_dict_wa_ulb, wa_rois)
             s2 = self.get_rois_cls_token(batch_dict_sa_ulb, sa_rois, model='student')
@@ -184,8 +180,8 @@ class Contrastive(nn.Module):
             # teacher_output = torch.cat([t1, t2], dim=0).view(-1, t1.shape[-1])  # (BxN, C) N=128
             # t1_centered, t2_centered = self.dino_loss.softmax_center_teacher(teacher_output).chunk(2)
             t1_centered = self.dino_loss.softmax_center_teacher(t1)
-            self.dino_loss.update_center(t1)
-            dino_loss = self.dino_loss.forward(s2, t1_centered, cls_weights)
+            self.dino_loss.update_center(t1, keep_mask)
+            dino_loss = self.dino_loss.forward(s2, t1_centered, cls_weights, keep_mask)
             tb_dict.update({'dino_loss_unlabeled': dino_loss.item()})
             loss += dino_loss * self.cfgs.MODEL.DINO_HEAD.LOSS_CONFIG.LOSS_WEIGHTS.get('dino_loss_weight', 1.0)
 
@@ -226,6 +222,7 @@ class Contrastive(nn.Module):
         fig.tight_layout()
 
         return fig
+
     @staticmethod
     def vis(points, gt_boxes, gt_labels, ref_boxes=None, ref_labels=None, ref_scores=None, attributes=None):
         gt_boxes = gt_boxes.cpu().numpy()

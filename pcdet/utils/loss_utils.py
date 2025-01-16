@@ -70,10 +70,13 @@ class DINOLoss(nn.Module):
     #     total_loss -= loss1 + loss2
     #     return total_loss
 
-    def forward(self, s2, t1_centered, weights):
+    def forward(self, s2, t1_centered, weights, keep_mask=None):
         """
         Cross-entropy between softmax outputs of the teacher and student networks.
         """
+        if keep_mask is not None:
+            weights = weights * keep_mask
+
         total_loss = 0
         # lsm1 = F.log_softmax(s1 / self.student_temp, dim=-1)
         lsm2 = F.log_softmax(s2 / self.student_temp, dim=-1)
@@ -86,13 +89,15 @@ class DINOLoss(nn.Module):
         return total_loss
 
     @torch.no_grad()
-    def update_center(self, teacher_output):
-        self.reduce_center_update(teacher_output)
+    def update_center(self, teacher_output, keep_mask):
+        self.reduce_center_update(teacher_output, keep_mask)
 
     @torch.no_grad()
-    def reduce_center_update(self, teacher_output):
+    def reduce_center_update(self, teacher_output, keep_mask):
         self.updated = False
-        self.len_teacher_output = len(teacher_output)
+        # self.len_teacher_output = len(teacher_output)
+        self.len_teacher_output = keep_mask.sum()
+        teacher_output = teacher_output * keep_mask.unsqueeze(-1)
         self.async_batch_center = torch.sum(teacher_output, dim=0, keepdim=True)
         if dist.is_initialized():
             self.reduce_handle = dist.all_reduce(self.async_batch_center, async_op=True)
