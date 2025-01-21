@@ -166,14 +166,14 @@ class Contrastive(nn.Module):
         # TODO: Pool from BEV or point-only or any simpler backbone feature
         if self.cfgs.MODEL.DINO_HEAD.get('ENABLE', False):
             with torch.no_grad():
-                sa_rois = batch_dict_sa_ulb['rois'].clone() # passing sa_rois without clone leads to in-place modification
-                sa_roi_labels = batch_dict_sa_ulb['roi_labels']
+                sa_rois = batch_dict_sa_ulb['rois'] # passing sa_rois without clone leads to in-place modification
+                sa_roi_labels = batch_dict_sa_ulb['roi_labels'].long().view(-1) - 1
+                keep_mask = self.mask_dense_rois(batch_dict_sa_ulb['points'], sa_rois).view(-1).float()
+                cls_weights = self.cls_weights.to(sa_roi_labels.device)[sa_roi_labels].view(-1)
                 wa_rois = transform_aug(sa_rois, batch_dict_sa_ulb, batch_dict_wa_ulb)
                 # wa_rois = pls[..., :7]
                 # sa_rois = batch_dict_sa_ulb['gt_boxes'][..., :7]
                 # sa_roi_labels = pls[..., -1].long().view(-1) - 1  # 0-based
-                cls_weights = self.cls_weights.to(sa_roi_labels.device)[sa_roi_labels].view(-1)
-                keep_mask = self.mask_dense_rois(batch_dict_sa_ulb['point_features'].view(sa_rois.shape[0],-1), sa_rois)
                 # keep_mask = torch.logical_not(torch.eq(wa_rois, 0).all(dim=-1)).view(-1).float()
                 # t2 = self.get_rois_cls_token(batch_dict_sa_ulb, sa_rois)
                 t1 = self.get_rois_cls_token(batch_dict_wa_ulb, wa_rois)
@@ -191,8 +191,7 @@ class Contrastive(nn.Module):
 
             t1_dist = torch.sum(t1_centered * keep_mask.unsqueeze(-1), dim=0) / keep_mask.sum()
             s2_dist = torch.sum(s2 * keep_mask.unsqueeze(-1), dim=0) / keep_mask.sum()
-
-            kl_div = torch.sum(t1_dist * torch.log(t1_dist / s2_dist))
+            kl_div = torch.sum(t1 * torch.log(t1 / s2))
             tb_dict.update({'kl_div_t1_s2': kl_div.item()})
             assert torch.allclose(t1_dist.sum(), torch.tensor(1.0))
             eps = 1e-8
