@@ -184,6 +184,7 @@ class Contrastive(nn.Module):
             # teacher_output = torch.cat([t1, t2], dim=0).view(-1, t1.shape[-1])  # (BxN, C) N=128
             # t1_centered, t2_centered = self.dino_loss.softmax_center_teacher(teacher_output).chunk(2)
             t1_centered = self.dino_loss.softmax_center_teacher(t1)
+            masked_rois_ratio = keep_mask.sum() / sa_rois.shape[0]
             self.dino_loss.update_center(t1, keep_mask)
             dino_loss = self.dino_loss.forward(s2, t1_centered, cls_weights, keep_mask)
             tb_dict.update({'dino_loss_unlabeled': dino_loss.item()})
@@ -191,13 +192,14 @@ class Contrastive(nn.Module):
 
             t1_dist = torch.sum(t1_centered * keep_mask.unsqueeze(-1), dim=0) / keep_mask.sum()
             s2_dist = torch.sum(s2 * keep_mask.unsqueeze(-1), dim=0) / keep_mask.sum()
-            kl_div = torch.sum(t1 * torch.log(t1 / s2))
-            tb_dict.update({'kl_div_t1_s2': kl_div.item()})
-            assert torch.allclose(t1_dist.sum(), torch.tensor(1.0))
             eps = 1e-8
-            log_probs = torch.log(t1_dist + eps)
-            entropy = -torch.sum(t1_dist * log_probs) 
-            tb_dict.update({'entropy_t1': entropy.item()})
+            kl_div = torch.sum(t1 * (torch.log(t1+eps)- torch.log(s2+eps)),dim=-1)  # KL divergence
+            tb_dict.update({'kl_div_t1_s2': kl_div.mean().item()})
+            tb_dict.update({'avg_masked_rois': masked_rois_ratio.item()})
+            # assert torch.allclose(t1_dist.sum(), torch.tensor(1.0))
+            log_probs = torch.log(t1 + eps)
+            entropy = -torch.sum(t1 * log_probs, dim=-1) 
+            tb_dict.update({'entropy_t1': entropy.mean().item()})
 
             t1_dist = self.plot_soft_class_distribution(t1_dist.cpu().numpy())
             s2_dist = self.plot_soft_class_distribution(s2_dist.detach().cpu().numpy())
