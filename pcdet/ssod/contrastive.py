@@ -166,21 +166,21 @@ class Contrastive(nn.Module):
         # TODO: Pool from BEV or point-only or any simpler backbone feature
         if self.cfgs.MODEL.DINO_HEAD.get('ENABLE', False):
             with torch.no_grad():
-                if self.cfgs.MODEL.DINO_HEAD.INPUT=='ROI':
-                    sa_rois = batch_dict_sa_ulb['rois'] # passing sa_rois without clone leads to in-place modification
+                if self.cfgs.MODEL.DINO_HEAD.INPUT == 'ROI':
+                    sa_rois = batch_dict_sa_ulb['rois']
                     sa_roi_labels = batch_dict_sa_ulb['roi_labels'].long().view(-1) - 1
                     keep_mask = self.mask_dense_rois(batch_dict_sa_ulb['points'], sa_rois).view(-1).float()
-                    cls_weights = self.cls_weights.to(sa_roi_labels.device)[sa_roi_labels].view(-1)
                     wa_rois = transform_aug(sa_rois, batch_dict_sa_ulb, batch_dict_wa_ulb)
-                    masked_rois_ratio = keep_mask.sum() / sa_rois.shape[0]
-                    tb_dict.update({'avg_masked_rois': masked_rois_ratio.item()})
-                elif self.cfgs.MODEL.DINO_HEAD.INPUT=='PL':
-                    wa_rois = pls[..., :7]
+                elif self.cfgs.MODEL.DINO_HEAD.INPUT == 'PL':
                     sa_rois = batch_dict_sa_ulb['gt_boxes'][..., :7]
                     sa_roi_labels = pls[..., -1].long().view(-1) - 1  # 0-based
+                    wa_rois = pls[..., :7]
                     keep_mask = torch.logical_not(torch.eq(wa_rois, 0).all(dim=-1)).view(-1).float()
-                    cls_weights = self.cls_weights.to(sa_roi_labels.device)[sa_roi_labels].view(-1)
-                    
+
+                cls_weights = self.cls_weights.to(sa_roi_labels.device)[sa_roi_labels].view(-1)
+                avg_keep_rois = keep_mask.sum() / sa_rois.shape[0]
+                tb_dict.update({'avg_keep_rois': avg_keep_rois.item()})
+
                 # t2 = self.get_rois_cls_token(batch_dict_sa_ulb, sa_rois)
                 t1 = self.get_rois_cls_token(batch_dict_wa_ulb, wa_rois)
             s2 = self.get_rois_cls_token(batch_dict_sa_ulb, sa_rois, model='student')
@@ -196,11 +196,11 @@ class Contrastive(nn.Module):
             loss += dino_loss * self.cfgs.MODEL.DINO_HEAD.LOSS_CONFIG.LOSS_WEIGHTS.get('dino_loss_weight', 1.0)
 
             t1_dist = torch.sum(t1_centered * keep_mask.unsqueeze(-1), dim=0) / keep_mask.sum()
-            s2_dist = torch.sum(s2 * keep_mask.unsqueeze(-1), dim=0) / keep_mask.sum()
+            s2_dist = torch.sum(torch.softmax(s2 / self.dino_loss.student_temp, dim=-1) * keep_mask.unsqueeze(-1), dim=0) / keep_mask.sum()
             # eps = 1e-8
             kl_div = F.kl_div(F.log_softmax(s2 / self.dino_loss.student_temp, dim=-1), t1_centered, reduction='batchmean')
             tb_dict.update({'kl_div_t1_s2': kl_div.mean().item()})    
-            entropy = -torch.sum(t1_centered * torch.log(t1_centered), dim=-1)
+            entropy = -torch.sum(t1_centered * torch.log(t1_centered + 1e-9), dim=-1)
             tb_dict.update({'entropy_t1': entropy.mean().item()})
 
             t1_dist = self.plot_soft_class_distribution(t1_dist.cpu().numpy())
