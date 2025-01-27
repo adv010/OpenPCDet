@@ -99,7 +99,7 @@ def calc_mean_mAP():
         if eval_list is None and curr_eval_list_file is not None:
             with open(curr_eval_list_file) as f_eval:
                 eval_list = list(set(map(int, f_eval.readlines()))) # take only unique entries
-                eval_list = [epoch for epoch in eval_list if epoch in [50, 55, 60]]  # filter for specific epochs
+                eval_list_selected = [epoch for epoch in eval_list if epoch in [50, 55, 60]]  # filter for specific epochs
                 print("\nEvaluated Epochs")
                 print(*[str(i) for i in eval_list], sep=",")
                 if args.save_to_file:
@@ -192,8 +192,11 @@ def calc_mean_mAP():
                     print("\n****OUTPUT SCANNING COMPLETE****")
     
         #Write Student mAP of _exps onto file
+        eval_results_full = eval_results
+        eval_results_full = np.array(eval_results_full).reshape(len(eval_list), -1)
         eval_results = eval_results[-9:]  # consider only last 3 ckpts [50,55,60]
-        eval_results = np.array(eval_results).reshape(len(eval_list), -1)
+        eval_results = np.array(eval_results).reshape(len(eval_list_selected), -1)
+
         # all_eval_results.append(eval_results)
         print("\nStudent mAP(s)")
         print(*[str(np.round_(i, decimals=2)) for i in eval_results], sep="\n")
@@ -202,7 +205,7 @@ def calc_mean_mAP():
             fw.write("\n Student mAP(s)")
             fw.write(str(np.round_(eval_results, decimals=2)))
 
-        current_max = np.max(eval_results, axis=0)
+        current_max = np.max(eval_results_full, axis=0)
         max_results.append(current_max)
         print("\nMax Student mAP")
         print(*[str(np.round_(i, decimals=2)) for i in current_max], sep=", ")
@@ -212,8 +215,10 @@ def calc_mean_mAP():
         print("\n\n")        
         
         # Write Teacher mAP of _exps onto file
+        eval_results_full2 = eval_results2
+        eval_results_full2 = np.array(eval_results_full2).reshape(len(eval_list), -1)
         eval_results2 = eval_results2[-9:]
-        eval_results2 = np.array(eval_results2).reshape(len(eval_list), -1)
+        eval_results2 = np.array(eval_results2).reshape(len(eval_list_selected), -1)
         # eval_results2.append(eval_results2)
         print("\nTeacher mAP(s)")
         print(*[str(np.round_(i, decimals=2)) for i in eval_results2], sep="\n")
@@ -222,7 +227,7 @@ def calc_mean_mAP():
             fw.write("\nTeacher mAP(s)")
             fw.write(str(np.round_(eval_results2, decimals=2)))
 
-        current_max2 = np.max(eval_results2, axis=0)
+        current_max2 = np.max(eval_results_full2, axis=0)
         max_results2.append(current_max2)
         print("\nMax Teacher mAP")
         print(*[str(np.round_(i, decimals=2)) for i in current_max2], sep=", ")
@@ -243,17 +248,27 @@ def calc_mean_mAP():
         fw.write(str(np.round_(max_results, decimals=2)))
 
     mean_res = np.mean(eval_results, axis=0) #Modify to get mean of evaled checkpoints 
-    print("\nMean Student mAP")
+    print("\nMean Student mAP[50,55,60]")
     print(*[str(np.round_(i, decimals=2)) for i in mean_res], sep=", ")
     if args.save_to_file:
-        fw.write("\nMean Student mAP")
+        fw.write("\nMean Student mAP[50,55,60]")
         fw.write(str(np.round_(mean_res, decimals=2)))
+
+    stddev_res = np.std(eval_results, axis=0) #Modify to get mean of evaled checkpoints 
+    print("\nStd.Dev of Student mAP [50,55,60]")
+    print(*[str(np.round_(i, decimals=2)) for i in stddev_res], sep=", ")
+    if args.save_to_file:
+        fw.write("\n Std.Dev of Student mAP [50,55,60]")
+        fw.write(str(np.round_(stddev_res, decimals=2)))
+
+
     #Write Teacher mAP onto file
+    
 
     print("\n\n----------------Final Results----------------\n\n")
     max_results2 = np.array(max_results2)
     print("Max Teacher mAP(s)\n")
-    print(*[str(np.round_(i, decimals=2)) for i in max_results], sep="\n")
+    print(*[str(np.round_(i, decimals=2)) for i in max_results2], sep="\n")
 
     if args.save_to_file:
         fw.write("\n\n----------------Final Results----------------\n\n")
@@ -261,11 +276,19 @@ def calc_mean_mAP():
         fw.write(str(np.round_(max_results2, decimals=2)))
 
     mean_res2 = np.mean(eval_results2, axis=0)
-    print("\nMean Teacher mAP")
+    print("\nMean Teacher mAP[50,55,60]")
     print(*[str(np.round_(i, decimals=2)) for i in mean_res2], sep=", ")
     if args.save_to_file:
-        fw.write("\nMean Teacher mAP")
+        fw.write("\nMean Teacher mAP[50,55,60]")
         fw.write(str(np.round_(mean_res2, decimals=2)))
+
+
+    stddev_res2 = np.std(eval_results2, axis=0) #Modify to get mean of evaled checkpoints 
+    print("\nStd.Dev of Student mAP [50,55,60]")
+    print(*[str(np.round_(i, decimals=2)) for i in stddev_res2], sep=", ")
+    if args.save_to_file:
+        fw.write("\n Std.Dev of Teacher mAP [50,55,60]")
+        fw.write(str(np.round_(stddev_res2, decimals=2)))
 
 
     if args.log_tb:
