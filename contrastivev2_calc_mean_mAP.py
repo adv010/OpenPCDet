@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# python calc_mean_mAP.py --save_to_file --exp_names disabled_st_bs4_trial1_818cd7c disabled_st_bs4_trial2_818cd7c disabled_st_bs4_trial3_818cd7c
+# python contrastivev2_calc_mean_mAP.py --exp_names disabled_st_bs4_trial1_818cd7c
 
 import argparse
 import os
@@ -29,8 +29,8 @@ def get_sorted_text_files(dirpath):
     return a
 
 def find_eval_list_file(exp_name):
-    primary_path = os.path.join("output/cfgs/kitti_models/pv_rcnn_ssl_60", exp_name, "eval/eval_with_student_model/eval_list_val.txt")
-    secondary_path = os.path.join("output/kitti_models/pv_rcnn_ssl_60", exp_name, "eval/eval_with_student_model/eval_list_val.txt")
+    primary_path = os.path.join("output/kitti_models/pv_rcnn_ssl_60", exp_name, "eval/eval_with_student_model/eval_list_val.txt")
+    secondary_path = os.path.join(os.getcwd(), exp_name, "eval/eval_with_student_model/eval_list_val.txt")
     tertiary_path = os.path.join("output/kitti_models/pv_rcnn_ssl_60", exp_name, "eval/eval_all_default/default/eval_list_val.txt")
     if os.path.isfile(primary_path):
         return primary_path, 1
@@ -55,10 +55,13 @@ def find_res_dir(exp_name):
 
     primary_path = os.path.join("output/cfgs/kitti_models/pv_rcnn_ssl_60", exp_name)
     secondary_path = os.path.join("output/kitti_models/pv_rcnn_ssl_60", exp_name)
+    tertiary_path = os.path.join(os.getcwd(), exp_name)
     if os.path.isdir(primary_path):
         return primary_path
     elif os.path.isdir(secondary_path):
         return secondary_path
+    elif os.path.isdir(tertiary_path):
+        return tertiary_path
     else:
         return None
 
@@ -151,7 +154,7 @@ def calc_mean_mAP():
                 student_file = selected_file.replace('.txt', '_student.txt')
                 with open(student_file, 'w') as sf:
                     sf.write(parts[0])
-                    sf.write("\n********************** Reading Student model")
+                    # sf.write("\n********************** Reading Student model")
                 print("\nScanning {} for evaluated results\n".format(student_file)) # can be filtered based on date-time
                 if args.save_to_file:
                     fw.write("\nScanning {} for evaluated results\n".format(student_file))
@@ -159,7 +162,7 @@ def calc_mean_mAP():
                 with open(teacher_file, 'w') as tf:
                     tf.write(intro)
                     tf.write(parts[1])
-                    tf.write("\n**********************Reading Teacher model")
+                    # tf.write("\n**********************Reading Teacher model")
                 print("\nScanning {} for evaluated results\n".format(teacher_file)) # can be filtered based on date-time
                 if args.save_to_file:
                     fw.write("\nScanning {} for evaluated results\n".format(teacher_file))
@@ -284,7 +287,7 @@ def calc_mean_mAP():
 
 
     stddev_res2 = np.std(eval_results2, axis=0) #Modify to get mean of evaled checkpoints 
-    print("\nStd.Dev of Student mAP [50,55,60]")
+    print("\nStd.Dev of Teacher mAP [50,55,60]")
     print(*[str(np.round_(i, decimals=2)) for i in stddev_res2], sep=", ")
     if args.save_to_file:
         fw.write("\n Std.Dev of Teacher mAP [50,55,60]")
