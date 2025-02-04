@@ -16,7 +16,7 @@ class DINOHead(nn.Module):
         in_dim = model_cfg.get('in_dim', 256)
         out_dim = model_cfg.get('out_dim', 64)
         # self.mlp = self._build_mlp(**mlp_params)
-        self.mlp = self.make_fc_layers(input_channels=in_dim, output_channels=256, fc_list=[256, 256])
+        self.mlp = self.make_fc_layers(input_channels=in_dim, output_channels=256, fc_list=[256])
         # self.apply(self._init_weights)
         self.last_layer = weight_norm(nn.Linear(bottleneck_dim, out_dim, bias=False))
         self.last_layer.weight_g.data.fill_(1)
@@ -85,7 +85,7 @@ class DINOHead(nn.Module):
         pooled_features_flat = pooled_features.view(batch_size_rcnn, -1, 1)  # (BxN, Cx6x6x6, 1)
         shared_features = self.shared_fc_layer(pooled_features_flat).squeeze(-1)  # (BxN, D)
         shared_features = F.normalize(shared_features, p=2, dim=-1)
-        proj_feats = self.projector(shared_features)
+        proj_feats = self.last_layer(shared_features)
         return proj_feats
 
     def get_cls_token(self, grid_feats):
@@ -98,6 +98,7 @@ class DINOHead(nn.Module):
         return grid_feats
 
     def forward(self, batch_dict):
+        masked_features = self.get_masked_feats(batch_dict)
         return batch_dict
 
     def make_fc_layers(self, input_channels, output_channels, fc_list):
