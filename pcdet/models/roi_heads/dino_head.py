@@ -98,7 +98,7 @@ class DINOHead(nn.Module):
         return grid_feats
 
     def forward(self, batch_dict):
-        masked_features = self.get_masked_feats(batch_dict)
+        # masked_features = self.get_masked_feats(batch_dict)
         return batch_dict
 
     def make_fc_layers(self, input_channels, output_channels, fc_list):
