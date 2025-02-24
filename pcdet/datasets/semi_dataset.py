@@ -231,6 +231,8 @@ class SemiDatasetTemplate(torch_data.Dataset):
                         ret[key] = batch_gt_boxes3d
                     elif key in ['augmentation_list', 'augmentation_params']:
                         ret[key] = val
+                    elif key in ['ground_mask']:
+                        ret[key] = val
                     else:
                         ret[key] = np.stack(val, axis=0)
                 except:
