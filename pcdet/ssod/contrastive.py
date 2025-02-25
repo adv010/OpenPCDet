@@ -1,8 +1,11 @@
 import torch
+import os
+os.environ["OPEN3D_RENDERING_BACKEND"] = "osmesa"  #"osmesa"
 from pcdet.ops.roiaware_pool3d.roiaware_pool3d_utils import points_in_boxes_gpu
 from pcdet.utils.loss_utils import DINOLoss
 from train_utils.semi_utils import transform_aug, load_data_to_gpu
 from tools.visual_utils import open3d_vis_utils as V
+# from visual_utils.open3d_vis_utils import Open3DRenderer
 from pcdet.models import build_network
 import copy
 from torch import nn
@@ -48,6 +51,7 @@ class Contrastive(nn.Module):
 
         self.mask_gpoint = self.cfgs.MODEL.DINO_HEAD.get('MASK_GPOINTS', False)
 
+        # self.renderer = Open3DRenderer()
     @torch.no_grad()
     def _forward_test_teacher(self, batch_dict):
         # self.pv_rcnn_ema.eval()  # https://github.com/yezhen17/3DIoUMatch-PVRCNN/issues/6
@@ -202,6 +206,20 @@ class Contrastive(nn.Module):
             tb_dict.update({'dino_loss_unlabeled': dino_loss.item()})
             loss += dino_loss * self.cfgs.MODEL.DINO_HEAD.LOSS_CONFIG.LOSS_WEIGHTS.get('dino_loss_weight', 1.0)
 
+            # Visualize a random scene
+            bs = batch_dict_wa_ulb['batch_size']
+            i = 0
+            points = batch_dict_sa_ulb['points'][..., 1:4][batch_dict_sa_ulb['points'][:, 0] == i]
+            points = points.detach().cpu().numpy()
+            sa_roi_labels = sa_roi_labels.view(sa_rois.shape[0],-1)
+            gt_boxes = sa_rois[i].view(-1, 7)
+            gt_labels = sa_roi_labels[i].view(-1)
+            kmask = keep_mask.chunk(bs)[i].view(-1)
+            gt_boxes = gt_boxes[kmask == 1].detach().cpu().numpy()
+            gt_labels = gt_labels[kmask == 1].detach().cpu().numpy()
+            tb_dict['fig_scene'] = self.render_scene_tb_matplotlib(points, gt_boxes, gt_labels)
+
+
             kl_div = F.kl_div(F.log_softmax(s2 / self.dino_loss.student_temp, dim=-1), t1_centered, reduction='batchmean')
             tb_dict.update({'kl_div_t1_s2': kl_div.mean().item()})
             kl_div2 = F.kl_div(F.log_softmax(s1 / self.dino_loss.student_temp, dim=-1), t2_centered, reduction='batchmean')
@@ -303,3 +321,58 @@ class Contrastive(nn.Module):
     def merge_tb_dicts(source_tb_dict, target_tb_dict, postfix=None):
         for key, val in source_tb_dict.items():
             target_tb_dict[f"{key}_{postfix}"] = val
+    @staticmethod
+    def render_scene_tb_matplotlib(points, gt_boxes=None, gt_labels=None, point_colors=None):
+        """
+        Renders a BEV visualization of a point cloud and optional 3D bounding boxes using Matplotlib.
+
+        Args:
+            points (np.ndarray): An (N,4) array of points. We use the first two columns (x,y) for the BEV.
+            gt_boxes (np.ndarray, optional): An (M,7) array of bounding boxes in the format 
+                [center_x, center_y, center_z, width, length, height, yaw]. If provided, boxes are drawn.
+            gt_labels (list or np.ndarray, optional): A list or array of labels corresponding to gt_boxes.
+            point_colors (np.ndarray, optional): An (N,3) array of RGB values (each in [0,1]) for the points.
+        
+        Returns:
+            fig (matplotlib.figure.Figure): The resulting figure.
+        """
+        fig, ax = plt.subplots(figsize=(10, 10))
+        
+        # Plot the point cloud in BEV using x and y coordinates.
+        if point_colors is None:
+            ax.scatter(points[:, 0], points[:, 1], s=1, c='black', alpha=0.5)
+        else:
+            ax.scatter(points[:, 0], points[:, 1], s=1, c=point_colors, alpha=0.5)
+        
+        # If ground truth boxes are provided, overlay them.
+        if gt_boxes is not None:
+            for i, box in enumerate(gt_boxes):
+                # Box format: [x, y, z, dx, dy, dz, yaw]
+                x, y, z, dx, dy, dz, yaw = box
+                # Define the 4 corners of the box in local coordinates (BEV only)
+                corners = np.array([
+                    [-dx/2, -dy/2],
+                    [ dx/2, -dy/2],
+                    [ dx/2,  dy/2],
+                    [-dx/2,  dy/2]
+                ])
+                # Create a 2D rotation matrix for the yaw angle
+                R = np.array([[np.cos(yaw), -np.sin(yaw)],
+                            [np.sin(yaw),  np.cos(yaw)]])
+                # Rotate and translate corners to global BEV coordinates
+                rotated_corners = (R @ corners.T).T + np.array([x, y])
+                
+                # Create and add the polygon patch for the box
+                poly = plt.Polygon(rotated_corners, fill=False, edgecolor='blue', linewidth=2)
+                ax.add_patch(poly)
+                
+                # Optionally, add a label at the box center
+                if gt_labels is not None:
+                    ax.text(x, y, str(gt_labels[i]), color='red', fontsize=12,
+                            ha='center', va='center')
+        
+        ax.set_xlabel("X (m)")
+        ax.set_ylabel("Y (m)")
+        ax.set_title("BEV Visualization")
+        ax.set_aspect('equal', adjustable='box')
+        return fig
