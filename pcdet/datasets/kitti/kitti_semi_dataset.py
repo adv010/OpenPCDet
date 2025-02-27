@@ -55,37 +55,153 @@ class KittiSemiDataset(SemiDatasetTemplate):
         self.sample_id_list = [x.strip() for x in open(split_dir).readlines()] if split_dir.exists() else None
 
         self.kitti_infos = infos
+        self.groundremoval_hyperparameters_kitti = {
+            'Step0__M': 0,
+            'Step1__xyradius_threshold': 50.00,  # meters
+            # KITTI’s ground is often around -1.65 m. Here we allow a ±1.0 m window.
+            'Step1__zmin_threshold': -1.65 - 1.0,  # approximately -2.65 m
+            'Step1__zmax_threshold': -1.65 + 1.0,  # approximately -0.65 m
+            'Step2__min_sample_points': 100,      # KITTI point clouds are generally sparser than nuScenes, so we lower the minimum number of sample points for global plane fitting.
+            'Step2__residual_threshold': 0.15,    # slightly looser threshold (meters)
+            'Step2__max_trials': 20,            # For cone-based plane fitting, we keep a similar dmax threshold.
+            'Step3__dmax_thres': 0.30,            # meters
+            'Step3__num_cones': 8,            # Number of cones can remain similar.
+            'Step3__min_number_cone_points': 300, # reduced from 500
+            'Step3__min_sample_points': 100,      # reduced from 250
+            'Step3__residual_threshold': 0.05,    # meters (kept tight for local plane fit)
+            'Step3__max_trials': 10, # Reduced from 20
+        }   
+        self.sc_hyperparams = {
+            'Step1__sky_threshold': 2.5,
+            'Step1__range_threshold': 60,
+            'Step1__x_range_threshold': 70.4,
+            'Step1__y_range_threshold': 40,
+            'Step2__clustersize_threshold': 5,
+            'Step2__cluster_selection_epsilon': 0.5,
+            'Step3__num_cones': 8,
+            'Step4__length_max_threshold': 6,
+            'Step4__width_max_threshold': 3,
+            'Step4__height_min_threshold': 1.2,
+            'Step4__height_above_ground_max_threshold': 2.0,
+            'Step4__length_width_max_ratio_threshold': 2.0,
+            'Step4__area_min_threshold': 1.0,
+            'Step0__M': 0  # Single frame processing.
+        }
 
+    #dummy function of fitting KITTI BBOX
+    # def fit_bounding_box_dummy(self, points):
+    #     if points.shape[0] == 0:
+    #         return np.zeros((7,))
+    #     x_min, y_min, z_min = points[:, 0].min(), points[:, 1].min(), points[:, 2].min()
+    #     x_max, y_max, z_max = points[:, 0].max(), points[:, 1].max(), points[:, 2].max()
+    #     center_x = (x_min + x_max) / 2
+    #     center_y = (y_min + y_max) / 2
+    #     center_z = (z_min + z_max) / 2
+    #     l = x_max - x_min
+    #     w = y_max - y_min
+    #     h = z_max - z_min
+    #     # For simplicity, set theta to 0.
+    #     theta = 0.0
+    #     box_7d = np.array([center_x, center_y, center_z, l, w, h, theta])
+    #     return box_7d
 
-    def fit_bounding_box(self, cluster_reference: torch.Tensor):
+    # MODEST algorithm from UNION - Modified with available road_plane for grounding
+    def fit_bounding_box(self, cluster_reference: np.ndarray, road_plane: np.ndarray):
         """
-        Dummy implementation of fit_bounding_box.
+        Fit a BEV bounding box around cluster points (in NumPy) and adjust the vertical placement using a provided road_plane.
         
         Args:
-            cluster_reference (torch.Tensor): Point cloud for the cluster (N,4). We assume the first 3 columns are x, y, z.
+            cluster_reference (np.ndarray): LiDAR point cloud of the cluster in the reference frame with shape (N, 4).
+                                            The first 3 columns are [x, y, z].
+            road_plane (np.ndarray): Array of 4 elements [a, b, c, d] defining the ground plane
+                                    via a*x + b*y + c*z + d = 0.
         
         Returns:
-            T_reference_bbox (torch.Tensor): A 4x4 identity matrix (dummy transformation).
-            bboxdimensions (List[float]): Bounding box dimensions computed as the range (max-min) along each axis.
+            T_reference_bbox (np.ndarray): A 4x4 homogeneous transformation matrix that maps points
+                                        from the bounding box frame to the reference frame.
+            bboxdimensions (List[float]): List containing the bounding box dimensions [length, width, height].
         """
-        if cluster_reference.shape[0] == 0:
-            T_reference_bbox = torch.eye(4, dtype=cluster_reference.dtype, device=cluster_reference.device)
-            bboxdimensions = [0.0, 0.0, 0.0]
-        else:
-            mins = torch.min(cluster_reference[:, :3], dim=0).values
-            maxs = torch.max(cluster_reference[:, :3], dim=0).values
-            dims = (maxs - mins).tolist()  # [length, width, height] as dummy dimensions
-            T_reference_bbox = torch.eye(4, dtype=cluster_reference.dtype, device=cluster_reference.device)
-            bboxdimensions = dims
-     
+        # --- Step 1: Determine the best rotation angle using a closeness metric.
+        delta = 1  # degrees
+        d0 = 1e-2
+        max_beta = -float('inf')
+        choose_angle = None
+
+        for angle in np.arange(0, 90 + delta, delta):
+            angle_rad = angle * np.pi / 180.0
+            R_local_reference = np.array([[np.cos(angle_rad), np.sin(angle_rad)],
+                                        [-np.sin(angle_rad), np.cos(angle_rad)]], dtype=np.float32)
+            cluster_local = (R_local_reference @ cluster_reference[:, :2].T).T
+            min_x = np.min(cluster_local[:, 0])
+            max_x = np.max(cluster_local[:, 0])
+            min_y = np.min(cluster_local[:, 1])
+            max_y = np.max(cluster_local[:, 1])
+            Dx = np.minimum(cluster_local[:, 0] - min_x, max_x - cluster_local[:, 0])
+            Dy = np.minimum(cluster_local[:, 1] - min_y, max_y - cluster_local[:, 1])
+            beta = np.minimum(Dx, Dy)
+            beta = np.maximum(beta, d0)
+            beta_sum = np.sum(1.0 / beta)
+            if beta_sum > max_beta:
+                max_beta = beta_sum
+                choose_angle = angle_rad
+
+        # --- Step 2: Recompute rotation using the chosen angle.
+        R_local_reference = np.array([[np.cos(choose_angle), np.sin(choose_angle)],
+                                    [-np.sin(choose_angle), np.cos(choose_angle)]], dtype=np.float32)
+        cluster_local = (R_local_reference @ cluster_reference[:, :2].T).T
+        min_x = np.min(cluster_local[:, 0])
+        max_x = np.max(cluster_local[:, 0])
+        min_y = np.min(cluster_local[:, 1])
+        max_y = np.max(cluster_local[:, 1])
+
+        if (max_x - min_x) < (max_y - min_y):
+            choose_angle = choose_angle + np.pi / 2.0
+            R_local_reference = np.array([[np.cos(choose_angle), np.sin(choose_angle)],
+                                        [-np.sin(choose_angle), np.cos(choose_angle)]], dtype=np.float32)
+            cluster_local = (R_local_reference @ cluster_reference[:, :2].T).T
+            min_x = np.min(cluster_local[:, 0])
+            max_x = np.max(cluster_local[:, 0])
+            min_y = np.min(cluster_local[:, 1])
+            max_y = np.max(cluster_local[:, 1])
+
+        # --- Step 3: Compute the bounding box corners in the rotated (local) frame.
+        corners_local = np.array([[max_x, min_y],
+                                [min_x, min_y],
+                                [min_x, max_y],
+                                [max_x, max_y]], dtype=np.float32)
+        corners_reference = (R_local_reference.T @ corners_local.T).T
+
+        # --- Step 4: Compute the horizontal center from corners.
+        center_x = np.mean(corners_reference[:, 0])
+        center_y = np.mean(corners_reference[:, 1])
+        # Compute ground height from the road plane:
+        # Solve a*x + b*y + c*z + d = 0  =>  z = -(a*x + b*y + d)/c
+        a, b, c, d = road_plane
+        ground_z = -(a * center_x + b * center_y + d) / c
+
+        # --- Step 5: Compute the bounding box height using the cluster's maximum z.
+        bboxheight = np.max(cluster_reference[:, 2]) - ground_z
+        # Set the vertical center such that the bottom of the box is at ground_z.
+        center_z = ground_z + bboxheight / 2.0
+
+        bboxcenter_reference = np.array([center_x, center_y, center_z], dtype=np.float32)
+
+        # --- Step 6: Assemble the 4x4 homogeneous transformation matrix.
+        T_reference_bbox = np.eye(4, dtype=np.float32)
+        T_reference_bbox[:3, 3] = bboxcenter_reference
+        T_reference_bbox[:2, 0] = R_local_reference.T[:, 0]
+        T_reference_bbox[:2, 1] = R_local_reference.T[:, 1]
+
+        # Compute horizontal dimensions:
+        bboxlength = np.linalg.norm(corners_reference[1] - corners_reference[0])
+        bboxwidth  = np.linalg.norm(corners_reference[3] - corners_reference[0])
+        bboxdimensions = [float(bboxlength), float(bboxwidth), float(bboxheight)]
+
         return T_reference_bbox, bboxdimensions
 
 
-    def spatial_clustering(self, pc_lidar: torch.Tensor,
-                        boolall_ground: torch.Tensor,
-                        Ts_coneplane_lidar: np.ndarray,
-                        original_lengths: dict,
-                        hyperparameters: dict) -> dict:
+
+    def spatial_clustering(self, pc_lidar, boolall_ground, Ts_coneplane_lidar, road_plane, hyperparameters=None):
         """
         Cluster inlier points of a point cloud spatially for a single sweep.
         
@@ -94,148 +210,110 @@ class KittiSemiDataset(SemiDatasetTemplate):
             boolall_ground (torch.Tensor): Boolean mask indicating ground points, shape (N,).
             Ts_coneplane_lidar (np.ndarray): NumPy array containing cone-plane homogeneous transformation
                                             matrices with shape (num_cones, 4, 4).
-            original_lengths (dict): Dictionary with the indices boundaries for the original sweep (e.g. {0: [0, N]}).
             hyperparameters (dict): Hyperparameters for spatial clustering.
-        
+            
         Returns:
-            cluster_dict (dict): Dictionary containing cluster information including fitted bounding boxes.
+            cluster_dict (dict): Dictionary containing cluster information with each cluster represented
+                                as a 7-dim box [x, y, z, l, w, h, theta] and additional fields.
         """
-        # --- Step 0: For multi-frame setups, M would denote extra frames. Here M=0.
+        # Set hyperparameters if not provided
+        if hyperparameters is None:
+            hyperparameters = self.sc_hyperparams       
+        # For single sweep, we set M=0 (no multi-frame aggregation)
         M = hyperparameters.get('Step0__M', 0)
         
         # --- Step 1: Filter out points considered as ground, sky, or too far away.
-        sky_thres     = hyperparameters['Step1__sky_threshold']  # meters
-        range_thres   = hyperparameters['Step1__range_threshold']  # meters
+        sky_thres = hyperparameters['Step1__sky_threshold']  # meters
+        range_thres = hyperparameters['Step1__range_threshold']  # meters
         x_range_thres = hyperparameters.get('Step1__x_range_threshold', None)
         y_range_thres = hyperparameters.get('Step1__y_range_threshold', None)
         
         # Use the global plane transformation (first cone) as a reference.
-        # Convert the first cone-plane from numpy to torch.
-        T_globalplane_lidar = torch.from_numpy(Ts_coneplane_lidar[0]).float()
+        # Here Ts_coneplane_lidar is a NumPy array; we use its first slice.
+        T_globalplane_lidar = Ts_coneplane_lidar[0]
         
-        # Transform the point cloud using T_globalplane (to align with plane reference)
-        pc_globalplane = (T_globalplane_lidar @ pc_lidar.T).T
+        # Transform the point cloud using T_globalplane (assuming T_globalplane_lidar is 4x4 and pc_lidar is converted to numpy)
+        pc_lidar_np = pc_lidar # (N,4)
+        pc_globalplane = (T_globalplane_lidar @ pc_lidar_np.T).T  # (N,4)
         
-        # Identify sky points: points with height (z in transformed frame) above the sky threshold.
+        # Identify sky points: points with z (in transformed space) above the sky threshold.
         boolall_sky = pc_globalplane[:, 2] >= sky_thres
         
         # Determine points that are out of range.
         if range_thres is not None:
-            boolall_outrange = torch.linalg.norm(pc_lidar[:, :2], ord=2, axis=1) > range_thres
+            boolall_outrange = np.linalg.norm(pc_lidar_np[:, :2], ord=2, axis=1) > range_thres
         else:
-            boolall_outrange = (torch.abs(pc_lidar[:, 0]) > x_range_thres) | (torch.abs(pc_lidar[:, 1]) > y_range_thres)
+            boolall_outrange = (np.abs(pc_lidar_np[:, 0]) > x_range_thres) | (np.abs(pc_lidar_np[:, 1]) > y_range_thres)
         
         # Combine masks: a point is an outlier if it is ground, sky, or out-of-range.
         boolall_outlier = boolall_ground | boolall_sky | boolall_outrange
-        idsall_inlier = torch.where(~boolall_outlier)[0]
+        idsall_inlier = np.where(~boolall_outlier)[0]
         
-        inlier_pc_lidar = pc_lidar[idsall_inlier].clone()
+        inlier_pc_lidar = pc_lidar_np[idsall_inlier].copy()
         
         # --- Step 2: Cluster the inlier points using HDBSCAN.
         clustersize_thres = hyperparameters['Step2__clustersize_threshold']
         cluster_selection_epsilon = hyperparameters['Step2__cluster_selection_epsilon']
         
-        total_num_frames = len(original_lengths)  # For single sweep, this is 1.
+        # Since we're using a single sweep, total frames = 1.
+        total_frames = 1
         
         hdbscan_clusterer = hdbscan.HDBSCAN(min_cluster_size=clustersize_thres,
                                             metric='euclidean',
                                             cluster_selection_epsilon=cluster_selection_epsilon)
-        # We cluster using only the first three coordinates (x, y, z)
-        hdbscan_cluster_labels = torch.IntTensor(hdbscan_clusterer.fit_predict(inlier_pc_lidar[:, :3]))
+        # Cluster using only the first three coordinates (x,y,z)
+        hdbscan_cluster_labels = hdbscan_clusterer.fit_predict(inlier_pc_lidar[:, :3])
         
-        # --- Step 3: Fit bounding boxes to each cluster using a MODEST-like approach.
+        # --- Step 3: For each cluster, fit a 7-dim bounding box and adjust (touchground).
         num_cones = hyperparameters['Step3__num_cones']
         fov_cone = 360 / num_cones  # degrees per cone
         
-        # For single-sweep, create a timestamp tensor that marks all points with the same frame (e.g., frame 0)
-        timestamp_tensor = torch.zeros(inlier_pc_lidar.shape[0], dtype=torch.int32)
-        
         cluster_dict = {}
-        # Skip label 0 as it typically represents noise in HDBSCAN.
-        for label in torch.unique(hdbscan_cluster_labels)[1:].tolist():
-            # Get indices of the cluster
-            idsall_cluster = idsall_inlier[torch.where(hdbscan_cluster_labels == label)[0]]
+        unique_labels = np.unique(hdbscan_cluster_labels)
+        for label in unique_labels:
+            if label == 0:
+                continue
+            cluster_inds = np.where(hdbscan_cluster_labels == label)[0]
+            idsall_cluster = idsall_inlier[cluster_inds]
             
-            # Fit a bounding box using the provided fit_bounding_box function.
-            #TODO : fit_bounding_box -> dummy method implemented. What is to be done with this?
-            T_lidar_bbox, bboxdimensions = self.fit_bounding_box(pc_lidar[idsall_cluster, :])
+            # Use the modified fit_bounding_box which takes road_plane.
+            # Assume self.road_plane is available (e.g., set from the KITTI file).
+            T_ref_bbox, bbox_dims = self.fit_bounding_box(pc_lidar_np[idsall_cluster], road_plane)
+            # Convert the fitted box into a 7-dim representation:
+            # Center is T_ref_bbox[:3, 3]; dimensions from bbox_dims; theta from rotation.
+            center = T_ref_bbox[:3, 3]
+            theta = np.arctan2(T_ref_bbox[1, 0], T_ref_bbox[0, 0])
+            theta_tensor = torch.tensor(theta)
+            period = 2 * np.pi
+            offset = 0.5
+            theta_limit_period = theta_tensor - torch.floor(theta_tensor / period + offset) * period
+            box_7d = np.concatenate([center, np.array(bbox_dims), np.array([theta_limit_period.item()])])
             
-            # Transform inlier points into the bounding box frame.
-            inlier_pc_bbox = (torch.linalg.inv(T_lidar_bbox) @ inlier_pc_lidar.T).T
-            boolall_insidebbox = (
-                (torch.abs(inlier_pc_bbox[:, 0]) <= bboxdimensions[0] / 2) &
-                (torch.abs(inlier_pc_bbox[:, 1]) <= bboxdimensions[1] / 2) &
-                (inlier_pc_bbox[:, 2] >= 0) &
-                (inlier_pc_bbox[:, 2] <= bboxdimensions[2])
-            )
-            idsall_insidebbox = idsall_inlier[boolall_insidebbox]
+            # Touchground adjustment: shift vertically so bottom touches z=0.
+            # The current bottom is center_z - (h/2). We want that to be 0, so new center_z = h/2.
+            height_above_ground = box_7d[2] - (box_7d[5] / 2)
+            box_touchground = box_7d.copy()
+            box_touchground[2] = box_7d[5] / 2
             
-            # Determine cone index based on the position of the bounding box center.
-            # Compute an angle from the translation part of T_lidar_bbox.
-            cone_idx = int((((180 / np.pi * torch.atan2(T_lidar_bbox[1, 3], T_lidar_bbox[0, 3]) + 360) % 360) / fov_cone) % num_cones)
-            # Convert the corresponding cone-plane to torch.
-            T_coneplane_lidar = torch.from_numpy(Ts_coneplane_lidar[cone_idx]).float()
+            # Determine cone index (optional): use the azimuth of the box center.
+            azimuth_deg = (180 / np.pi * np.arctan2(box_7d[1], box_7d[0]) + 360) % 360
+            cone_idx = int((azimuth_deg / fov_cone) % num_cones)
+            # Retrieve the corresponding cone-plane (if needed for further corrections)
+            T_coneplane_lidar = Ts_coneplane_lidar[cone_idx]
             
-            # Calculate the height of the bounding box center above ground.
-            height_above_ground = (T_coneplane_lidar @ T_lidar_bbox)[2, 3].item()
-            
-            # Adjust the bounding box so it "touches" the ground.
-            touchground_T_lidar_bbox = T_lidar_bbox.clone()
-            touchground_T_lidar_bbox[2, 3] += -height_above_ground
-            touchground_bboxdimensions = bboxdimensions.copy()
-            touchground_bboxdimensions[2] += height_above_ground
-            
-            # Create a simple namespace to hold cluster data.
+            # Store cluster information in a namespace.
             cluster = types.SimpleNamespace()
-            cluster.avg_number_points = len(idsall_cluster) / total_num_frames
-            cluster.T_lidar_bbox = T_lidar_bbox.numpy()
-            cluster.bboxdimensions = bboxdimensions
-            cluster.yaw_radians = torch.atan2(T_lidar_bbox[1, 0], T_lidar_bbox[0, 0]).item()
-            cluster.touchground_T_lidar_bbox = touchground_T_lidar_bbox.numpy()
-            cluster.touchground_bboxdimensions = touchground_bboxdimensions
-            cluster.touchground_yaw_radians = torch.atan2(touchground_T_lidar_bbox[1, 0], touchground_T_lidar_bbox[0, 0]).item()
+            cluster.box_7d = box_7d                 # Original 7-dim box [x,y,z,l,w,h,theta]
+            cluster.touchground_box_7d = box_touchground  # Adjusted 7-dim box with bottom at 0
             cluster.height_above_ground = height_above_ground
+            cluster.avg_number_points = len(idsall_cluster) / total_frames
             cluster.idsall_aggregated = idsall_cluster.tolist()
-            # For a single sweep, all points are in frame 0.
-            cluster.idsall_frame = {0: idsall_cluster.tolist()}
-            cluster.idsall_aggregated2 = idsall_insidebbox.tolist()
-            cluster.idsall_frame2 = {0: idsall_insidebbox.tolist()}
             
             cluster_dict[label] = cluster
-            
-        # --- Step 4: Filter clusters based on size and shape thresholds.
-        length_max_threshold = hyperparameters['Step4__length_max_threshold']
-        width_max_threshold = hyperparameters['Step4__width_max_threshold']
-        height_min_threshold = hyperparameters['Step4__height_min_threshold']
-        height_above_ground_max_threshold = hyperparameters['Step4__height_above_ground_max_threshold']
-        length_width_max_ratio_threshold = hyperparameters['Step4__length_width_max_ratio_threshold']
-        area_min_threshold = hyperparameters['Step4__area_min_threshold']
         
-        sorted_cluster_list = sorted(cluster_dict.values(), key=lambda c: c.avg_number_points)
-        filtered_cluster_list = []
-        for cluster in sorted_cluster_list:
-            bboxlength, bboxwidth, bboxheight = cluster.bboxdimensions
-            height_above_ground = cluster.height_above_ground
-            
-            if bboxlength > length_max_threshold:
-                continue
-            elif bboxwidth > width_max_threshold:
-                continue
-            elif bboxheight < height_min_threshold:
-                continue
-            elif height_above_ground > height_above_ground_max_threshold:
-                continue
-            elif bboxlength / bboxwidth > length_width_max_ratio_threshold:
-                continue
-            elif bboxlength * bboxwidth < area_min_threshold:
-                continue
-            else:
-                # Ensure the cluster has at least one point from the current frame.
-                if len(cluster.idsall_frame.get(0, [])) > 0:
-                    filtered_cluster_list.append(cluster)
-        
-        # Re-index clusters into a dictionary.
-        cluster_dict = dict(zip(range(len(filtered_cluster_list)), filtered_cluster_list))
+        # Sort clusters by number of points (descending)
+        sorted_clusters = sorted(cluster_dict.values(), key=lambda c: c.avg_number_points, reverse=True)
+        cluster_dict = dict(zip(range(len(sorted_clusters)), sorted_clusters))
         
         return cluster_dict
 
@@ -300,6 +378,46 @@ class KittiSemiDataset(SemiDatasetTemplate):
         T[:3, :3] = R
         T[:3, 3] = t
         return T
+
+
+    def ground_point_removal(self, pc_lidar, road_plane, hyperparameters=None):
+        if hyperparameters is None:
+            hyperparameters = self.groundremoval_hyperparameters_kitti
+        xyradius_thres = hyperparameters.get('Step1__xyradius_threshold', 50.0)
+        zmin_thres = hyperparameters.get('Step1__zmin_threshold', -2.65)
+        zmax_thres = hyperparameters.get('Step1__zmax_threshold', -0.65)
+
+        boolall_xy = np.linalg.norm(pc_lidar[:, :2], axis=1) <= xyradius_thres
+        boolall_z = (pc_lidar[:, 2] >= zmin_thres) & (pc_lidar[:, 2] <= zmax_thres)
+        boolall_xyz = boolall_xy & boolall_z
+        grounddisk_pc_lidar = pc_lidar[boolall_xyz].copy()
+        # Using road_plane instead of RANSAC
+        T_globalplane_lidar = self.get_T_plane_reference(road_plane)
+        globalplane_height = road_plane[3]  #Optional
+
+        dmax_thres = hyperparameters.get('Step3__dmax_thres', 0.30)
+        num_cones = hyperparameters.get('Step3__num_cones', 8)
+        fov_cone = 360 / num_cones
+
+        pc_globalplane = (T_globalplane_lidar @ pc_lidar.copy().T).T
+        grounddisk_pc_globalplane = (T_globalplane_lidar @ grounddisk_pc_lidar.copy().T).T
+
+        boolall_ground = torch.zeros([pc_lidar.shape[0]], dtype=torch.bool)
+        angle_all_globalplane = (180/np.pi * np.arctan2(pc_globalplane[:,1], pc_globalplane[:,0]) + 360) % 360
+        angle_grounddisk_globalplane = (180/np.pi *  np.arctan2(grounddisk_pc_globalplane[:,1], grounddisk_pc_globalplane[:,0]) + 360) % 360
+
+        Ts_coneplane_lidar = []
+        for cone_idx in range(num_cones):
+            boolall_ang = (angle_all_globalplane >= cone_idx * fov_cone) & (angle_all_globalplane < (cone_idx+1) * fov_cone)
+            # For simplicity, here we use the global plane for all cones:
+            Ts_coneplane_lidar.append(T_globalplane_lidar)
+            pc_coneplane = (T_globalplane_lidar @ pc_lidar.T).T
+            boolall_coneground = boolall_ang & (pc_coneplane[:,2] <= dmax_thres)
+            boolall_ground[boolall_coneground] = True
+
+        Ts_coneplane_lidar.append(T_globalplane_lidar)
+        Ts_coneplane_lidar = np.stack(Ts_coneplane_lidar)
+        return boolall_ground, Ts_coneplane_lidar
 
     def set_split(self, split):
         super().__init__(dataset_cfg=self.dataset_cfg, class_names=self.class_names, training=self.training,
@@ -600,63 +718,20 @@ class KittiLabeledDataset(KittiSemiDataset):
 
     def __getitem__(self, index):
         input_dict, img_shape = self.pre_getitem(index)
-        if 'road_plane' in input_dict: 
-            road_plane = input_dict['road_plane']  # e.g., [a, b, c, d]
-        else:
-            raise ValueError("No road_plane provided for sample {}".format(input_dict['frame_id']))
+        pc_lidar = input_dict['points']
+        all_ground_mask, Ts_coneplane_lidar = self.ground_point_removal(pc_lidar, input_dict['road_plane'])
 
-        # Convert points (a numpy array) to torch.Tensor for processing
-        pc = torch.from_numpy(input_dict['points']).float()  # shape: (N, 4)
-
-        # Compute the transformation matrix directly using the provided road_plane.
-        # (Assume get_T_plane_reference is a utility function that computes a 4x4 matrix from the plane parameters.)
-        T_globalplane = self.get_T_plane_reference(road_plane)  # shape: (4,4)
-
-        plane_tensor = torch.tensor(road_plane, dtype=torch.float32)
-        norm_val = torch.linalg.norm(plane_tensor[:3])
-        distances = (pc[:, 0]*plane_tensor[0] + pc[:, 1]*plane_tensor[1] + 
-                        pc[:, 2]*plane_tensor[2] + plane_tensor[3]) / norm_val
-
-        # Define a threshold (e.g., 0.15 m) for ground points.
-        ground_thresh = 0.15
-        ground_mask = distances.abs() < ground_thresh  # Boolean tensor: True if point is ground.
-
-        # For spatial clustering, we want to work with the same single-sweep data.
-        # Create a dummy "original_lengths" dictionary.
-        original_lengths = {0: [0, pc.shape[0]]}
-
-        # Define clustering hyperparameters ( M=0 , only single-sweep)
-        sc_hyperparams = {
-            'Step1__sky_threshold': 2.5,
-            'Step1__range_threshold': 50,
-            'Step2__clustersize_threshold': 10,
-            'Step2__cluster_selection_epsilon': 0.5,
-            'Step3__num_cones': 12,
-            'Step4__length_max_threshold': 6,
-            'Step4__width_max_threshold': 3,
-            'Step4__height_min_threshold': 1.2,
-            'Step4__height_above_ground_max_threshold': 2.5,
-            'Step4__length_width_max_ratio_threshold': 2.0,
-            'Step4__area_min_threshold': 1.5,
-            'Step0__M': 0  # Single frame processing.
-        }
-
-        # For spatial clustering, if your algorithm still divides the FOV into cones,
-        # simply replicate T_globalplane for the number of cones:
-        num_cones = sc_hyperparams['Step3__num_cones']
-        Ts_coneplane = np.repeat(np.expand_dims(T_globalplane, axis=0), num_cones, axis=0)
         # Call the spatial clustering function:
         clusters = self.spatial_clustering(
-            pc_lidar=pc, 
-            boolall_ground=ground_mask, 
-            Ts_coneplane_lidar=Ts_coneplane, 
-            original_lengths=original_lengths, 
-            hyperparameters=sc_hyperparams
+            pc_lidar=pc_lidar, 
+            boolall_ground=all_ground_mask, 
+            Ts_coneplane_lidar=Ts_coneplane_lidar,
+            road_plane = input_dict['road_plane']
         )
-
         # Inject the ground removal outputs into the input dictionary.
-        input_dict['ground_mask'] = ground_mask.numpy()  # Optionally as numpy array.
-        input_dict['clusters'] = clusters
+        input_dict['ground_mask'] = all_ground_mask.numpy()  # Optionally as numpy array.
+        input_dict['clusters'] = clusters #Access boxes using clusters[i].box_7d
+        
         teacher_dict, student_dict = self.prepare_data_ssl(input_dict, prepare_for=self.labeled_data_for)
 
         if teacher_dict is not None:
@@ -742,56 +817,19 @@ class KittiUnlabeledDataset(KittiSemiDataset):
         
         road_plane = self.get_road_plane(sample_idx) # Using unlabeled road_plane
 
-        # Convert points (a numpy array) to torch.Tensor for processing
-        pc = torch.from_numpy(input_dict['points']).float()  # shape: (N, 4)
+        pc_lidar =  input_dict['points']
 
-        # Compute the transformation matrix directly using the provided road_plane.
-        # (Assume get_T_plane_reference is a utility function that computes a 4x4 matrix from the plane parameters.)
-        T_globalplane = self.get_T_plane_reference(road_plane)  # shape: (4,4)
+        all_ground_mask, Ts_coneplane_lidar = self.ground_point_removal(pc_lidar, road_plane)
 
-        plane_tensor = torch.tensor(road_plane, dtype=torch.float32)
-        norm_val = torch.linalg.norm(plane_tensor[:3])
-        distances = (pc[:, 0]*plane_tensor[0] + pc[:, 1]*plane_tensor[1] + 
-                        pc[:, 2]*plane_tensor[2] + plane_tensor[3]) / norm_val
-
-        # Define a threshold (e.g., 0.15 m) for ground points.
-        ground_thresh = 0.15
-        ground_mask = distances.abs() < ground_thresh  # Boolean tensor: True if point is ground.
-
-        # For spatial clustering, we want to work with the same single-sweep data.
-        # Create a dummy "original_lengths" dictionary.
-        original_lengths = {0: [0, pc.shape[0]]}
-
-        # Define clustering hyperparameters ( M=0 , only single-sweep)
-        sc_hyperparams = {
-            'Step1__sky_threshold': 2.5,
-            'Step1__range_threshold': 50,
-            'Step2__clustersize_threshold': 10,
-            'Step2__cluster_selection_epsilon': 0.5,
-            'Step3__num_cones': 12,
-            'Step4__length_max_threshold': 6,
-            'Step4__width_max_threshold': 3,
-            'Step4__height_min_threshold': 1.2,
-            'Step4__height_above_ground_max_threshold': 2.5,
-            'Step4__length_width_max_ratio_threshold': 2.0,
-            'Step4__area_min_threshold': 1.5,
-            'Step0__M': 0  # Single frame processing.
-        }
-
-        # For spatial clustering, if your algorithm still divides the FOV into cones,
-        # simply replicate T_globalplane for the number of cones:
-        num_cones = sc_hyperparams['Step3__num_cones']
-        Ts_coneplane = np.repeat(np.expand_dims(T_globalplane, axis=0), num_cones, axis=0)
         # Call the spatial clustering function:
         clusters = self.spatial_clustering(
-            pc_lidar=pc, 
-            boolall_ground=ground_mask, 
-            Ts_coneplane_lidar=Ts_coneplane, 
-            original_lengths=original_lengths, 
-            hyperparameters=sc_hyperparams
-        )
-        # Inject the ground removal outputs into the input dictionary.
-        input_dict['ground_mask'] = ground_mask.numpy()  # Optionally as numpy array.
+            pc_lidar=pc_lidar, 
+            boolall_ground=all_ground_mask, 
+            Ts_coneplane_lidar=Ts_coneplane_lidar,
+            road_plane = road_plane
+            )
+
+        input_dict['ground_mask'] = all_ground_mask.numpy()  # Optionally as numpy array.
         input_dict['clusters'] = clusters
         teacher_dict, student_dict = self.prepare_data_ssl(input_dict, prepare_for=self.unlabeled_data_for)
         
