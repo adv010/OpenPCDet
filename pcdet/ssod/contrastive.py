@@ -3,7 +3,8 @@ from pcdet.ops.roiaware_pool3d.roiaware_pool3d_utils import points_in_boxes_gpu
 from pcdet.utils.loss_utils import DINOLoss
 from train_utils.semi_utils import transform_aug, load_data_to_gpu
 from tools.visual_utils import open3d_vis_utils as V
-from visual_utils.open3d_vis_utils import Open3DRenderer
+from visual_utils.matplot_3d_headless import Matplotlib3DRenderer
+# from visual_utils.open3d_vis_utils import Open3DRenderer
 from pcdet.models import build_network
 import copy
 from torch import nn
@@ -49,6 +50,7 @@ class Contrastive(nn.Module):
 
         self.mask_gpoint = self.cfgs.MODEL.DINO_HEAD.get('MASK_GPOINTS', False)
 
+        self.renderer = Matplotlib3DRenderer()
         # self.renderer = Open3DRenderer()
 
     @torch.no_grad()
@@ -213,16 +215,17 @@ class Contrastive(nn.Module):
             loss += dino_loss * self.cfgs.MODEL.DINO_HEAD.LOSS_CONFIG.LOSS_WEIGHTS.get('dino_loss_weight', 1.0)
 
             # Visualize a random scene
-            # bs = batch_dict_wa_ulb['batch_size']
-            # i = 0
-            # points = batch_dict_sa_ulb['points'][..., 1:4][batch_dict_sa_ulb['points'][:, 0] == i]
-            # points = points.detach().cpu().numpy()
-            # gt_boxes = sa_rois[i].view(-1, 7)
-            # gt_labels = roi_labels[i].view(-1)
-            # kmask = keep_mask.chunk(bs)[i].view(-1)
-            # gt_boxes = gt_boxes[kmask == 1].detach().cpu().numpy()
-            # gt_labels = gt_labels[kmask == 1].detach().cpu().numpy()
-            # tb_dict['fig_scene'] = self.renderer.render_scene_tb(points, gt_boxes, gt_labels)
+            bs = batch_dict_wa_ulb['batch_size']
+            i = 0
+            points = batch_dict_sa_ulb['points'][..., 1:4][batch_dict_sa_ulb['points'][:, 0] == i]
+            points = points.detach().cpu().numpy()
+            gt_boxes = sa_rois[i].view(-1, 7)
+            gt_labels = roi_labels[i].view(-1)
+            kmask = keep_mask.chunk(bs)[i].view(-1)
+            gt_boxes = gt_boxes[kmask == 1].detach().cpu().numpy()
+            gt_labels = gt_labels[kmask == 1].detach().cpu().numpy()
+            keypoints = batch_dict_sa_ulb['point_coords'][:, 1:4].detach().cpu().numpy()
+            tb_dict['fig_scene'] = self.renderer.render_scene_tb(points, gt_boxes, gt_labels, keypoints)
 
             kl_div = F.kl_div(F.log_softmax(s2 / self.dino_loss.student_temp, dim=-1), t1_centered, reduction='batchmean')
             tb_dict.update({'kl_div_t1_s2': kl_div.mean().item()})
