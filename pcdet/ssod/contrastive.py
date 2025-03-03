@@ -1,11 +1,11 @@
 import torch
 import os
-os.environ["OPEN3D_RENDERING_BACKEND"] = "osmesa"  #"osmesa"
+# os.environ["OPEN3D_RENDERING_BACKEND"] = "osmesa"  #"osmesa"
+# from visual_utils.open3d_vis_utils import Open3DRenderer
 from pcdet.ops.roiaware_pool3d.roiaware_pool3d_utils import points_in_boxes_gpu
 from pcdet.utils.loss_utils import DINOLoss
 from train_utils.semi_utils import transform_aug, load_data_to_gpu
 from tools.visual_utils import open3d_vis_utils as V
-# from visual_utils.open3d_vis_utils import Open3DRenderer
 from pcdet.models import build_network
 import copy
 from torch import nn

@@ -9,6 +9,8 @@ from ..semi_dataset import SemiDatasetTemplate
 import hdbscan
 import types
 import torch
+import matplotlib.pyplot as plt
+import os
 
 def split_kitti_semi_data(dataset_cfg, data_splits, logger, root_path=None):
     root_path = dataset_cfg.DATA_PATH if root_path is None else root_path
@@ -88,336 +90,223 @@ class KittiSemiDataset(SemiDatasetTemplate):
             'Step0__M': 0  # Single frame processing.
         }
 
-    #dummy function of fitting KITTI BBOX
-    # def fit_bounding_box_dummy(self, points):
-    #     if points.shape[0] == 0:
-    #         return np.zeros((7,))
-    #     x_min, y_min, z_min = points[:, 0].min(), points[:, 1].min(), points[:, 2].min()
-    #     x_max, y_max, z_max = points[:, 0].max(), points[:, 1].max(), points[:, 2].max()
-    #     center_x = (x_min + x_max) / 2
-    #     center_y = (y_min + y_max) / 2
-    #     center_z = (z_min + z_max) / 2
-    #     l = x_max - x_min
-    #     w = y_max - y_min
-    #     h = z_max - z_min
-    #     # For simplicity, set theta to 0.
-    #     theta = 0.0
-    #     box_7d = np.array([center_x, center_y, center_z, l, w, h, theta])
-    #     return box_7d
-
-    # MODEST algorithm from UNION - Modified with available road_plane for grounding
-    def fit_bounding_box(self, cluster_reference: np.ndarray, road_plane: np.ndarray):
-        """
-        Fit a BEV bounding box around cluster points (in NumPy) and adjust the vertical placement using a provided road_plane.
+    # # MODEST algorithm from UNION - Modified with available road_plane for grounding
+    # def fit_bounding_box(self, cluster_reference: np.ndarray, road_plane: np.ndarray):
+    #     """
+    #     Fit a BEV bounding box around cluster points (in NumPy) and adjust the vertical placement using a provided road_plane.
         
+    #     Args:
+    #         cluster_reference (np.ndarray): LiDAR point cloud of the cluster in the reference frame with shape (N, 4).
+    #                                         The first 3 columns are [x, y, z].
+    #         road_plane (np.ndarray): Array of 4 elements [a, b, c, d] defining the ground plane
+    #                                 via a*x + b*y + c*z + d = 0.
+        
+    #     Returns:
+    #         T_reference_bbox (np.ndarray): A 4x4 homogeneous transformation matrix that maps points
+    #                                     from the bounding box frame to the reference frame.
+    #         bboxdimensions (List[float]): List containing the bounding box dimensions [length, width, height].
+    #     """
+    #     # --- Step 1: Determine the best rotation angle using a closeness metric.
+    #     delta = 1  # degrees
+    #     d0 = 1e-2
+    #     max_beta = -float('inf')
+    #     choose_angle = None
+
+    #     for angle in np.arange(0, 90 + delta, delta):
+    #         angle_rad = angle * np.pi / 180.0
+    #         R_local_reference = np.array([[np.cos(angle_rad), np.sin(angle_rad)],
+    #                                     [-np.sin(angle_rad), np.cos(angle_rad)]], dtype=np.float32)
+    #         cluster_local = (R_local_reference @ cluster_reference[:, :2].T).T
+    #         min_x = np.min(cluster_local[:, 0])
+    #         max_x = np.max(cluster_local[:, 0])
+    #         min_y = np.min(cluster_local[:, 1])
+    #         max_y = np.max(cluster_local[:, 1])
+    #         Dx = np.minimum(cluster_local[:, 0] - min_x, max_x - cluster_local[:, 0])
+    #         Dy = np.minimum(cluster_local[:, 1] - min_y, max_y - cluster_local[:, 1])
+    #         beta = np.minimum(Dx, Dy)
+    #         beta = np.maximum(beta, d0)
+    #         beta_sum = np.sum(1.0 / beta)
+    #         if beta_sum > max_beta:
+    #             max_beta = beta_sum
+    #             choose_angle = angle_rad
+
+    #     # --- Step 2: Recompute rotation using the chosen angle.
+    #     R_local_reference = np.array([[np.cos(choose_angle), np.sin(choose_angle)],
+    #                                 [-np.sin(choose_angle), np.cos(choose_angle)]], dtype=np.float32)
+    #     cluster_local = (R_local_reference @ cluster_reference[:, :2].T).T
+    #     min_x = np.min(cluster_local[:, 0])
+    #     max_x = np.max(cluster_local[:, 0])
+    #     min_y = np.min(cluster_local[:, 1])
+    #     max_y = np.max(cluster_local[:, 1])
+
+    #     if (max_x - min_x) < (max_y - min_y):
+    #         choose_angle = choose_angle + np.pi / 2.0
+    #         R_local_reference = np.array([[np.cos(choose_angle), np.sin(choose_angle)],
+    #                                     [-np.sin(choose_angle), np.cos(choose_angle)]], dtype=np.float32)
+    #         cluster_local = (R_local_reference @ cluster_reference[:, :2].T).T
+    #         min_x = np.min(cluster_local[:, 0])
+    #         max_x = np.max(cluster_local[:, 0])
+    #         min_y = np.min(cluster_local[:, 1])
+    #         max_y = np.max(cluster_local[:, 1])
+
+    #     # --- Step 3: Compute the bounding box corners in the rotated (local) frame.
+    #     corners_local = np.array([[max_x, min_y],
+    #                             [min_x, min_y],
+    #                             [min_x, max_y],
+    #                             [max_x, max_y]], dtype=np.float32)
+    #     corners_reference = (R_local_reference.T @ corners_local.T).T
+
+    #     # --- Step 4: Compute the horizontal center from corners.
+    #     center_x = np.mean(corners_reference[:, 0])
+    #     center_y = np.mean(corners_reference[:, 1])
+    #     # Compute ground height from the road plane:
+    #     # Solve a*x + b*y + c*z + d = 0  =>  z = -(a*x + b*y + d)/c
+    #     a, b, c, d = road_plane
+    #     ground_z = -(a * center_x + b * center_y + d) / c
+
+    #     # --- Step 5: Compute the bounding box height using the cluster's maximum z.
+    #     bboxheight = np.max(cluster_reference[:, 2]) - ground_z
+    #     # Set the vertical center such that the bottom of the box is at ground_z.
+    #     center_z = ground_z + bboxheight / 2.0
+
+    #     bboxcenter_reference = np.array([center_x, center_y, center_z], dtype=np.float32)
+
+    #     # --- Step 6: Assemble the 4x4 homogeneous transformation matrix.
+    #     T_reference_bbox = np.eye(4, dtype=np.float32)
+    #     T_reference_bbox[:3, 3] = bboxcenter_reference
+    #     T_reference_bbox[:2, 0] = R_local_reference.T[:, 0]
+    #     T_reference_bbox[:2, 1] = R_local_reference.T[:, 1]
+
+    #     # Compute horizontal dimensions:
+    #     bboxlength = np.linalg.norm(corners_reference[1] - corners_reference[0])
+    #     bboxwidth  = np.linalg.norm(corners_reference[3] - corners_reference[0])
+    #     bboxdimensions = [float(bboxlength), float(bboxwidth), float(bboxheight)]
+
+    #     return T_reference_bbox, bboxdimensions
+
+
+
+    def spatial_clustering_adapted(self, pc_lidar: np.ndarray,
+                                ground_mask: np.ndarray,
+                                apply_filters: bool = True) -> dict:
+        """
+        Spatial clustering of LiDAR point cloud using a simplified approach.
         Args:
-            cluster_reference (np.ndarray): LiDAR point cloud of the cluster in the reference frame with shape (N, 4).
-                                            The first 3 columns are [x, y, z].
-            road_plane (np.ndarray): Array of 4 elements [a, b, c, d] defining the ground plane
-                                    via a*x + b*y + c*z + d = 0.
-        
+            pc_lidar (np.ndarray), ground_mask (np.ndarray), apply_filters (bool): If True, also remove sky and far-away points;
         Returns:
-            T_reference_bbox (np.ndarray): A 4x4 homogeneous transformation matrix that maps points
-                                        from the bounding box frame to the reference frame.
-            bboxdimensions (List[float]): List containing the bounding box dimensions [length, width, height].
+            dict: A dictionary mapping each cluster label to points in cluster
         """
-        # --- Step 1: Determine the best rotation angle using a closeness metric.
-        delta = 1  # degrees
-        d0 = 1e-2
-        max_beta = -float('inf')
-        choose_angle = None
+        if apply_filters:
+            sky_thres   = self.sc_hyperparams.get('Step1__sky_threshold', 3.0)
+            range_thres = self.sc_hyperparams.get('Step1__range_threshold', 50.0)
 
-        for angle in np.arange(0, 90 + delta, delta):
-            angle_rad = angle * np.pi / 180.0
-            R_local_reference = np.array([[np.cos(angle_rad), np.sin(angle_rad)],
-                                        [-np.sin(angle_rad), np.cos(angle_rad)]], dtype=np.float32)
-            cluster_local = (R_local_reference @ cluster_reference[:, :2].T).T
-            min_x = np.min(cluster_local[:, 0])
-            max_x = np.max(cluster_local[:, 0])
-            min_y = np.min(cluster_local[:, 1])
-            max_y = np.max(cluster_local[:, 1])
-            Dx = np.minimum(cluster_local[:, 0] - min_x, max_x - cluster_local[:, 0])
-            Dy = np.minimum(cluster_local[:, 1] - min_y, max_y - cluster_local[:, 1])
-            beta = np.minimum(Dx, Dy)
-            beta = np.maximum(beta, d0)
-            beta_sum = np.sum(1.0 / beta)
-            if beta_sum > max_beta:
-                max_beta = beta_sum
-                choose_angle = angle_rad
+            boolall_sky = pc_lidar[:, 2] >= sky_thres
 
-        # --- Step 2: Recompute rotation using the chosen angle.
-        R_local_reference = np.array([[np.cos(choose_angle), np.sin(choose_angle)],
-                                    [-np.sin(choose_angle), np.cos(choose_angle)]], dtype=np.float32)
-        cluster_local = (R_local_reference @ cluster_reference[:, :2].T).T
-        min_x = np.min(cluster_local[:, 0])
-        max_x = np.max(cluster_local[:, 0])
-        min_y = np.min(cluster_local[:, 1])
-        max_y = np.max(cluster_local[:, 1])
+            # Mark far-away points (radial distance > range_thres).
+            radial_distance = np.linalg.norm(pc_lidar[:, :2], axis=1)
+            boolall_outrange = radial_distance > range_thres
 
-        if (max_x - min_x) < (max_y - min_y):
-            choose_angle = choose_angle + np.pi / 2.0
-            R_local_reference = np.array([[np.cos(choose_angle), np.sin(choose_angle)],
-                                        [-np.sin(choose_angle), np.cos(choose_angle)]], dtype=np.float32)
-            cluster_local = (R_local_reference @ cluster_reference[:, :2].T).T
-            min_x = np.min(cluster_local[:, 0])
-            max_x = np.max(cluster_local[:, 0])
-            min_y = np.min(cluster_local[:, 1])
-            max_y = np.max(cluster_local[:, 1])
-
-        # --- Step 3: Compute the bounding box corners in the rotated (local) frame.
-        corners_local = np.array([[max_x, min_y],
-                                [min_x, min_y],
-                                [min_x, max_y],
-                                [max_x, max_y]], dtype=np.float32)
-        corners_reference = (R_local_reference.T @ corners_local.T).T
-
-        # --- Step 4: Compute the horizontal center from corners.
-        center_x = np.mean(corners_reference[:, 0])
-        center_y = np.mean(corners_reference[:, 1])
-        # Compute ground height from the road plane:
-        # Solve a*x + b*y + c*z + d = 0  =>  z = -(a*x + b*y + d)/c
-        a, b, c, d = road_plane
-        ground_z = -(a * center_x + b * center_y + d) / c
-
-        # --- Step 5: Compute the bounding box height using the cluster's maximum z.
-        bboxheight = np.max(cluster_reference[:, 2]) - ground_z
-        # Set the vertical center such that the bottom of the box is at ground_z.
-        center_z = ground_z + bboxheight / 2.0
-
-        bboxcenter_reference = np.array([center_x, center_y, center_z], dtype=np.float32)
-
-        # --- Step 6: Assemble the 4x4 homogeneous transformation matrix.
-        T_reference_bbox = np.eye(4, dtype=np.float32)
-        T_reference_bbox[:3, 3] = bboxcenter_reference
-        T_reference_bbox[:2, 0] = R_local_reference.T[:, 0]
-        T_reference_bbox[:2, 1] = R_local_reference.T[:, 1]
-
-        # Compute horizontal dimensions:
-        bboxlength = np.linalg.norm(corners_reference[1] - corners_reference[0])
-        bboxwidth  = np.linalg.norm(corners_reference[3] - corners_reference[0])
-        bboxdimensions = [float(bboxlength), float(bboxwidth), float(bboxheight)]
-
-        return T_reference_bbox, bboxdimensions
-
-
-
-    def spatial_clustering(self, pc_lidar, boolall_ground, Ts_coneplane_lidar, road_plane, hyperparameters=None):
-        """
-        Cluster inlier points of a point cloud spatially for a single sweep.
-        
-        Args:
-            pc_lidar (torch.Tensor): LiDAR point cloud in LiDAR frame, shape (N,4).
-            boolall_ground (torch.Tensor): Boolean mask indicating ground points, shape (N,).
-            Ts_coneplane_lidar (np.ndarray): NumPy array containing cone-plane homogeneous transformation
-                                            matrices with shape (num_cones, 4, 4).
-            hyperparameters (dict): Hyperparameters for spatial clustering.
-            
-        Returns:
-            cluster_dict (dict): Dictionary containing cluster information with each cluster represented
-                                as a 7-dim box [x, y, z, l, w, h, theta] and additional fields.
-        """
-        # Set hyperparameters if not provided
-        if hyperparameters is None:
-            hyperparameters = self.sc_hyperparams       
-        # For single sweep, we set M=0 (no multi-frame aggregation)
-        M = hyperparameters.get('Step0__M', 0)
-        
-        # --- Step 1: Filter out points considered as ground, sky, or too far away.
-        sky_thres = hyperparameters['Step1__sky_threshold']  # meters
-        range_thres = hyperparameters['Step1__range_threshold']  # meters
-        x_range_thres = hyperparameters.get('Step1__x_range_threshold', None)
-        y_range_thres = hyperparameters.get('Step1__y_range_threshold', None)
-        
-        # Use the global plane transformation (first cone) as a reference.
-        # Here Ts_coneplane_lidar is a NumPy array; we use its first slice.
-        T_globalplane_lidar = Ts_coneplane_lidar[0]
-        
-        # Transform the point cloud using T_globalplane (assuming T_globalplane_lidar is 4x4 and pc_lidar is converted to numpy)
-        pc_lidar_np = pc_lidar # (N,4)
-        pc_globalplane = (T_globalplane_lidar @ pc_lidar_np.T).T  # (N,4)
-        
-        # Identify sky points: points with z (in transformed space) above the sky threshold.
-        boolall_sky = pc_globalplane[:, 2] >= sky_thres
-        
-        # Determine points that are out of range.
-        if range_thres is not None:
-            boolall_outrange = np.linalg.norm(pc_lidar_np[:, :2], ord=2, axis=1) > range_thres
+            boolall_outlier = ground_mask | boolall_sky | boolall_outrange
         else:
-            boolall_outrange = (np.abs(pc_lidar_np[:, 0]) > x_range_thres) | (np.abs(pc_lidar_np[:, 1]) > y_range_thres)
-        
-        # Combine masks: a point is an outlier if it is ground, sky, or out-of-range.
-        boolall_outlier = boolall_ground | boolall_sky | boolall_outrange
-        idsall_inlier = np.where(~boolall_outlier)[0]
-        
-        inlier_pc_lidar = pc_lidar_np[idsall_inlier].copy()
-        
-        # --- Step 2: Cluster the inlier points using HDBSCAN.
-        clustersize_thres = hyperparameters['Step2__clustersize_threshold']
-        cluster_selection_epsilon = hyperparameters['Step2__cluster_selection_epsilon']
-        
-        # Since we're using a single sweep, total frames = 1.
-        total_frames = 1
-        
-        hdbscan_clusterer = hdbscan.HDBSCAN(min_cluster_size=clustersize_thres,
-                                            metric='euclidean',
-                                            cluster_selection_epsilon=cluster_selection_epsilon)
-        # Cluster using only the first three coordinates (x,y,z)
-        hdbscan_cluster_labels = hdbscan_clusterer.fit_predict(inlier_pc_lidar[:, :3])
-        
-        # --- Step 3: For each cluster, fit a 7-dim bounding box and adjust (touchground).
-        num_cones = hyperparameters['Step3__num_cones']
-        fov_cone = 360 / num_cones  # degrees per cone
-        
+            boolall_outlier = ground_mask
+
+        # Indices of inlier points
+        ids_inlier = np.where(~boolall_outlier)[0]
+        inlier_pc = pc_lidar[ids_inlier].copy()
+
+        clustersize_thres = self.sc_hyperparams.get('Step2__clustersize_threshold', 10)
+        cluster_selection_epsilon = self.sc_hyperparams.get('Step2__cluster_selection_epsilon', 0.5)
+
+        clusterer = hdbscan.HDBSCAN(min_cluster_size=clustersize_thres,
+                                    metric='euclidean',
+                                    cluster_selection_epsilon=cluster_selection_epsilon)
+
+        # Fit on the inlier points (using first 3 dims for 3D position)
+        cluster_labels = clusterer.fit_predict(inlier_pc[:, :3])
+        unique_labels = np.unique(cluster_labels)
+
+        if pc_lidar.shape[1] > 3:
+            points = pc_lidar[:, :3]
+        else:
+            points = pc_lidar
+
+        full_labels = -99 * np.ones(points.shape[0], dtype=int)  # Initialize
+        full_labels[ids_inlier] = cluster_labels                 # Assign labels to inlier points
+
+        # # Path to save figure
+        # save_path = '/mnt/data/adat01/adv_OpenPCDet/UNION_figs'
+        # file_name = 'clusters_3d_viz_ulb.png'
+        # os.makedirs(save_path, exist_ok=True)
+
+        # fig = plt.figure(figsize=(10, 8))
+        # ax = fig.add_subplot(111, projection='3d')
+
+        # # Plot ground points in red
+        # ground_pts = points[ground_mask]
+        # ax.scatter(ground_pts[:, 0], ground_pts[:, 1], ground_pts[:, 2],
+        #         c='r', s=1, label='Ground')
+
+        # # We'll color each cluster uniquely, noise in black
+        # cmap = plt.get_cmap("tab20")
+        # non_ground_mask = ~ground_mask
+
+        # # Loop over each label in the non-ground set
+        # labels_non_ground = np.unique(full_labels[non_ground_mask])
+        # for label in labels_non_ground:
+        #     if label == -99:
+        #         # Means it wasn't labeled (outlier in filtering)
+        #         continue
+
+        #     cluster_mask = (full_labels == label)
+        #     cluster_points = points[cluster_mask]
+
+        #     if label == -1:
+        #         # Noise
+        #         color = 'k'
+        #         label_name = 'Noise'
+        #     else:
+        #         color = cmap(label % 20)
+        #         label_name = f'Cluster {label}'
+
+        #     ax.scatter(cluster_points[:, 0],
+        #             cluster_points[:, 1],
+        #             cluster_points[:, 2],
+        #             c=[color], s=1, label=label_name)
+
+        # ax.set_xlabel('X')
+        # ax.set_ylabel('Y')
+        # ax.set_zlabel('Z')
+        # ax.set_title('3D Cluster Visualization')
+        # ax.legend(loc='upper right')
+
+        # # Save figure
+        # full_save_path = os.path.join(save_path, file_name)
+        # plt.savefig(full_save_path)
+        # plt.close(fig)
+
         cluster_dict = {}
-        unique_labels = np.unique(hdbscan_cluster_labels)
         for label in unique_labels:
-            if label == 0:
-                continue
-            cluster_inds = np.where(hdbscan_cluster_labels == label)[0]
-            idsall_cluster = idsall_inlier[cluster_inds]
-            
-            # Use the modified fit_bounding_box which takes road_plane.
-            # Assume self.road_plane is available (e.g., set from the KITTI file).
-            T_ref_bbox, bbox_dims = self.fit_bounding_box(pc_lidar_np[idsall_cluster], road_plane)
-            # Convert the fitted box into a 7-dim representation:
-            # Center is T_ref_bbox[:3, 3]; dimensions from bbox_dims; theta from rotation.
-            center = T_ref_bbox[:3, 3]
-            theta = np.arctan2(T_ref_bbox[1, 0], T_ref_bbox[0, 0])
-            theta_tensor = torch.tensor(theta)
-            period = 2 * np.pi
-            offset = 0.5
-            theta_limit_period = theta_tensor - torch.floor(theta_tensor / period + offset) * period
-            box_7d = np.concatenate([center, np.array(bbox_dims), np.array([theta_limit_period.item()])])
-            
-            # Touchground adjustment: shift vertically so bottom touches z=0.
-            # The current bottom is center_z - (h/2). We want that to be 0, so new center_z = h/2.
-            height_above_ground = box_7d[2] - (box_7d[5] / 2)
-            box_touchground = box_7d.copy()
-            box_touchground[2] = box_7d[5] / 2
-            
-            # Determine cone index (optional): use the azimuth of the box center.
-            azimuth_deg = (180 / np.pi * np.arctan2(box_7d[1], box_7d[0]) + 360) % 360
-            cone_idx = int((azimuth_deg / fov_cone) % num_cones)
-            # Retrieve the corresponding cone-plane (if needed for further corrections)
-            T_coneplane_lidar = Ts_coneplane_lidar[cone_idx]
-            
-            # Store cluster information in a namespace.
-            cluster = types.SimpleNamespace()
-            cluster.box_7d = box_7d                 # Original 7-dim box [x,y,z,l,w,h,theta]
-            cluster.touchground_box_7d = box_touchground  # Adjusted 7-dim box with bottom at 0
-            cluster.height_above_ground = height_above_ground
-            cluster.avg_number_points = len(idsall_cluster) / total_frames
-            cluster.idsall_aggregated = idsall_cluster.tolist()
-            
-            cluster_dict[label] = cluster
-        
-        # Sort clusters by number of points (descending)
-        sorted_clusters = sorted(cluster_dict.values(), key=lambda c: c.avg_number_points, reverse=True)
-        cluster_dict = dict(zip(range(len(sorted_clusters)), sorted_clusters))
-        
+            if label == -1:  # skip noise
+                continue 
+            cluster_indices = ids_inlier[cluster_labels == label]
+            cluster_dict[label] = cluster_indices
+
         return cluster_dict
 
 
-    def get_T_plane_reference(self, road_plane: np.ndarray) -> np.ndarray:
-        """
-        Compute a 4x4 homogeneous transformation matrix that aligns the provided road_plane
-        to a canonical reference frame where the road becomes flat (i.e., the plane lies at z=0).
-        
-        Args:
-            road_plane (np.ndarray): 1D array of shape (4,) representing the plane parameters
-                                    [a, b, c, d] for the plane equation:
-                                    a*x + b*y + c*z + d = 0.
-                                    The road_plane is assumed to be normalized such that
-                                    the normal vector [a, b, c] is unit length.
-        
-        Returns:
-            T (np.ndarray): A 4x4 homogeneous transformation matrix. When applied to a point in homogeneous
-                            coordinates, this transformation rotates and translates the point so that the road_plane
-                            becomes horizontal (with z=0).
-        """
-        # Extract the normal (n) and offset (d)
-        n = road_plane[:3].astype(np.float32)
-        d = float(road_plane[3])
-        
-        # Ensure the normal is unit length.
-        norm_n = np.linalg.norm(n)
-        if norm_n < 1e-6:
-            raise ValueError("Normal vector is too small!")
-        n = n / norm_n
-        d = d / norm_n
-        
-        # Our target normal is [0, 0, 1] (so that after transformation the ground is horizontal)
-        target = np.array([0, 0, 1], dtype=np.float32)
-        
-        # Compute the rotation matrix that rotates n to target using Rodrigues' formula.
-        v = np.cross(n, target)
-        s = np.linalg.norm(v)
-        c = np.dot(n, target)
-        
-        if s < 1e-6:
-            # The normal is already aligned (or opposite) to the target.
-            R = np.eye(3, dtype=np.float32)
-        else:
-            # Skew-symmetric matrix for v.
-            vx = np.array([[0, -v[2], v[1]],
-                        [v[2], 0, -v[0]],
-                        [-v[1], v[0], 0]], dtype=np.float32)
-            R = np.eye(3, dtype=np.float32) + vx + np.dot(vx, vx) * ((1 - c) / (s ** 2))
-        
-        # Compute a point on the plane (the closest point to the origin): p0 = -d * n.
-        p0 = -d * n
-        # Rotate this point.
-        p0_rot = R.dot(p0)
-        
-        # We want the transformed plane to lie at z=0.
-        # Compute the translation t so that the z-coordinate of R*p0 becomes zero.
-        t = np.array([0, 0, -p0_rot[2]], dtype=np.float32)
-        
-        # Assemble the 4x4 homogeneous transformation matrix.
-        T = np.eye(4, dtype=np.float32)
-        T[:3, :3] = R
-        T[:3, 3] = t
-        return T
-
-
-    def ground_point_removal(self, pc_lidar, road_plane, hyperparameters=None):
+    def ground_point_removal_only(self, pc_lidar, calib, road_plane, hyperparameters=None):
         if hyperparameters is None:
             hyperparameters = self.groundremoval_hyperparameters_kitti
-        xyradius_thres = hyperparameters.get('Step1__xyradius_threshold', 50.0)
-        zmin_thres = hyperparameters.get('Step1__zmin_threshold', -2.65)
-        zmax_thres = hyperparameters.get('Step1__zmax_threshold', -0.65)
-
-        boolall_xy = np.linalg.norm(pc_lidar[:, :2], axis=1) <= xyradius_thres
-        boolall_z = (pc_lidar[:, 2] >= zmin_thres) & (pc_lidar[:, 2] <= zmax_thres)
-        boolall_xyz = boolall_xy & boolall_z
-        grounddisk_pc_lidar = pc_lidar[boolall_xyz].copy()
-        # Using road_plane instead of RANSAC
-        T_globalplane_lidar = self.get_T_plane_reference(road_plane)
-        globalplane_height = road_plane[3]  #Optional
-
         dmax_thres = hyperparameters.get('Step3__dmax_thres', 0.30)
-        num_cones = hyperparameters.get('Step3__num_cones', 8)
-        fov_cone = 360 / num_cones
+        # Transform LiDAR points to camera coordinates.
+        pc_cam = calib.lidar_to_rect(pc_lidar[:, :3])  # (N,3)
+        # Unpack the road plane parameters (assumed in camera coords).
+        a, b, c, d = road_plane
+        expected_y = (-d - a * pc_cam[:, 0] - c * pc_cam[:, 2]) / b     # The plane equation is: a*x + b*y + c*z + d = 0  ->  y = -(d + a*x + c*z)/b
+        diff_y = np.abs(pc_cam[:, 1] - expected_y)    # Compute the absolute difference between the actual y and the expected ground y.
+        boolall_ground = diff_y <= dmax_thres
+        return boolall_ground
 
-        pc_globalplane = (T_globalplane_lidar @ pc_lidar.copy().T).T
-        grounddisk_pc_globalplane = (T_globalplane_lidar @ grounddisk_pc_lidar.copy().T).T
-
-        boolall_ground = torch.zeros([pc_lidar.shape[0]], dtype=torch.bool)
-        angle_all_globalplane = (180/np.pi * np.arctan2(pc_globalplane[:,1], pc_globalplane[:,0]) + 360) % 360
-        angle_grounddisk_globalplane = (180/np.pi *  np.arctan2(grounddisk_pc_globalplane[:,1], grounddisk_pc_globalplane[:,0]) + 360) % 360
-
-        Ts_coneplane_lidar = []
-        for cone_idx in range(num_cones):
-            boolall_ang = (angle_all_globalplane >= cone_idx * fov_cone) & (angle_all_globalplane < (cone_idx+1) * fov_cone)
-            # For simplicity, here we use the global plane for all cones:
-            Ts_coneplane_lidar.append(T_globalplane_lidar)
-            pc_coneplane = (T_globalplane_lidar @ pc_lidar.T).T
-            boolall_coneground = boolall_ang & (pc_coneplane[:,2] <= dmax_thres)
-            boolall_ground[boolall_coneground] = True
-
-        Ts_coneplane_lidar.append(T_globalplane_lidar)
-        Ts_coneplane_lidar = np.stack(Ts_coneplane_lidar)
-        return boolall_ground, Ts_coneplane_lidar
 
     def set_split(self, split):
         super().__init__(dataset_cfg=self.dataset_cfg, class_names=self.class_names, training=self.training,
@@ -719,17 +608,15 @@ class KittiLabeledDataset(KittiSemiDataset):
     def __getitem__(self, index):
         input_dict, img_shape = self.pre_getitem(index)
         pc_lidar = input_dict['points']
-        all_ground_mask, Ts_coneplane_lidar = self.ground_point_removal(pc_lidar, input_dict['road_plane'])
+        calib = input_dict['calib']
+        all_ground_mask = self.ground_point_removal_only(pc_lidar, calib, input_dict['road_plane'])
 
-        # Call the spatial clustering function:
-        clusters = self.spatial_clustering(
+        clusters = self.spatial_clustering_adapted(
             pc_lidar=pc_lidar, 
-            boolall_ground=all_ground_mask, 
-            Ts_coneplane_lidar=Ts_coneplane_lidar,
-            road_plane = input_dict['road_plane']
+            ground_mask=all_ground_mask
         )
         # Inject the ground removal outputs into the input dictionary.
-        input_dict['ground_mask'] = all_ground_mask.numpy()  # Optionally as numpy array.
+        input_dict['ground_mask'] = all_ground_mask  # Optionally as numpy array.
         input_dict['clusters'] = clusters #Access boxes using clusters[i].box_7d
         
         teacher_dict, student_dict = self.prepare_data_ssl(input_dict, prepare_for=self.labeled_data_for)
@@ -814,22 +701,20 @@ class KittiUnlabeledDataset(KittiSemiDataset):
 
         if "calib_matricies" in get_item_list:
             input_dict["trans_lidar_to_cam"], input_dict["trans_cam_to_img"] = kitti_utils.calib_to_matricies(calib)
-        
-        road_plane = self.get_road_plane(sample_idx) # Using unlabeled road_plane
+         
+        road_plane = self.get_road_plane(sample_idx) # Using unlabeled road_plane [In Camera Frame-of]
 
         pc_lidar =  input_dict['points']
 
-        all_ground_mask, Ts_coneplane_lidar = self.ground_point_removal(pc_lidar, road_plane)
+        all_ground_mask = self.ground_point_removal_only(pc_lidar, calib, road_plane)
 
         # Call the spatial clustering function:
-        clusters = self.spatial_clustering(
+        clusters = self.spatial_clustering_adapted(
             pc_lidar=pc_lidar, 
-            boolall_ground=all_ground_mask, 
-            Ts_coneplane_lidar=Ts_coneplane_lidar,
-            road_plane = road_plane
+            ground_mask=all_ground_mask
             )
 
-        input_dict['ground_mask'] = all_ground_mask.numpy()  # Optionally as numpy array.
+        input_dict['ground_mask'] = all_ground_mask  # Optionally as numpy array.
         input_dict['clusters'] = clusters
         teacher_dict, student_dict = self.prepare_data_ssl(input_dict, prepare_for=self.unlabeled_data_for)
         
