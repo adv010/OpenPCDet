@@ -9,7 +9,8 @@ from .augmentor.data_augmentor import DataAugmentor
 from .augmentor.ssl_data_augmentor import SSLDataAugmentor
 from .processor.data_processor import DataProcessor
 from .processor.point_feature_encoder import PointFeatureEncoder
-
+import hdbscan
+import torch
 
 class SemiDatasetTemplate(torch_data.Dataset):
     def __init__(self, dataset_cfg=None, class_names=None, training=True, root_path=None, logger=None):
@@ -54,6 +55,161 @@ class SemiDatasetTemplate(torch_data.Dataset):
             self.depth_downsample_factor = self.data_processor.depth_downsample_factor
         else:
             self.depth_downsample_factor = None
+
+        self.groundremoval_hyperparameters_kitti = {
+            'Step0__M': 0,
+            'Step1__xyradius_threshold': 50.00,  # meters
+            # KITTI’s ground is often around -1.65 m. Here we allow a ±1.0 m window.
+            'Step1__zmin_threshold': -1.65 - 1.0,  # approximately -2.65 m
+            'Step1__zmax_threshold': -1.65 + 1.0,  # approximately -0.65 m
+            'Step2__min_sample_points': 100,      # KITTI point clouds are generally sparser than nuScenes, so we lower the minimum number of sample points for global plane fitting.
+            'Step2__residual_threshold': 0.15,    # slightly looser threshold (meters)
+            'Step2__max_trials': 20,            # For cone-based plane fitting, we keep a similar dmax threshold.
+            'Step3__dmax_thres': 0.30,            # meters
+            'Step3__num_cones': 8,            # Number of cones can remain similar.
+            'Step3__min_number_cone_points': 300, # reduced from 500
+            'Step3__min_sample_points': 100,      # reduced from 250
+            'Step3__residual_threshold': 0.05,    # meters (kept tight for local plane fit)
+            'Step3__max_trials': 10, # Reduced from 20
+        }   
+        self.sc_hyperparams = {
+            'Step1__sky_threshold': 2.5,
+            'Step1__range_threshold': 60,
+            'Step1__x_range_threshold': 70.4,
+            'Step1__y_range_threshold': 40,
+            'Step2__clustersize_threshold': 5,
+            'Step2__cluster_selection_epsilon': 0.5,
+            'Step3__num_cones': 8,
+            'Step4__length_max_threshold': 6,
+            'Step4__width_max_threshold': 3,
+            'Step4__height_min_threshold': 1.2,
+            'Step4__height_above_ground_max_threshold': 2.0,
+            'Step4__length_width_max_ratio_threshold': 2.0,
+            'Step4__area_min_threshold': 1.0,
+            'Step0__M': 0  # Single frame processing.
+        }
+
+
+    def ground_point_removal_only(self, pc, road_plane, hyperparameters=None):
+        if hyperparameters is None:
+            hyperparameters = self.groundremoval_hyperparameters_kitti
+        dmax_thres = hyperparameters.get('Step3__dmax_thres', 0.30)
+        pc_cam = pc # (N,3)
+        a, b, c, d = road_plane
+        expected_y = (-d - a * pc_cam[:, 0] - c * pc_cam[:, 2]) / b     # The plane equation is: a*x + b*y + c*z + d = 0  ->  y = -(d + a*x + c*z)/b
+        diff_y = np.abs(pc_cam[:, 1] - expected_y)    # Compute the absolute difference between the actual y and the expected ground y.
+        boolall_ground = diff_y <= dmax_thres
+        return boolall_ground
+
+    def spatial_clustering_adapted(self, pc_lidar: np.ndarray,
+                                ground_mask: np.ndarray,
+                                apply_filters: bool = True) -> dict:
+        """
+        Spatial clustering of LiDAR point cloud using a simplified approach.
+        Args:
+            pc_lidar (np.ndarray), ground_mask (np.ndarray), apply_filters (bool): If True, also remove sky and far-away points;
+        Returns:
+            dict: A dictionary mapping each cluster label to points in cluster
+        """
+        if apply_filters:
+            sky_thres   = self.sc_hyperparams.get('Step1__sky_threshold', 3.0)
+            range_thres = self.sc_hyperparams.get('Step1__range_threshold', 50.0)
+
+            boolall_sky = pc_lidar[:, 2] >= sky_thres
+
+            # Mark far-away points (radial distance > range_thres).
+            radial_distance = np.linalg.norm(pc_lidar[:, :2], axis=1)
+            boolall_outrange = radial_distance > range_thres
+
+            boolall_outlier = ground_mask | boolall_sky | boolall_outrange
+        else:
+            boolall_outlier = ground_mask
+
+        # Indices of inlier points
+        ids_inlier = np.where(~boolall_outlier)[0]
+        inlier_pc = pc_lidar[ids_inlier].copy()
+
+        clustersize_thres = self.sc_hyperparams.get('Step2__clustersize_threshold', 10)
+        cluster_selection_epsilon = self.sc_hyperparams.get('Step2__cluster_selection_epsilon', 0.5)
+
+        clusterer = hdbscan.HDBSCAN(min_cluster_size=clustersize_thres,
+                                    metric='euclidean',
+                                    cluster_selection_epsilon=cluster_selection_epsilon)
+
+        # Fit on the inlier points
+        cluster_labels = clusterer.fit_predict(inlier_pc[:, :3])
+        unique_labels = np.unique(cluster_labels)
+
+        if pc_lidar.shape[1] > 3:
+            points = pc_lidar[:, :3]
+        else:
+            points = pc_lidar
+
+        full_labels = -99 * np.ones(points.shape[0], dtype=int)  # Initialize
+        full_labels[ids_inlier] = cluster_labels                 # Assign labels to inlier points
+
+        cluster_dict = {}
+        for label in unique_labels:
+            if label == -1:  # skip noise
+                continue 
+            cluster_indices = ids_inlier[cluster_labels == label]
+            cluster_dict[label] = cluster_indices
+
+        return cluster_dict, full_labels
+
+    def fit_bounding_box(self, cluster_reference: np.ndarray, road_plane: np.ndarray):
+        """
+        Fit a KITTI-format bounding box to a cluster.
+        
+        Returns:
+            list: KITTI-style bounding box [x, y, z, dx, dy, dz, yaw].
+        """
+        delta = 1  # degrees
+        max_beta = -float('inf')
+        choose_angle = None
+
+        for angle in np.arange(0, 90 + delta, delta):
+            angle_rad = np.radians(angle)
+            R_local_reference = np.array([[np.cos(angle_rad), np.sin(angle_rad)],
+                                        [-np.sin(angle_rad), np.cos(angle_rad)]], dtype=np.float32)
+            cluster_local = (R_local_reference @ cluster_reference[:, :2].T).T
+            min_x, max_x = np.min(cluster_local[:, 0]), np.max(cluster_local[:, 0])
+            min_y, max_y = np.min(cluster_local[:, 1]), np.max(cluster_local[:, 1])
+
+            Dx = np.minimum(cluster_local[:, 0] - min_x, max_x - cluster_local[:, 0])
+            Dy = np.minimum(cluster_local[:, 1] - min_y, max_y - cluster_local[:, 1])
+            beta = np.minimum(Dx, Dy)
+            beta_sum = np.sum(1.0 / np.maximum(beta, 1e-2))
+            if beta_sum > max_beta:
+                max_beta = beta_sum
+                choose_angle = angle_rad
+
+        # Rotate using best angle
+        R_local_reference = np.array([[np.cos(choose_angle), np.sin(choose_angle)],
+                                    [-np.sin(choose_angle), np.cos(choose_angle)]], dtype=np.float32)
+        cluster_local = (R_local_reference @ cluster_reference[:, :2].T).T
+        min_x, max_x = np.min(cluster_local[:, 0]), np.max(cluster_local[:, 0])
+        min_y, max_y = np.min(cluster_local[:, 1]), np.max(cluster_local[:, 1])
+
+        corners_local = np.array([[max_x, min_y], [min_x, min_y], [min_x, max_y], [max_x, max_y]], dtype=np.float32)
+        corners_reference = (R_local_reference.T @ corners_local.T).T
+
+        # Compute center and height (fixed)
+        center_x, center_y = np.mean(corners_reference[:, 0]), np.mean(corners_reference[:, 1])
+        ground_z = np.median(cluster_reference[:, 2])  # Use median Z for stability
+        bboxheight = np.max(cluster_reference[:, 2]) - ground_z
+        center_z = ground_z + bboxheight / 2.0
+
+        # Compute correct length, width
+        bboxlength = np.linalg.norm(corners_reference[1] - corners_reference[0])
+        bboxwidth  = np.linalg.norm(corners_reference[3] - corners_reference[0])
+
+        # Ensure length > width
+        if bboxwidth > bboxlength:
+            bboxlength, bboxwidth = bboxwidth, bboxlength  # Swap if needed
+            choose_angle += np.pi / 2.0  # Adjust yaw accordingly
+
+        return [center_x, center_y, center_z, bboxlength, bboxwidth, bboxheight, choose_angle]
 
     @property
     def mode(self):
@@ -161,7 +317,8 @@ class SemiDatasetTemplate(torch_data.Dataset):
 
         return data_dict
 
-    def prepare_data_ssl(self, input_data_dict, prepare_for):
+    def prepare_data_ssl(self, input_data_dict, prepare_for, road_plane):
+        
         if 'gt_boxes' in input_data_dict:
             gt_boxes_mask = np.array([n in self.class_names for n in input_data_dict['gt_names']], dtype=np.bool_)
             input_data_dict = {
@@ -174,7 +331,7 @@ class SemiDatasetTemplate(torch_data.Dataset):
         student_data_dict = self.student_augmentor.forward(
             copy.deepcopy(input_data_dict)) if 'student' in prepare_for else None
 
-        for data_dict in [input_data_dict, teacher_data_dict, student_data_dict]:
+        for i, data_dict in enumerate([input_data_dict, teacher_data_dict, student_data_dict]):
             if data_dict is None:
                 continue
 
@@ -195,6 +352,34 @@ class SemiDatasetTemplate(torch_data.Dataset):
             data_dict = self.data_processor.forward(
                 data_dict=data_dict
             )
+
+            if i==0:
+                continue # Skip for data_dict
+            else:
+                pc_lidar = data_dict['points']
+                if road_plane is not None:
+                    all_ground_mask = self.ground_point_removal_only(pc_lidar, road_plane)
+
+                clusters, cluster_labels= self.spatial_clustering_adapted(
+                    pc_lidar=pc_lidar, 
+                    ground_mask=all_ground_mask
+                )
+                data_dict['ground_mask'] = all_ground_mask  
+                data_dict['clusters'] = clusters
+                cluster_boxes = []  # Store KITTI-style boxes
+
+                for cluster_id, point_indices in clusters.items():
+                    cluster_points = pc_lidar[point_indices]
+                    if cluster_points.shape[0] == 0:
+                        continue
+                    
+                    kitti_box = self.fit_bounding_box(cluster_points, road_plane)
+                    kitti_box=torch.tensor(kitti_box)
+                    kitti_box[-1] = common_utils.limit_period(kitti_box[-1], offset=0.5, period=2 * np.pi )
+                    cluster_boxes.append(kitti_box.numpy())  # Append KITTI-style box
+                
+                data_dict['cluster_boxes'] = cluster_boxes
+            
             data_dict.pop('gt_names', None)
 
         return (teacher_data_dict, student_data_dict) if teacher_data_dict or student_data_dict else input_data_dict

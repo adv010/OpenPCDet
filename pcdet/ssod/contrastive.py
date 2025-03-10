@@ -1,7 +1,6 @@
 import torch
 import os
-# os.environ["OPEN3D_RENDERING_BACKEND"] = "osmesa"  #"osmesa"
-# from visual_utils.open3d_vis_utils import Open3DRenderer
+from visual_utils.open3d_vis_utils import Open3DRenderer
 from pcdet.ops.roiaware_pool3d.roiaware_pool3d_utils import points_in_boxes_gpu
 from pcdet.utils.loss_utils import DINOLoss
 from train_utils.semi_utils import transform_aug, load_data_to_gpu
@@ -51,7 +50,7 @@ class Contrastive(nn.Module):
 
         self.mask_gpoint = self.cfgs.MODEL.DINO_HEAD.get('MASK_GPOINTS', False)
 
-        # self.renderer = Open3DRenderer()
+        self.renderer = Open3DRenderer()
     @torch.no_grad()
     def _forward_test_teacher(self, batch_dict):
         # self.pv_rcnn_ema.eval()  # https://github.com/yezhen17/3DIoUMatch-PVRCNN/issues/6
@@ -149,13 +148,6 @@ class Contrastive(nn.Module):
         pl_boxes_sa = transform_aug(pls, batch_dict_wa_ulb, batch_dict_sa_ulb)
         batch_dict_sa_ulb['gt_boxes'] = pl_boxes_sa
 
-        cluster_boxes_sa_lbl = []
-        # cluster_boxes_sa_ulb = []
-        # cluster_boxes_wa_ulb = []
-        cluster_boxes_sa_lbl = self.collate_boxes_from_clusters(batch_dict_sa_lbl)
-        # cluster_boxes_wa_ulb = self.collate_boxes_from_clusters(batch_dict_wa_ulb)
-        # cluster_boxes_sa_ulb = self.collate_boxes_from_clusters(batch_dict_sa_ulb)
-
 
         self._forward_student(batch_dict_sa_lbl)
 
@@ -164,17 +156,32 @@ class Contrastive(nn.Module):
         loss_lbl, tb_dict_lbl, disp_dict_lbl = self.student.get_training_loss()
         loss += loss_lbl * self.cfgs.MODEL.LABELED_WEIGHT
 
-        # # Visualize a labeled scene
-        bs = batch_dict_sa_lbl['batch_size']
+        # # # Visualize a labeled scene
+        # bs = batch_dict_sa_lbl['batch_size']
+        # i = 0
+        # points = batch_dict_sa_lbl['points'][..., 1:4][batch_dict_sa_lbl['points'][:, 0] == i]
+        # points = points.detach().cpu().numpy()
+        # gt_boxes = batch_dict_sa_lbl['gt_boxes'][i, :, :-1]
+        # gt_labels = batch_dict_sa_lbl['gt_boxes'][i,:,-1]
+        # cluster_boxes = cluster_boxes_sa_lbl[i]
+        # gt_boxes = gt_boxes.detach().cpu().numpy()
+        # gt_labels = gt_labels.detach().cpu().numpy()
+        # tb_dict['fig_scene'] = self.render_scene_tb_matplotlib(points, gt_boxes, gt_labels, cluster_boxes)
+
+        # cluster_boxes_wa_ulb, cluster_labels = self.collate_boxes_from_clusters(batch_dict_wa_ulb)      
+        bs = batch_dict_wa_ulb['batch_size']
         i = 0
-        points = batch_dict_sa_lbl['points'][..., 1:4][batch_dict_sa_lbl['points'][:, 0] == i]
+        points = batch_dict_wa_ulb['points'][..., 1:4][batch_dict_wa_ulb['points'][:, 0] == i]
         points = points.detach().cpu().numpy()
-        gt_boxes = batch_dict_sa_lbl['gt_boxes'][i, :, :-1]
-        gt_labels = batch_dict_sa_lbl['gt_boxes'][i,:,-1]
-        cluster_boxes = cluster_boxes_sa_lbl[i]
+        gt_boxes = batch_dict_wa_ulb['rois'][i].view(-1, 7)
         gt_boxes = gt_boxes.detach().cpu().numpy()
+        gt_labels = batch_dict_wa_ulb['roi_labels'][i].view(-1)
         gt_labels = gt_labels.detach().cpu().numpy()
-        tb_dict['fig_scene'] = self.render_scene_tb_matplotlib(points, gt_boxes, gt_labels, cluster_boxes)
+        ground_mask = batch_dict_wa_ulb['ground_mask'][i]
+        cluster_boxes = batch_dict_wa_ulb['cluster_boxes'][i]
+        cluster_labels = np.arange(1, batch_dict_wa_ulb['cluster_boxes'][0].shape[0] + 1)
+        
+        tb_dict['fig_scene'] = self.renderer.render_scene_tb(points, gt_boxes, gt_labels, cluster_boxes, cluster_labels, None, None, None, ground_mask)
 
         for cur_module in self.student.module_list:
             batch_dict_sa_ulb = cur_module(batch_dict_sa_ulb)
@@ -225,20 +232,6 @@ class Contrastive(nn.Module):
             dino_loss = self.dino_loss.forward(s1, s2, t1_centered, t2_centered, cls_weights, keep_mask)
             tb_dict.update({'dino_loss_unlabeled': dino_loss.item()})
             loss += dino_loss * self.cfgs.MODEL.DINO_HEAD.LOSS_CONFIG.LOSS_WEIGHTS.get('dino_loss_weight', 1.0)
-
-            # # Visualize a random scene
-            # bs = batch_dict_wa_ulb['batch_size']
-            # i = 0
-            # points = batch_dict_sa_ulb['points'][..., 1:4][batch_dict_sa_ulb['points'][:, 0] == i]
-            # points = points.detach().cpu().numpy()
-            # sa_roi_labels = sa_roi_labels.view(sa_rois.shape[0],-1)
-            # gt_boxes = sa_rois[i].view(-1, 7)
-            # gt_labels = sa_roi_labels[i].view(-1)
-            # kmask = keep_mask.chunk(bs)[i].view(-1)
-            # gt_boxes = gt_boxes[kmask == 1].detach().cpu().numpy()
-            # gt_labels = gt_labels[kmask == 1].detach().cpu().numpy()
-            # tb_dict['fig_scene'] = self.render_scene_tb_matplotlib(points, gt_boxes, gt_labels)
-
 
             kl_div = F.kl_div(F.log_softmax(s2 / self.dino_loss.student_temp, dim=-1), t1_centered, reduction='batchmean')
             tb_dict.update({'kl_div_t1_s2': kl_div.mean().item()})
@@ -342,93 +335,95 @@ class Contrastive(nn.Module):
         for key, val in source_tb_dict.items():
             target_tb_dict[f"{key}_{postfix}"] = val
 
-    @staticmethod
-    def render_scene_tb_matplotlib(points, gt_boxes=None, gt_labels=None, cluster_boxes=None, cluster_labels=-1,point_colors=None):
-        """
-        Renders a BEV visualization of a point cloud and optional 3D bounding boxes using Matplotlib.
+    # @staticmethod
+    # def render_scene_tb_matplotlib(points, gt_boxes=None, gt_labels=None, cluster_boxes=None, cluster_labels=-1,point_colors=None):
+    #     """
+    #     Renders a BEV visualization of a point cloud and optional 3D bounding boxes using Matplotlib.
 
-        Args:
-            points (np.ndarray): An (N,4) array of points. We use the first two columns (x,y) for the BEV.
-            gt_boxes (np.ndarray, optional): An (M,7) array of bounding boxes in the format 
-                [center_x, center_y, center_z, width, length, height, yaw]. If provided, boxes are drawn.
-            gt_labels (list or np.ndarray, optional): A list or array of labels corresponding to gt_boxes.
-            point_colors (np.ndarray, optional): An (N,3) array of RGB values (each in [0,1]) for the points.
+    #     Args:
+    #         points (np.ndarray): An (N,4) array of points. We use the first two columns (x,y) for the BEV.
+    #         gt_boxes (np.ndarray, optional): An (M,7) array of bounding boxes in the format 
+    #             [center_x, center_y, center_z, width, length, height, yaw]. If provided, boxes are drawn.
+    #         gt_labels (list or np.ndarray, optional): A list or array of labels corresponding to gt_boxes.
+    #         point_colors (np.ndarray, optional): An (N,3) array of RGB values (each in [0,1]) for the points.
         
-        Returns:
-            fig (matplotlib.figure.Figure): The resulting figure.
-        """
-        fig, ax = plt.subplots(figsize=(10, 10))
+    #     Returns:
+    #         fig (matplotlib.figure.Figure): The resulting figure.
+    #     """
+    #     fig, ax = plt.subplots(figsize=(10, 10))
         
-        # Plot the point cloud in BEV using x and y coordinates.
-        if point_colors is None:
-            ax.scatter(points[:, 0], points[:, 1], s=1, c='black', alpha=0.5)
-        else:
-            ax.scatter(points[:, 0], points[:, 1], s=1, c=point_colors, alpha=0.5)
+    #     # Plot the point cloud in BEV using x and y coordinates.
+    #     if point_colors is None:
+    #         ax.scatter(points[:, 0], points[:, 1], s=1, c='black', alpha=0.5)
+    #     else:
+    #         ax.scatter(points[:, 0], points[:, 1], s=1, c=point_colors, alpha=0.5)
         
-        # If ground truth boxes are provided, overlay them.
-        if gt_boxes is not None:
-            for i, box in enumerate(gt_boxes):
-                # Box format: [x, y, z, dx, dy, dz, yaw]
-                x, y, z, dx, dy, dz, yaw = box
-                # Define the 4 corners of the box in local coordinates (BEV only)
-                corners = np.array([
-                    [-dx/2, -dy/2],
-                    [ dx/2, -dy/2],
-                    [ dx/2,  dy/2],
-                    [-dx/2,  dy/2]
-                ])
-                # Create a 2D rotation matrix for the yaw angle
-                R = np.array([[np.cos(yaw), -np.sin(yaw)],
-                            [np.sin(yaw),  np.cos(yaw)]])
-                # Rotate and translate corners to global BEV coordinates
-                rotated_corners = (R @ corners.T).T + np.array([x, y])
+    #     # If ground truth boxes are provided, overlay them.
+    #     if gt_boxes is not None:
+    #         for i, box in enumerate(gt_boxes):
+    #             # Box format: [x, y, z, dx, dy, dz, yaw]
+    #             x, y, z, dx, dy, dz, yaw = box
+    #             # Define the 4 corners of the box in local coordinates (BEV only)
+    #             corners = np.array([
+    #                 [-dx/2, -dy/2],
+    #                 [ dx/2, -dy/2],
+    #                 [ dx/2,  dy/2],
+    #                 [-dx/2,  dy/2]
+    #             ])
+    #             # Create a 2D rotation matrix for the yaw angle
+    #             R = np.array([[np.cos(yaw), -np.sin(yaw)],
+    #                         [np.sin(yaw),  np.cos(yaw)]])
+    #             # Rotate and translate corners to global BEV coordinates
+    #             rotated_corners = (R @ corners.T).T + np.array([x, y])
                 
-                # Create and add the polygon patch for the box
-                poly = plt.Polygon(rotated_corners, fill=False, edgecolor='green', linewidth=2)
-                ax.add_patch(poly)
+    #             # Create and add the polygon patch for the box
+    #             poly = plt.Polygon(rotated_corners, fill=False, edgecolor='green', linewidth=2)
+    #             ax.add_patch(poly)
                 
-                # Optionally, add a label at the box center
-                if gt_labels is not None:
-                    ax.text(x, y, str(gt_labels[i]), color='green', fontsize=12,
-                            ha='center', va='center')
+    #             # Optionally, add a label at the box center
+    #             if gt_labels is not None:
+    #                 ax.text(x, y, str(gt_labels[i]), color='green', fontsize=12,
+    #                         ha='center', va='center')
                     
-        # Draw cluster boxes in purple.
-        if cluster_boxes is not None:
-            for i, box in enumerate(cluster_boxes):
-                x, y, z, dx, dy, dz, yaw = box
-                corners = np.array([
-                    [-dx/2, -dy/2],
-                    [ dx/2, -dy/2],
-                    [ dx/2,  dy/2],
-                    [-dx/2,  dy/2]
-                ])
-                R = np.array([[np.cos(yaw), -np.sin(yaw)],
-                            [np.sin(yaw),  np.cos(yaw)]])
-                rotated_corners = (R @ corners.T).T + np.array([x, y])
-                poly = plt.Polygon(rotated_corners, fill=False, edgecolor='purple', linewidth=2)
-                ax.add_patch(poly)
+    #     # Draw cluster boxes in purple.
+    #     if cluster_boxes is not None:
+    #         for i, box in enumerate(cluster_boxes):
+    #             x, y, z, dx, dy, dz, yaw = box
+    #             corners = np.array([
+    #                 [-dx/2, -dy/2],
+    #                 [ dx/2, -dy/2],
+    #                 [ dx/2,  dy/2],
+    #                 [-dx/2,  dy/2]
+    #             ])
+    #             R = np.array([[np.cos(yaw), -np.sin(yaw)],
+    #                         [np.sin(yaw),  np.cos(yaw)]])
+    #             rotated_corners = (R @ corners.T).T + np.array([x, y])
+    #             poly = plt.Polygon(rotated_corners, fill=False, edgecolor='purple', linewidth=2)
+    #             ax.add_patch(poly)
                 
-                if cluster_labels ==-1:  # no cluster_labels_assigned
-                    cluster_labels = [-1] * len(cluster_boxes)
-                    ax.text(x, y, str(cluster_labels[i]), color='purple', fontsize=12,
-                            ha='center', va='center')
+    #             if cluster_labels ==-1:  # no cluster_labels_assigned
+    #                 cluster_labels = [-1] * len(cluster_boxes)
+    #                 ax.text(x, y, str(cluster_labels[i]), color='purple', fontsize=12,
+    #                         ha='center', va='center')
 
-        ax.set_xlabel("X (m)")
-        ax.set_ylabel("Y (m)")
-        ax.set_title("BEV Visualization")
-        ax.set_aspect('equal', adjustable='box')
-        return fig
+    #     ax.set_xlabel("X (m)")
+    #     ax.set_ylabel("Y (m)")
+    #     ax.set_title("BEV Visualization")
+    #     ax.set_aspect('equal', adjustable='box')
+    #     return fig
 
-    @staticmethod
-    def collate_boxes_from_clusters(batch_dict):
-        collated_boxes = []  # list to hold tensor of boxes for each batch index
-        for clusters in batch_dict['clusters']:
-            boxes_list = []
-            for i in range(len(clusters)):
-                 boxes_list.append(clusters[i].box_7d)
-            if boxes_list:
-                boxes_tensor = torch.tensor(np.stack(boxes_list), dtype=torch.float32)
-            else:
-                boxes_tensor = torch.empty((0, 7), dtype=torch.float32)
-            collated_boxes.append(boxes_tensor)
-        return collated_boxes
+    # @staticmethod
+    # def collate_boxes_from_clusters(batch_dict):
+    #     print(batch_dict.keys())
+    #     collated_boxes = []  # list to hold tensor of boxes for each batch index
+    #     collated_labels = []
+    #     for clusters in batch_dict['clusters']:
+    #         boxes_list = []
+    #         for i in range(len(clusters)):
+    #              boxes_list.append(clusters[i].box_7d)
+    #         if boxes_list:
+    #             boxes_tensor = torch.tensor(np.stack(boxes_list), dtype=torch.float32)
+    #         else:
+    #             boxes_tensor = torch.empty((0, 7), dtype=torch.float32)
+    #         collated_boxes.append(boxes_tensor)
+    #     return collated_boxes

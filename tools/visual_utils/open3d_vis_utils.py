@@ -134,7 +134,7 @@ class Open3DRenderer:
         self.scene.camera.look_at(box_center, eye, up)
 
     def render_scene_tb(self, points, gt_boxes=None, gt_labels=None, ref_boxes=None, ref_labels=None,
-                            ref_scores=None, attributes=None, point_colors=None, draw_origin=True):
+                            ref_scores=None, attributes=None, point_colors=None, ground_mask=None, draw_origin=True):
         self.scene.clear_geometry()
 
         # Compute dynamic camera position
@@ -149,9 +149,12 @@ class Open3DRenderer:
         cloud.points = open3d.utility.Vector3dVector(points[:, :3])
 
         if point_colors is None:
-            cloud.colors = open3d.utility.Vector3dVector(np.zeros((points.shape[0], 3)))
-        else:
-            cloud.colors = open3d.utility.Vector3dVector(point_colors)
+            point_colors = np.zeros((points.shape[0], 3))  # Initialize black colors if None
+
+        if ground_mask is not None and ground_mask.shape[0] == points.shape[0]:
+            point_colors[ground_mask] = [1, 0, 1]  # Set ground points to purple (RGB)
+
+        cloud.colors = open3d.utility.Vector3dVector(point_colors)  # Assign colors to Open3D cloud
 
         self.scene.add_geometry("PointCloud", cloud, self.point_material)
 
