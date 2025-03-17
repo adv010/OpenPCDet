@@ -11,7 +11,7 @@ from .processor.data_processor import DataProcessor
 from .processor.point_feature_encoder import PointFeatureEncoder
 import hdbscan
 import torch
-
+from sklearn.linear_model import RANSACRegressor
 class SemiDatasetTemplate(torch_data.Dataset):
     def __init__(self, dataset_cfg=None, class_names=None, training=True, root_path=None, logger=None):
         super().__init__()
@@ -77,7 +77,7 @@ class SemiDatasetTemplate(torch_data.Dataset):
             'Step1__range_threshold': 60,
             'Step1__x_range_threshold': 70.4,
             'Step1__y_range_threshold': 40,
-            'Step2__clustersize_threshold': 5,
+            'Step2__clustersize_threshold': 3,
             'Step2__cluster_selection_epsilon': 0.5,
             'Step3__num_cones': 8,
             'Step4__length_max_threshold': 6,
@@ -93,13 +93,59 @@ class SemiDatasetTemplate(torch_data.Dataset):
     def ground_point_removal_only(self, pc, road_plane, hyperparameters=None):
         if hyperparameters is None:
             hyperparameters = self.groundremoval_hyperparameters_kitti
-        dmax_thres = hyperparameters.get('Step3__dmax_thres', 0.30)
-        pc_cam = pc # (N,3)
+        # KITTI LiDAR frame: (X forward, Y left, Z up)
+        pc_cam = pc  # (N, 4)
         a, b, c, d = road_plane
-        expected_y = (-d - a * pc_cam[:, 0] - c * pc_cam[:, 2]) / b     # The plane equation is: a*x + b*y + c*z + d = 0  ->  y = -(d + a*x + c*z)/b
-        diff_y = np.abs(pc_cam[:, 1] - expected_y)    # Compute the absolute difference between the actual y and the expected ground y.
-        boolall_ground = diff_y <= dmax_thres
+        expected_z = (-d - a * pc_cam[:, 0] - b * pc_cam[:, 1]) / c  
+        # Compute absolute height difference
+        diff_z = np.abs(pc_cam[:, 2] - expected_z)    
+        threshold = np.mean(diff_z)
+        boolall_ground = diff_z <= threshold
         return boolall_ground
+
+    def ground_point_removal_ransac_sklearn(self, pc, distance_threshold=0.2):
+        """
+        Uses sklearn's RANSACRegressor to estimate the ground plane and remove ground points.
+        
+        Args:
+            pc (numpy.ndarray): (N, 4) point cloud in KITTI LiDAR coordinates (X forward, Y left, Z up, intensity).
+            distance_threshold (float): Maximum residual for a point to be considered an inlier.
+
+        Returns:
+            bool_ground_mask (numpy.ndarray): Boolean mask (True for ground points, False for non-ground).
+            plane_parameters (numpy.ndarray): Normalized ground plane parameters (a, b, c, d).
+        """
+        # Extract X, Y, Z coordinates
+        X_train = pc[:, [0, 1]]  # Use (x, y) as features
+        y_train = pc[:, 2]       # Use z as the target (height)
+
+        # Fit RANSAC model for ground plane estimation
+        ransac = RANSACRegressor(min_samples=3, residual_threshold=distance_threshold)
+        ransac.fit(X_train, y_train)
+
+        # Get plane parameters
+        a, b = ransac.estimator_.coef_  # Coefficients for x and y
+        c = -1                           # Normalized z coefficient
+        d = ransac.estimator_.intercept_  # Intercept term
+
+        # Store in NumPy array
+        plane_parameters = np.array([a, b, c, d])
+
+        # Normalize the plane normal (a, b, c)
+        plane_parameters = -plane_parameters / np.linalg.norm(plane_parameters[:3])
+
+        # Compute expected Z values for each point
+        expected_z = (plane_parameters[0] * pc[:, 0] +
+                    plane_parameters[1] * pc[:, 1] +
+                    plane_parameters[3]) / -plane_parameters[2]
+
+        # Compute absolute difference in Z height
+        diff_z = np.abs(pc[:, 2] - expected_z)
+
+        # Apply thresholding to identify ground points
+        bool_ground_mask = diff_z <= distance_threshold
+
+        return bool_ground_mask, plane_parameters
 
     def spatial_clustering_adapted(self, pc_lidar: np.ndarray,
                                 ground_mask: np.ndarray,
@@ -154,6 +200,33 @@ class SemiDatasetTemplate(torch_data.Dataset):
                 continue 
             cluster_indices = ids_inlier[cluster_labels == label]
             cluster_dict[label] = cluster_indices
+
+        # # Flatten all cluster indices into a single list
+        # all_indices = [idx for indices in cluster_dict.values() for idx in indices]
+
+        # # Convert to a set and check uniqueness
+        # are_unique = len(all_indices) == len(set(all_indices))
+        # print("Are all clusters unique (no shared indices)?", are_unique)
+
+
+        # from collections import Counter
+
+        # # Count occurrences of each index
+        # index_counts = Counter(all_indices)
+
+        # # Find max shared occurrences (should be >1 if indices are shared)
+        # max_shared = max(index_counts.values()) if not are_unique else 0
+        # print("Max points shared between any two clusters:", max_shared)
+
+        # tolerance = 100  # Allowable error range
+        # expected_total = len(full_labels) + ground_mask.sum()
+        ## total_clustered_points = sum(len(indices) for indices in cluster_dict.values())
+
+        # is_within_tolerance = abs(total_clustered_points - expected_total) <= tolerance
+
+        # print("Total clustered points:", total_clustered_points)
+        # print("Expected total (PC points + ground points):", expected_total)
+        # print(f"Does sum of clustered points match within ±{tolerance}?", is_within_tolerance)
 
         return cluster_dict, full_labels
 
@@ -358,13 +431,15 @@ class SemiDatasetTemplate(torch_data.Dataset):
             else:
                 pc_lidar = data_dict['points']
                 if road_plane is not None:
-                    all_ground_mask = self.ground_point_removal_only(pc_lidar, road_plane)
-
+                    best_fit_plane = road_plane
+                all_ground_mask = self.ground_point_removal_only(pc_lidar, best_fit_plane)
+                ransac_ground_mask, plane_parameters  = self.ground_point_removal_ransac_sklearn (pc_lidar)
                 clusters, cluster_labels= self.spatial_clustering_adapted(
                     pc_lidar=pc_lidar, 
-                    ground_mask=all_ground_mask
+                    ground_mask=ransac_ground_mask
                 )
                 data_dict['ground_mask'] = all_ground_mask  
+                data_dict['ransac_ground_mask'] = ransac_ground_mask
                 data_dict['clusters'] = clusters
                 cluster_boxes = []  # Store KITTI-style boxes
 
@@ -372,7 +447,6 @@ class SemiDatasetTemplate(torch_data.Dataset):
                     cluster_points = pc_lidar[point_indices]
                     if cluster_points.shape[0] == 0:
                         continue
-                    
                     kitti_box = self.fit_bounding_box(cluster_points, road_plane)
                     kitti_box=torch.tensor(kitti_box)
                     kitti_box[-1] = common_utils.limit_period(kitti_box[-1], offset=0.5, period=2 * np.pi )

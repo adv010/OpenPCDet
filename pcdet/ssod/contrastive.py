@@ -169,19 +169,83 @@ class Contrastive(nn.Module):
         # tb_dict['fig_scene'] = self.render_scene_tb_matplotlib(points, gt_boxes, gt_labels, cluster_boxes)
 
         # cluster_boxes_wa_ulb, cluster_labels = self.collate_boxes_from_clusters(batch_dict_wa_ulb)      
-        bs = batch_dict_wa_ulb['batch_size']
-        i = 0
-        points = batch_dict_wa_ulb['points'][..., 1:4][batch_dict_wa_ulb['points'][:, 0] == i]
-        points = points.detach().cpu().numpy()
-        gt_boxes = batch_dict_wa_ulb['rois'][i].view(-1, 7)
-        gt_boxes = gt_boxes.detach().cpu().numpy()
-        gt_labels = batch_dict_wa_ulb['roi_labels'][i].view(-1)
-        gt_labels = gt_labels.detach().cpu().numpy()
-        ground_mask = batch_dict_wa_ulb['ground_mask'][i]
-        cluster_boxes = batch_dict_wa_ulb['cluster_boxes'][i]
-        cluster_labels = np.arange(1, batch_dict_wa_ulb['cluster_boxes'][0].shape[0] + 1)
+        # bs = batch_dict_wa_ulb['batch_size']
+        # i = 0
+        # points = batch_dict_wa_ulb['points'][..., 1:4][batch_dict_wa_ulb['points'][:, 0] == i]
+        # points = points.detach().cpu().numpy()
+        # gt_boxes = batch_dict_wa_ulb['rois'][i].view(-1, 7)
+        # gt_boxes = gt_boxes.detach().cpu().numpy()
+        # gt_labels = batch_dict_wa_ulb['roi_labels'][i].view(-1)
+        # gt_labels = gt_labels.detach().cpu().numpy()
+        # ground_mask = batch_dict_wa_ulb['ground_mask'][i]
+        # ransac_ground_mask = batch_dict_wa_ulb['ransac_ground_mask'][i].detach().cpu().numpy()
+        # frame_id = batch_dict_wa_ulb['frame_id'][i]
+        # cluster_boxes = batch_dict_wa_ulb['cluster_boxes'][i]
+        # cluster_labels = np.arange(1, batch_dict_wa_ulb['cluster_boxes'][0].shape[0] + 1)
         
-        tb_dict['fig_scene'] = self.renderer.render_scene_tb(points, gt_boxes, gt_labels, cluster_boxes, cluster_labels, None, None, None, ground_mask)
+        # # tb_dict['fig_scene'] = self.renderer.render_scene_tb(points, gt_boxes, gt_labels, cluster_boxes, cluster_labels, None, None, None, ground_mask)
+        # tb_dict['fig_unlabel_wa_scene'] = self.renderer.render_scene_tb(points, None, None, cluster_boxes, cluster_labels,None, None, None, ground_mask, ransac_ground_mask, frame_id)
+
+        # bs = batch_dict_sa_ulb['batch_size']
+        # i = 0
+        # points = batch_dict_sa_ulb['points'][..., 1:4][batch_dict_sa_ulb['points'][:, 0] == i]
+        # points = points.detach().cpu().numpy()
+        # # gt_boxes = batch_dict_sa_ulb['rois'][i].view(-1, 7)
+        # # gt_boxes = gt_boxes.detach().cpu().numpy()
+        # # gt_labels = batch_dict_sa_ulb['roi_labels'][i].view(-1)
+        # # gt_labels = gt_labels.detach().cpu().numpy()
+        # ground_mask = batch_dict_sa_ulb['ground_mask'][i]
+        # ransac_ground_mask = batch_dict_sa_ulb['ransac_ground_mask'][i].detach().cpu().numpy()
+        # frame_id =  batch_dict_sa_ulb['frame_id'][i]
+        # # cluster_boxes = batch_dict_sa_ulb['cluster_boxes'][i]
+        # # cluster_labels = np.arange(1, batch_dict_sa_ulb['cluster_boxes'][0].shape[0] + 1)
+        
+        # # tb_dict['fig_scene'] = self.renderer.render_scene_tb(points, gt_boxes, gt_labels, cluster_boxes, cluster_labels, None, None, None, ground_mask)
+        # tb_dict['fig_unlabel_sa_scene'] = self.renderer.render_scene_tb(points, None, None, cluster_boxes, cluster_labels, None, None, None, ground_mask, ransac_ground_mask, frame_id)
+
+        # bs = batch_dict_wa_lbl['batch_size']
+        # i = 0
+        # points = batch_dict_wa_lbl['points'][..., 1:4][batch_dict_wa_lbl['points'][:, 0] == i]
+        # # gt_boxes = batch_dict_sa_lbl['rois'][i].view(-1, 7)
+        # # gt_boxes = gt_boxes.detach().cpu().numpy()
+        # # gt_labels = batch_dict_sa_lbl['roi_labels'][i].view(-1)
+        # # gt_labels = gt_labels.detach().cpu().numpy()
+        # ground_mask = batch_dict_wa_lbl['ground_mask'][i]
+        # ransac_ground_mask = batch_dict_wa_lbl['ransac_ground_mask'][i]
+        # frame_id = batch_dict_wa_lbl['frame_id'][i]
+        # cluster_boxes = batch_dict_wa_lbl['cluster_boxes'][i]
+        # cluster_labels = np.arange(1, batch_dict_wa_lbl['cluster_boxes'][0].shape[0] + 1)
+        
+        # # # tb_dict['fig_scene'] = self.renderer.render_scene_tb(points, gt_boxes, gt_labels, cluster_boxes, cluster_labels, None, None, None, ground_mask)
+        # tb_dict['fig_label_wa_scene'] = self.renderer.render_scene_tb(points,  None, None, cluster_boxes, cluster_labels, None, None, None, ground_mask, ransac_ground_mask, frame_id)
+
+        bs = batch_dict_sa_lbl['batch_size']
+        i = 0
+        points = batch_dict_sa_lbl['points'][..., 1:4][batch_dict_sa_lbl['points'][:, 0] == i]
+        points = points.detach().cpu().numpy()
+        # gt_boxes = batch_dict_sa_lbl['rois'][i].view(-1, 7)
+        # gt_boxes = gt_boxes.detach().cpu().numpy()
+        # gt_labels = batch_dict_sa_lbl['roi_labels'][i].view(-1)
+        # gt_labels = gt_labels.detach().cpu().numpy()
+        ground_mask = batch_dict_sa_lbl['ground_mask'][i]
+        ransac_ground_mask = batch_dict_sa_lbl['ransac_ground_mask'][i].detach().cpu().numpy()
+        frame_id = batch_dict_sa_lbl['frame_id'][i]
+        cluster_boxes = batch_dict_sa_lbl['cluster_boxes'][i]
+        cluster_labels = np.arange(1, batch_dict_sa_lbl['cluster_boxes'][0].shape[0] + 1)
+        
+        # # tb_dict['fig_scene'] = self.renderer.render_scene_tb(points, gt_boxes, gt_labels, cluster_boxes, cluster_labels, None, None, None, ground_mask)
+        tb_dict['fig_label_sa_scene'] = self.renderer.render_scene_tb(points,  None, None, cluster_boxes, cluster_labels, None, None, None, ground_mask, ransac_ground_mask, frame_id)
+
+
+        ## Extracting features for clustered points
+        ## Example code below to utilize full clustering pipeline
+        #  NOTE: GETTING EMPTY Features currently.. logic probably incorrect
+        cluster_features = []
+        for idx, val in enumerate(batch_dict_sa_lbl['cluster_boxes']):
+            cluster_points = batch_dict_sa_lbl['points'][batch_dict_sa_lbl['clusters'][0][idx]][:,1:4]
+            with torch.no_grad():
+                cluster_features_cur = self.student.pfe.interpolate_from_bev_features(cluster_points,batch_dict_sa_lbl['spatial_features'], batch_dict_sa_lbl['batch_size'],batch_dict_sa_lbl['spatial_features_stride'])
+                cluster_features.append(cluster_features_cur)
 
         for cur_module in self.student.module_list:
             batch_dict_sa_ulb = cur_module(batch_dict_sa_ulb)

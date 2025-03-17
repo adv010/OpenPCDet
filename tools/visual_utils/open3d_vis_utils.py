@@ -134,7 +134,7 @@ class Open3DRenderer:
         self.scene.camera.look_at(box_center, eye, up)
 
     def render_scene_tb(self, points, gt_boxes=None, gt_labels=None, ref_boxes=None, ref_labels=None,
-                            ref_scores=None, attributes=None, point_colors=None, ground_mask=None, draw_origin=True):
+                            ref_scores=None, attributes=None, point_colors=None, ground_mask=None, ransac_ground_mask =  None, frame_id=None,draw_origin=True):
         self.scene.clear_geometry()
 
         # Compute dynamic camera position
@@ -151,8 +151,17 @@ class Open3DRenderer:
         if point_colors is None:
             point_colors = np.zeros((points.shape[0], 3))  # Initialize black colors if None
 
-        if ground_mask is not None and ground_mask.shape[0] == points.shape[0]:
-            point_colors[ground_mask] = [1, 0, 1]  # Set ground points to purple (RGB)
+        if ransac_ground_mask is not None and ransac_ground_mask.shape[0] == points.shape[0]:
+            ransac_ground_mask = ransac_ground_mask.astype(bool)
+            points[ransac_ground_mask, 2] -= 0.05
+            point_colors[ransac_ground_mask] = [1, 1, 0]  # Set ransac ground points to cyan (RGB)
+
+
+        # if ground_mask is not None and ground_mask.shape[0] == points.shape[0]:
+        #     points[ground_mask, 2] -= 0.05  
+        #     point_colors[ground_mask] = [1, 0, 1]  # Set ground points to purple (RGB)
+
+
 
         cloud.colors = open3d.utility.Vector3dVector(point_colors)  # Assign colors to Open3D cloud
 
@@ -172,10 +181,9 @@ class Open3DRenderer:
 
         # Render the Open3D scene
         img = self.renderer.render_to_image()
-        img_np = np.asarray(img)
-        img_np = cv2.cvtColor(img_np, cv2.COLOR_BGRA2RGB)  # Convert BGRA -> RGB
-
-        return self.numpy_to_figure(img_np)
+        # img_np = self.blend_with_transparency(img)
+        img_np = cv2.cvtColor( np.asarray(img), cv2.COLOR_BGRA2RGB)  # Convert BGRA -> RGB
+        return self.numpy_to_figure(img_np, frame_id)
 
     def render_scene(self, points, gt_box=None):
         """Updates the scene and renders an image with correctly rotated bounding boxes."""
@@ -218,13 +226,36 @@ class Open3DRenderer:
 
         return cv2.cvtColor(img_np, cv2.COLOR_BGRA2RGB) if img_np is not None else None
 
-    def numpy_to_figure(self, image):
+    def numpy_to_figure(self, image, frame_id):
         """Converts a NumPy image into a Matplotlib figure."""
         self.ax.clear()
         self.ax.imshow(image)
         self.ax.axis("off")
+        # Add a box with the frame_id at the top right
+        box_props = dict(boxstyle="round,pad=0.3", edgecolor="black", facecolor="white", alpha=0.7)
+        self.ax.text(image.shape[1] - 10, 10, f"Frame: {frame_id}", 
+                    fontsize=12, bbox=box_props, color="black",
+                    verticalalignment='top', horizontalalignment='right')
+
         self.fig.canvas.draw()  # Ensure the figure updates
         return self.fig
+
+
+    def blend_with_transparency(self, img, alpha=0.5):
+        """Simulate transparency by blending purple overlay on specific pixels."""
+        # Ensure the image has 3 color channels (RGB)
+        img_np = np.asarray(img)
+        if img_np.shape[-1] != 3:
+            raise ValueError("Input image must have 3 color channels (RGB).")
+        # Create a purple overlay with the same shape as img_np
+        overlay = np.full(img_np.shape, (255, 0, 255), dtype=np.uint8)  # (H, W, 3)
+        # Identify purple pixels in the image
+        mask = (img_np[..., 0] == 255) & (img_np[..., 2] == 255)  # Where Red & Blue = 255
+        # Ensure mask is broadcastable to RGB channels
+        mask_3ch = np.stack([mask] * 3, axis=-1)  # Convert (H, W) -> (H, W, 3)
+        img_np[mask_3ch] = cv2.addWeighted(img_np[mask_3ch], 1 - alpha, overlay[mask_3ch], alpha, 0)
+        # Apply alpha blending only on purple pixels        img_np[mask_3ch] = cv2.addWeighted(img_np[mask_3ch], 1 - alpha, overlay[mask_3ch], alpha, 0)
+        return img_np
 
     # Doesn't work currently
     def create_bbox_grid(self, points, gt_boxes):
